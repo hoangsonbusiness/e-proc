@@ -90,10 +90,12 @@ router.post('/exam/start', async (req, res) => {
                 return res.json({ success: true, questions_count: 0, resume: true });
             }
         }
-        // Auto-reset: Xóa exam_questions cũ nếu status = pending (phòng trường hợp có dữ liệu cũ)
-        if (student.status === 'pending') {
-            await db.query('DELETE FROM exam_questions WHERE student_id = ?', [student_id]);
-            console.log('[startExam] Auto-reset: Xóa exam_questions cũ (nếu có)');
+        else {
+            // Auto-reset: Xóa exam_questions cũ nếu status = pending (phòng trường hợp có dữ liệu cũ)
+            if (student.status === 'pending') {
+                await db.query('DELETE FROM exam_questions WHERE student_id = ?', [student_id]);
+                console.log('[startExam] Auto-reset: Xóa exam_questions cũ (nếu có)');
+            }
         }
         const batchResult = await db.query('SELECT blueprint FROM batches WHERE id = ?', [student.batch_id]);
         const batch = batchResult.rows[0];
