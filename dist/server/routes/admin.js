@@ -453,6 +453,18 @@ router.get('/batches/:id/results/export', async (req, res) => {
 });
 router.get('/settings/ai', async (req, res) => {
     try {
+        if (!USE_SQLITE) {
+            await db.query(`
+        CREATE TABLE IF NOT EXISTS ai_settings (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL,
+          apiKey TEXT,
+          model TEXT NOT NULL,
+          temperature REAL DEFAULT 0.3,
+          maxTokens INTEGER DEFAULT 2048
+        )
+      `);
+        }
         const result = await db.query('SELECT * FROM ai_settings LIMIT 1');
         if (result.rows.length > 0) {
             res.json(result.rows[0]);
@@ -474,20 +486,44 @@ router.get('/settings/ai', async (req, res) => {
 router.post('/settings/ai', async (req, res) => {
     try {
         const { provider, apiKey, model, temperature, maxTokens } = req.body;
-        await db.query(`
-      CREATE TABLE IF NOT EXISTS ai_settings (
-        id INTEGER PRIMARY KEY,
-        provider TEXT NOT NULL,
-        apiKey TEXT,
-        model TEXT NOT NULL,
-        temperature REAL DEFAULT 0.3,
-        maxTokens INTEGER DEFAULT 2048
-      )
-    `);
-        await db.query(`
-      INSERT OR REPLACE INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens)
-      VALUES (1, ?, ?, ?, ?, ?)
-    `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048]);
+        if (USE_SQLITE) {
+            await db.query(`
+        CREATE TABLE IF NOT EXISTS ai_settings (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL,
+          apiKey TEXT,
+          model TEXT NOT NULL,
+          temperature REAL DEFAULT 0.3,
+          maxTokens INTEGER DEFAULT 2048
+        )
+      `);
+            await db.query(`
+        INSERT OR REPLACE INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens)
+        VALUES (1, ?, ?, ?, ?, ?)
+      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048]);
+        }
+        else {
+            await db.query(`
+        CREATE TABLE IF NOT EXISTS ai_settings (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL,
+          apiKey TEXT,
+          model TEXT NOT NULL,
+          temperature REAL DEFAULT 0.3,
+          maxTokens INTEGER DEFAULT 2048
+        )
+      `);
+            await db.query(`
+        INSERT INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens)
+        VALUES (1, $1, $2, $3, $4, $5)
+        ON CONFLICT (id) DO UPDATE SET
+          provider = EXCLUDED.provider,
+          apiKey = EXCLUDED.apiKey,
+          model = EXCLUDED.model,
+          temperature = EXCLUDED.temperature,
+          maxTokens = EXCLUDED.maxTokens
+      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048]);
+        }
         res.json({ success: true });
     }
     catch (error) {
