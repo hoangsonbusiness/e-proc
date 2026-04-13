@@ -57,10 +57,10 @@ function StudentExam() {
         
         console.log('[Exam] Start result:', res.data);
         
-        if (res.data.success) {
-          setStarted(true);
-          loadQuestions();
-        }
+        setStarted(true);
+        
+        // Wait for questions to be generated then load
+        setTimeout(() => loadQuestions(), 1000);
       } catch (error: any) {
         console.error('[Exam] Error:', error);
         alert('Error: ' + (error.response?.data?.error || error.message));

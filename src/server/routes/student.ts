@@ -110,8 +110,8 @@ router.post('/exam/start', async (req: Request, res: Response) => {
       if (existingQuestions.rows[0].count === 0) {
         console.log('[startExam] Resume but no questions, generating...');
       } else {
-        console.log('[startExam] Resume exam for student in_progress');
-        return res.json({ success: true, questions_count: 0, resume: true });
+        console.log('[startExam] Resume exam for student in_progress, questions:', existingQuestions.rows[0].count);
+        return res.json({ success: true, questions_count: existingQuestions.rows[0].count, resume: true });
       }
     } else {
       // Auto-reset: Xóa exam_questions cũ nếu status = pending (phòng trường hợp có dữ liệu cũ)
