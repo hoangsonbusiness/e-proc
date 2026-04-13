@@ -288,7 +288,9 @@ router.post('/batches/:id/students/import', async (req, res) => {
         const students = [];
         const batchResult = await db.query('SELECT blueprint FROM batches WHERE id = ?', [batchId]);
         const batch = batchResult.rows[0];
+        console.log('[Import Students] batch:', batch);
         const blueprint = batch?.blueprint ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint) : [];
+        console.log('[Import Students] blueprint:', blueprint);
         for (const email of emails) {
             const code = generateCode();
             const studentResult = await db.query(`
@@ -296,11 +298,18 @@ router.post('/batches/:id/students/import', async (req, res) => {
         VALUES (?, ?, ?, 'pending')
         RETURNING id
       `, [batchId, email.trim(), code]);
-            const studentId = studentResult.rows[0].id;
+            console.log('[Import Students] studentResult:', studentResult);
+            const studentId = studentResult.rows[0]?.id;
+            console.log('[Import Students] studentId:', studentId);
+            if (!studentId) {
+                console.log('[Import Students] ERROR: Could not get student ID');
+                continue;
+            }
             const questionIds = [];
             for (const item of blueprint) {
                 for (const level of ['Easy', 'Medium', 'Hard']) {
                     const count = item[level.toLowerCase()];
+                    console.log('[Import Students] module:', item.module, 'level:', level, 'count:', count);
                     if (count > 0) {
                         const availableResult = await db.query(`
               SELECT id FROM question_bank
@@ -308,12 +317,14 @@ router.post('/batches/:id/students/import', async (req, res) => {
               ORDER BY RANDOM()
               LIMIT ?
             `, [item.module, level, count]);
+                        console.log('[Import Students] found questions:', availableResult.rows.length);
                         for (const q of availableResult.rows) {
                             questionIds.push(q.id);
                         }
                     }
                 }
             }
+            console.log('[Import Students] total questionIds:', questionIds.length);
             for (let i = 0; i < questionIds.length; i++) {
                 await db.query(`
           INSERT INTO exam_questions (student_id, question_id, question_order)
