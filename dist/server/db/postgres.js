@@ -19,8 +19,8 @@ async function initPostgres() {
         connectionString: process.env.DATABASE_URL,
         max: poolMax,
         min: poolMin,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 15000,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 5000,
         ssl: { rejectUnauthorized: false }
     });
     pgPool.on('error', (err) => console.error('[DB] Pool error:', err.message));
