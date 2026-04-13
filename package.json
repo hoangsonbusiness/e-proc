@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx src/server/server.ts",
-    "build": "cd client && npm install && node node_modules/vite/bin/vite.js build",
+    "build": "cd client && npm install && npm run build",
     "start": "node dist/server/index.js"
   },
   "dependencies": {
