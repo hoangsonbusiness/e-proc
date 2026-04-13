@@ -322,12 +322,45 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     const batchId = parseInt(id);
     const students: {email: string; code: string}[] = [];
     
+    const batchResult = await db.query('SELECT blueprint FROM batches WHERE id = ?', [batchId]);
+    const batch = batchResult.rows[0];
+    const blueprint = batch?.blueprint ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint) : [];
+    
     for (const email of emails) {
       const code = generateCode();
-      await db.query(`
+      const studentResult = await db.query(`
         INSERT INTO students (batch_id, email, access_code, status)
         VALUES (?, ?, ?, 'pending')
+        RETURNING id
       `, [batchId, email.trim(), code]);
+      
+      const studentId = studentResult.rows[0].id;
+      
+      const questionIds: string[] = [];
+      for (const item of blueprint) {
+        for (const level of ['Easy', 'Medium', 'Hard'] as const) {
+          const count = item[level.toLowerCase() as 'easy' | 'medium' | 'hard'];
+          if (count > 0) {
+            const availableResult = await db.query(`
+              SELECT id FROM question_bank
+              WHERE module = ? AND level = ?
+              ORDER BY RANDOM()
+              LIMIT ?
+            `, [item.module, level, count]);
+            for (const q of availableResult.rows) {
+              questionIds.push(q.id);
+            }
+          }
+        }
+      }
+      
+      for (let i = 0; i < questionIds.length; i++) {
+        await db.query(`
+          INSERT INTO exam_questions (student_id, question_id, question_order)
+          VALUES (?, ?, ?)
+        `, [studentId, questionIds[i], i + 1]);
+      }
+      
       students.push({ email: email.trim(), code });
     }
 
