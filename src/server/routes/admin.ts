@@ -327,19 +327,30 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     const batch = batchResult.rows[0];
     console.log('[Import Students] raw batch:', JSON.stringify(batch));
     console.log('[Import Students] blueprint field:', batch?.blueprint);
-    console.log('[Import Students] blueprint type:', typeof batch?.blueprint);
+    console.log('[Import Students] blueprint type raw:', typeof batch?.blueprint);
     
     if (!batch || !batch.blueprint) {
       console.log('[Import Students] ERROR: Batch has no blueprint');
       return res.status(400).json({ error: 'Batch has no blueprint' });
     }
     
-    const blueprint = typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint;
-    console.log('[Import Students] blueprint type:', typeof blueprint);
-    console.log('[Import Students] blueprint:', JSON.stringify(blueprint));
+    let blueprint;
+    try {
+      if (typeof batch.blueprint === 'string') {
+        blueprint = JSON.parse(batch.blueprint);
+      } else {
+        blueprint = batch.blueprint;
+      }
+    } catch (e) {
+      console.log('[Import Students] JSON parse error:', e);
+      blueprint = [];
+    }
+    
+    console.log('[Import Students] parsed blueprint:', JSON.stringify(blueprint));
+    console.log('[Import Students] blueprint is array:', Array.isArray(blueprint));
     
     if (!Array.isArray(blueprint) || blueprint.length === 0) {
-      console.log('[Import Students] ERROR: Blueprint is empty array');
+      console.log('[Import Students] ERROR: Blueprint is empty or not array');
       return res.status(400).json({ error: 'Blueprint is empty' });
     }
     
