@@ -56,15 +56,10 @@ function StudentExam() {
         
         console.log('[Exam] Start result:', res.data);
         
-        if (res.data.success) {
-          setStarted(true);
-          
-          if (res.data.questions_count > 0) {
-            loadQuestions();
-          } else if (res.data.resume) {
-            setTimeout(() => loadQuestions(), 500);
-          }
-        }
+        setStarted(true);
+        
+        // Always try to load questions after start
+        setTimeout(() => loadQuestions(), 500);
       } catch (error: any) {
         console.error('[Exam] Error:', error);
         alert('Error: ' + (error.response?.data?.error || error.message));
