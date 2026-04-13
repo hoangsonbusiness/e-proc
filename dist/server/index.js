@@ -14,6 +14,10 @@ console.log('USE_SQLITE:', process.env.USE_SQLITE || 'false (PostgreSQL)');
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors({ origin: true, credentials: true }));
+app.use((req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(rateLimit({ windowMs: 60000, max: 200 }));

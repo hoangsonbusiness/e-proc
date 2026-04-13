@@ -86,6 +86,8 @@ router.post('/select-email', async (req: Request, res: Response) => {
 
 router.post('/exam/start', async (req: Request, res: Response) => {
   try {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    
     const { student_id } = req.body;
     console.log('[startExam] student_id:', student_id);
 
@@ -160,6 +162,8 @@ router.post('/exam/start', async (req: Request, res: Response) => {
 
 router.get('/exam/questions', async (req: Request, res: Response) => {
   try {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    
     const studentId = req.headers['x-student-id'] as string;
     if (!studentId) {
       return res.status(401).json({ error: 'Unauthorized' });
