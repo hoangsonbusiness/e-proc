@@ -56,7 +56,7 @@ async function initPostgres() {
   `);
   console.log('[DB] question_bank ready');
   
-  await client.query(`
+await client.query(`
     CREATE TABLE IF NOT EXISTS batches (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -68,6 +68,9 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  
+  const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
+  await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
   console.log('[DB] batches ready');
   
   await client.query(`
