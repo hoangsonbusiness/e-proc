@@ -20,7 +20,7 @@ function AdminDashboard() {
       const res = await adminApi.getBatches();
       setBatches(res.data);
       const active = res.data.filter((b: any) => b.status === 'active').length;
-      const students = res.data.reduce((sum: number, b: any) => sum + (b.students_count || 0), 0);
+      const students = res.data.reduce((sum: number, b: any) => sum + Number(b.students_count || 0), 0);
       setStats({ totalBatches: res.data.length, activeBatches: active, totalStudents: students });
     } catch (error) {
       console.error(error);
