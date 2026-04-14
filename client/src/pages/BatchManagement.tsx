@@ -22,8 +22,35 @@ function BatchManagement() {
     blueprint: [] as BlueprintItem[]
   });
   const [showInviteForm, setShowInviteForm] = useState(false);
+  const [editingBatch, setEditingBatch] = useState<any>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   const [emails, setEmails] = useState('');
+  const handleEditBatch = (batch: any) => {
+    setEditingBatch({
+      ...batch,
+      blueprint: typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : (batch.blueprint || [])
+    });
+  };
+
+  const handleUpdateBatch = async () => {
+    if (!editingBatch) return;
+    setLoading(true);
+    try {
+      await adminApi.updateBatch(editingBatch.id, {
+        name: editingBatch.name,
+        start_time: editingBatch.start_time,
+        end_time: editingBatch.end_time,
+        duration: editingBatch.duration,
+        blueprint: editingBatch.blueprint,
+        status: editingBatch.status
+      });
+      loadBatches();
+      setEditingBatch(null);
+    } catch (err: any) {
+      alert(err.response?.data?.error || err.message);
+    }
+    setLoading(false);
+  };
   const [inviteResult, setInviteResult] = useState<{success: number; emails: {email: string; code: string}[]} | null>(null);
   const [feasibilityErrors, setFeasibilityErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -430,6 +457,13 @@ function BatchManagement() {
                     Results
                   </Link>
                   <button 
+                    onClick={() => handleEditBatch(batch)}
+                    className="btn btn-secondary"
+                    style={{ marginRight: 5, fontSize: 12 }}
+                  >
+                    Edit
+                  </button>
+                  <button 
                     onClick={() => {
                       if (confirm('Delete this batch? All students and exam data will be lost.')) {
                         adminApi.deleteBatch(batch.id).then(() => {
@@ -451,6 +485,180 @@ function BatchManagement() {
           </tbody>
         </table>
       </div>
+
+      {editingBatch && (
+        <div className="card" style={{ marginTop: 20, borderColor: '#3b82f6', background: '#eff6ff' }}>
+          <h3 style={{ color: '#1d4ed8' }}>Edit Batch #{editingBatch.id}</h3>
+          
+          <div className="form-group">
+            <label>Batch Name</label>
+            <input 
+              type="text" 
+              value={editingBatch.name} 
+              onChange={e => setEditingBatch({...editingBatch, name: e.target.value})}
+              required 
+            />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="form-group">
+              <label>Start Time</label>
+              <input 
+                type="datetime-local" 
+                value={editingBatch.start_time?.slice(0, 16)} 
+                onChange={e => setEditingBatch({...editingBatch, start_time: e.target.value})}
+                required 
+              />
+            </div>
+            <div className="form-group">
+              <label>End Time</label>
+              <input 
+                type="datetime-local" 
+                value={editingBatch.end_time?.slice(0, 16)} 
+                onChange={e => setEditingBatch({...editingBatch, end_time: e.target.value})}
+                required 
+              />
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label>Duration (minutes)</label>
+            <input 
+              type="number" 
+              value={editingBatch.duration} 
+              onChange={e => setEditingBatch({...editingBatch, duration: parseInt(e.target.value)})}
+              min={1}
+              required 
+            />
+          </div>
+
+          <div className="form-group">
+            <label>Status</label>
+            <select 
+              value={editingBatch.status}
+              onChange={e => setEditingBatch({...editingBatch, status: e.target.value})}
+            >
+              <option value="draft">Draft</option>
+              <option value="active">Active</option>
+            </select>
+          </div>
+
+          <h4 style={{ marginTop: 20 }}>Blueprint</h4>
+          {modules.length === 0 ? (
+            <p className="error">No modules available</p>
+          ) : (
+            <table className="matrix-table">
+              <thead>
+                <tr>
+                  <th>Module</th>
+                  <th>Easy</th>
+                  <th>Medium</th>
+                  <th>Hard</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {editingBatch.blueprint?.map((item: any, index: number) => (
+                  <tr key={index}>
+                    <td>
+                      <select 
+                        value={item.module}
+                        onChange={e => {
+                          const newBlueprint = [...editingBatch.blueprint];
+                          newBlueprint[index].module = e.target.value;
+                          setEditingBatch({...editingBatch, blueprint: newBlueprint});
+                        }}
+                        style={{ width: '100%' }}
+                      >
+                        {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <input 
+                        type="number" 
+                        min={0} 
+                        value={item.easy || 0}
+                        onChange={e => {
+                          const newBlueprint = [...editingBatch.blueprint];
+                          newBlueprint[index].easy = parseInt(e.target.value) || 0;
+                          setEditingBatch({...editingBatch, blueprint: newBlueprint});
+                        }}
+                        style={{ width: 60 }}
+                      />
+                    </td>
+                    <td>
+                      <input 
+                        type="number" 
+                        min={0} 
+                        value={item.medium || 0}
+                        onChange={e => {
+                          const newBlueprint = [...editingBatch.blueprint];
+                          newBlueprint[index].medium = parseInt(e.target.value) || 0;
+                          setEditingBatch({...editingBatch, blueprint: newBlueprint});
+                        }}
+                        style={{ width: 60 }}
+                      />
+                    </td>
+                    <td>
+                      <input 
+                        type="number" 
+                        min={0} 
+                        value={item.hard || 0}
+                        onChange={e => {
+                          const newBlueprint = [...editingBatch.blueprint];
+                          newBlueprint[index].hard = parseInt(e.target.value) || 0;
+                          setEditingBatch({...editingBatch, blueprint: newBlueprint});
+                        }}
+                        style={{ width: 60 }}
+                      />
+                    </td>
+                    <td>
+                      <button 
+                        onClick={() => {
+                          const newBlueprint = editingBatch.blueprint.filter((_: any, i: number) => i !== index);
+                          setEditingBatch({...editingBatch, blueprint: newBlueprint});
+                        }}
+                        className="btn btn-danger"
+                        style={{ fontSize: 12, padding: '4px 8px' }}
+                      >X</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          
+          <button 
+            onClick={() => {
+              setEditingBatch({
+                ...editingBatch,
+                blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
+              });
+            }}
+            className="btn btn-secondary"
+            style={{ marginTop: 10, marginRight: 10 }}
+          >
+            + Add Module
+          </button>
+          
+          <button 
+            onClick={handleUpdateBatch}
+            disabled={loading}
+            className="btn btn-primary"
+            style={{ marginTop: 10 }}
+          >
+            {loading ? 'Saving...' : 'Save Changes'}
+          </button>
+          
+          <button 
+            onClick={() => setEditingBatch(null)}
+            className="btn btn-secondary"
+            style={{ marginTop: 10, marginLeft: 10 }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 }
