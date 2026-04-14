@@ -426,9 +426,22 @@ function BatchManagement() {
                   <Link to={`/admin/batches/${batch.id}/students`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
                     Students
                   </Link>
-                  <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ fontSize: 12 }}>
+                  <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
                     Results
                   </Link>
+                  <button 
+                    onClick={() => {
+                      if (confirm('Delete this batch? All students and exam data will be lost.')) {
+                        adminApi.deleteBatch(batch.id).then(() => {
+                          setBatches(batches.filter(b => b.id !== batch.id));
+                        });
+                      }
+                    }}
+                    className="btn btn-danger"
+                    style={{ fontSize: 12 }}
+                  >
+                    Delete
+                  </button>
                 </td>
               </tr>
             ))}
