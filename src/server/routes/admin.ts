@@ -14,6 +14,13 @@ console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
 
+const toUTC = (gmt7Str: string): string => {
+  if (!gmt7Str) return gmt7Str;
+  const d = new Date(gmt7Str);
+  d.setHours(d.getHours() - 7);
+  return d.toISOString();
+};
+
 // Test endpoint to debug blueprint
 router.get('/test-blueprint/:id', async (req: Request, res: Response) => {
   try {
@@ -252,17 +259,21 @@ router.post('/batches', async (req: Request, res: Response) => {
     const blueprintJson = JSON.stringify(blueprint);
     console.log('[CreateBatch] Blueprint JSON:', blueprintJson);
     
+    const startUTC = toUTC(start_time);
+    const endUTC = toUTC(end_time);
+    console.log('[CreateBatch] Times (GMT+7 -> UTC):', { start_time: startUTC, end_time: endUTC });
+    
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
         INSERT INTO batches (name, start_time, end_time, duration, blueprint)
         VALUES (?, ?, ?, ?, ?)
-      `, [name, start_time, end_time, duration, blueprintJson]);
+      `, [name, startUTC, endUTC, duration, blueprintJson]);
     } else {
       result = await db.query(`
         INSERT INTO batches (name, start_time, end_time, duration, blueprint)
         VALUES ($1, $2, $3, $4, $5)
-      `, [name, start_time, end_time, duration, blueprintJson]);
+      `, [name, startUTC, endUTC, duration, blueprintJson]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -316,10 +327,13 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const { name, start_time, end_time, duration, blueprint } = req.body;
 
+    const startUTC = toUTC(start_time);
+    const endUTC = toUTC(end_time);
+
     await db.query(`
       UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?
       WHERE id = ?
-    `, [name, start_time, end_time, duration, JSON.stringify(blueprint), parseInt(id)]);
+    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), parseInt(id)]);
 
     res.json({ success: true });
   } catch (error: any) {

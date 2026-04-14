@@ -9,6 +9,10 @@ const USE_SQLITE = process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !==
 
 const router = Router();
 
+const toGMT7 = (utcDate: Date): Date => {
+  return new Date(utcDate.getTime() + 7 * 60 * 60 * 1000);
+};
+
 router.post('/verify', async (req: Request, res: Response) => {
   try {
     const { access_code } = req.body;
@@ -36,17 +40,17 @@ router.post('/verify', async (req: Request, res: Response) => {
     
     // Cho phép in_progress để resume exam (không block)
 
-    const now = new Date();
-    const startTime = new Date(student.start_time);
-    const endTime = new Date(student.end_time);
+    const nowGMT7 = toGMT7(new Date());
+    const startTime = toGMT7(new Date(student.start_time));
+    const endTime = toGMT7(new Date(student.end_time));
 
     // Skip time check in development mode (USE_SQLITE=true)
     const isDevMode = USE_SQLITE || process.env.SKIP_TIME_CHECK === 'true';
     
-    if (!isDevMode && (now < startTime || now > endTime)) {
+    if (!isDevMode && (nowGMT7 < startTime || nowGMT7 > endTime)) {
       return res.status(400).json({ 
         error: 'Exam is not available at this time',
-        scheduled: `${startTime.toLocaleString()} - ${endTime.toLocaleString()}`
+        scheduled: `${startTime.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })} - ${endTime.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`
       });
     }
 
@@ -61,7 +65,9 @@ router.post('/verify', async (req: Request, res: Response) => {
       emails: emailsResult.rows.map((s: any) => s.email),
       duration: student.duration,
       student_id: student.id,
-      dev_mode: isDevMode
+      dev_mode: isDevMode,
+      exam_start: startTime.toISOString(),
+      exam_end: endTime.toISOString()
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
