@@ -162,8 +162,13 @@ function BatchManagement() {
 
       const res = await adminApi.importStudents(selectedBatchId, emailList);
       
+      console.log('[DEBUG Frontend] - Full response:', res.data);
+      
       const skipped = res.data.skippedEmails;
+      console.log('[DEBUG Frontend] - skipped:', skipped);
+      
       if (skipped && skipped.length > 0) {
+        console.log('[DEBUG Frontend] - Showing alert for:', skipped);
         alert(`Đã skip ${skipped.length} email trùng:\n${skipped.join('\n')}`);
       }
       
