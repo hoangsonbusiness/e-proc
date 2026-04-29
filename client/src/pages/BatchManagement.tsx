@@ -181,7 +181,8 @@ function BatchManagement() {
       
       setInviteResult({
         success: res.data.count,
-        emails: res.data.students
+        emails: res.data.students,
+        skipped: res.data.skippedEmails || []
       });
       
       setEmails('');
@@ -399,6 +400,9 @@ function BatchManagement() {
           
           {inviteResult && (
             <div style={{ marginTop: 20 }}>
+              {inviteResult.skipped && inviteResult.skipped.length > 0 && (
+                <h4 style={{ color: '#dc2626' }}>Skipped {inviteResult.skipped.length} duplicate emails: {inviteResult.skipped.join(', ')}</h4>
+              )}
               <h4 style={{ color: '#166534' }}>Invited {inviteResult.success} students:</h4>
               <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
                 <thead>
