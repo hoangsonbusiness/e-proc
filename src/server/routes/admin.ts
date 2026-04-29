@@ -447,13 +447,22 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     const existingEmailSet = new Set(existingResult.rows.map((r: any) => r.email));
 
     const skippedEmails: string[] = [];
+    const seenInRequest = new Set();
 
     const validEmails = emails.filter((email: string) => {
       const emailLower = email.trim().toLowerCase();
+      
       if (existingEmailSet.has(emailLower)) {
         skippedEmails.push(email);
         return false;
       }
+      
+      if (seenInRequest.has(emailLower)) {
+        skippedEmails.push(email);
+        return false;
+      }
+      
+      seenInRequest.add(emailLower);
       existingEmailSet.add(emailLower);
       return true;
     });

@@ -390,12 +390,18 @@ router.post('/batches/:id/students/import', async (req, res) => {
         const existingResult = await db.query('SELECT LOWER(email) as email FROM students WHERE batch_id = ?', [batchId]);
         const existingEmailSet = new Set(existingResult.rows.map((r) => r.email));
         const skippedEmails = [];
+        const seenInRequest = new Set();
         const validEmails = emails.filter((email) => {
             const emailLower = email.trim().toLowerCase();
             if (existingEmailSet.has(emailLower)) {
                 skippedEmails.push(email);
                 return false;
             }
+            if (seenInRequest.has(emailLower)) {
+                skippedEmails.push(email);
+                return false;
+            }
+            seenInRequest.add(emailLower);
             existingEmailSet.add(emailLower);
             return true;
         });
