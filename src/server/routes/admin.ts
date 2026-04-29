@@ -449,6 +449,9 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     const skippedEmails: string[] = [];
     const seenInRequest = new Set();
 
+    console.log('[Import] DEBUG - Input emails:', emails);
+    console.log('[Import] DEBUG - existingEmailSet:', Array.from(existingEmailSet));
+
     const validEmails = emails.filter((email: string) => {
       const emailLower = email.trim().toLowerCase();
       
@@ -466,6 +469,9 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
       existingEmailSet.add(emailLower);
       return true;
     });
+
+    console.log('[Import] DEBUG - skippedEmails:', skippedEmails);
+    console.log('[Import] DEBUG - validEmails count:', validEmails.length);
 
     if (skippedEmails.length > 0) {
       console.log('[Import] Skipped duplicate emails:', skippedEmails);
