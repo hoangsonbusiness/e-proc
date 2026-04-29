@@ -126,22 +126,25 @@ function BatchManagement() {
     if (total < 1 || total > 20) {
       setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
       setLoading(false);
-      console.log('[BatchManagement] Validation failed: total out of range');
       return;
     }
-
     try {
-      console.log('[BatchManagement] Submitting formData:', JSON.stringify(formData));
-      const res = await adminApi.createBatch(formData);
-      console.log('[BatchManagement] Response:', res.data);
-      const batchId = res.data.id;
+      const startUTC = toUTC(formData.start_time);
+      const endUTC = toUTC(formData.end_time);
+      
+      await adminApi.createBatch({
+        name: formData.name,
+        start_time: startUTC,
+        end_time: endUTC,
+        duration: formData.duration,
+        blueprint: formData.blueprint
+      });
+      
+      await fetchBatches();
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [] });
-      loadBatches();
-      setSelectedBatchId(batchId);
-      setShowInviteForm(true);
+      setFormData({ name: '', start_time: '', end_time: '', duration: 60, blueprint: [] });
     } catch (error: any) {
-      console.error('[BatchManagement] Error:', error, error.response);
+      console.log('[BatchManagement] ERROR:', error);
       setFeasibilityErrors([error.response?.data?.error || error.message || 'Error creating batch']);
     }
     setLoading(false);
