@@ -184,6 +184,7 @@ function BatchManagement() {
         emails: res.data.students,
         skipped: res.data.skippedEmails || []
       });
+      console.log('INVITE RESULT:', JSON.stringify(res.data));
       
       setEmails('');
     } catch (error: any) {
