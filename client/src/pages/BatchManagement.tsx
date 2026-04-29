@@ -169,6 +169,7 @@ function BatchManagement() {
 
       const res = await adminApi.importStudents(selectedBatchId, emailList);
       
+      alert('DEBUG: API call completed! Response: ' + JSON.stringify(res.data));
       console.log('Import response:', res.data);
       
       const skipped = res.data.skippedEmails;
