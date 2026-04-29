@@ -151,9 +151,9 @@ function BatchManagement() {
   };
 
   const handleInviteStudents = async () => {
-    console.log('[DEBUG] handleInviteStudents called - selectedBatchId:', selectedBatchId, '- emails:', emails);
+    console.log('Invite called - batch:', selectedBatchId);
     if (!selectedBatchId || !emails.trim()) {
-      console.log('[DEBUG] Early return - missing batchId or emails');
+      console.log('Early return - missing batchId or emails');
       return;
     }
     
@@ -169,13 +169,13 @@ function BatchManagement() {
 
       const res = await adminApi.importStudents(selectedBatchId, emailList);
       
-      console.log('[DEBUG Frontend] - Full response:', res.data);
+      console.log('Import response:', res.data);
       
       const skipped = res.data.skippedEmails;
-      console.log('[DEBUG Frontend] - skipped:', skipped);
+      console.log('Skipped emails:', skipped);
       
       if (skipped && skipped.length > 0) {
-        console.log('[DEBUG Frontend] - Showing alert for:', skipped);
+        console.log('Showing notification for skipped emails');
         alert(`Đã skip ${skipped.length} email trùng:\n${skipped.join('\n')}`);
       }
       
