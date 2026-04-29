@@ -151,8 +151,11 @@ function BatchManagement() {
   };
 
   const handleInviteStudents = async () => {
-    console.log('[DEBUG] handleInviteStudents called');
-    if (!selectedBatchId || !emails.trim()) return;
+    console.log('[DEBUG] handleInviteStudents called - selectedBatchId:', selectedBatchId, '- emails:', emails);
+    if (!selectedBatchId || !emails.trim()) {
+      console.log('[DEBUG] Early return - missing batchId or emails');
+      return;
+    }
     
     setLoading(true);
     try {
