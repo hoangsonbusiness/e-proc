@@ -407,6 +407,7 @@ router.post('/batches/:id/students/import', async (req, res) => {
         });
         if (skippedEmails.length > 0) {
             console.log('[Import] Skipped duplicate emails:', skippedEmails);
+            console.log('[Import] Valid emails:', validEmails.length);
         }
         for (const email of validEmails) {
             const code = generateCode();
