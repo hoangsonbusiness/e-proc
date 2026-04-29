@@ -151,6 +151,7 @@ function BatchManagement() {
   };
 
   const handleInviteStudents = async () => {
+    console.log('[DEBUG] handleInviteStudents called');
     if (!selectedBatchId || !emails.trim()) return;
     
     setLoading(true);
