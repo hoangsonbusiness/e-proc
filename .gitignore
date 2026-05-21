@@ -1,8 +1,54 @@
-.vercel
+# Dependencies
 node_modules/
+/client/node_modules/
+
+# Production Builds
+/dist/
+/client/dist/
+
+# Environment Variables & Secrets (Extremely Important!)
+.env
+.env.local
+.env.production
+.env.development
+.env.staging
+.env*.local
+
+# SQLite Database Files
 data/*.db
 data/*.db-shm
 data/*.db-wal
-.env
+*.db
+*.sqlite
+
+# Logs
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS Files
 .DS_Store
+Thumbs.db
+
+# VS Code & Editor Files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Vercel
+.vercel
+
+# Terraform Files (Extremely Important!)
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfvars
+terraform/terraform.tfvars.json
+terraform/eaudit-key.pem
