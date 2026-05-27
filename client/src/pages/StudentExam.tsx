@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-// Trigger Vercel deploy
 import { useNavigate } from 'react-router-dom';
 import { studentApi } from '../services/api';
+
+const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 
 interface Question {
   id: string;
@@ -23,8 +24,11 @@ function StudentExam() {
   const [loading, setLoading] = useState(true);
   const [started, setStarted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [clipboardWarning, setClipboardWarning] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const clipboardCooldownRef = useRef<Record<string, number>>({});
+  const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const navigate = useNavigate();
 
   const studentId = localStorage.getItem('studentId');
@@ -111,6 +115,15 @@ function StudentExam() {
     }
   }, [started, locked]);
 
+  useEffect(() => {
+    return () => {
+      if (clipboardWarningTimeoutRef.current) {
+        clearTimeout(clipboardWarningTimeoutRef.current);
+      }
+    };
+  }, []);
+
+
   const loadQuestions = async () => {
     try {
       const res = await studentApi.getQuestions(parseInt(studentId!));
@@ -142,12 +155,64 @@ function StudentExam() {
         alert('You have violated the exam rules. Your exam has been locked.');
         await handleSubmit(true);
       } else {
-        alert(`Warning: ${type === 'fullscreen_exit' ? 'You exited fullscreen' : 'You switched tabs'}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
+        const warningByType: Record<string, string> = {
+          fullscreen_exit: 'You exited fullscreen',
+          tab_switch: 'You switched tabs',
+          copy_attempt: 'You attempted to copy text',
+          cut_attempt: 'You attempted to cut text',
+          paste_attempt: 'You attempted to paste text'
+        };
+        const warning = warningByType[type] || 'You violated the exam rules';
+        alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
       }
     } catch (error) {
       console.error(error);
     }
   };
+
+  const showClipboardWarning = useCallback((message: string) => {
+    setClipboardWarning(message);
+    if (clipboardWarningTimeoutRef.current) {
+      clearTimeout(clipboardWarningTimeoutRef.current);
+    }
+    clipboardWarningTimeoutRef.current = setTimeout(() => {
+      setClipboardWarning('');
+    }, 2500);
+  }, []);
+
+  const handleClipboardAttempt = useCallback((type: 'copy_attempt' | 'cut_attempt' | 'paste_attempt') => {
+    if (!started || locked || submitting) return;
+
+    showClipboardWarning('Copy, cut, and paste are not allowed during the exam.');
+
+    const now = Date.now();
+    const lastTriggeredAt = clipboardCooldownRef.current[type] || 0;
+    if (now - lastTriggeredAt < CLIPBOARD_VIOLATION_COOLDOWN_MS) {
+      return;
+    }
+
+    clipboardCooldownRef.current[type] = now;
+    void handleViolation(type);
+  }, [locked, showClipboardWarning, started, submitting]);
+
+  const handleClipboardShortcut = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!started || locked || submitting) return;
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      event.preventDefault();
+      handleClipboardAttempt('copy_attempt');
+    }
+    if (key === 'x') {
+      event.preventDefault();
+      handleClipboardAttempt('cut_attempt');
+    }
+    if (key === 'v') {
+      event.preventDefault();
+      handleClipboardAttempt('paste_attempt');
+    }
+  }, [handleClipboardAttempt, locked, started, submitting]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
@@ -238,6 +303,12 @@ function StudentExam() {
           </div>
         )}
 
+        {clipboardWarning && (
+          <div className="violation-warning" style={{ marginTop: 12, marginBottom: 12 }}>
+            {clipboardWarning}
+          </div>
+        )}
+
         <div className="card">
           <h3 style={{ marginBottom: 20 }}>{currentQuestion.question_sample}</h3>
           <div className="form-group">
@@ -249,6 +320,19 @@ function StudentExam() {
               onChange={e => {
                 saveAnswer(currentQuestion.question_order, e.target.value);
               }}
+              onCopy={e => {
+                e.preventDefault();
+                handleClipboardAttempt('copy_attempt');
+              }}
+              onCut={e => {
+                e.preventDefault();
+                handleClipboardAttempt('cut_attempt');
+              }}
+              onPaste={e => {
+                e.preventDefault();
+                handleClipboardAttempt('paste_attempt');
+              }}
+              onKeyDown={handleClipboardShortcut}
               placeholder="Type your answer here..."
               style={{ fontSize: 16, lineHeight: 1.8 }}
             />
