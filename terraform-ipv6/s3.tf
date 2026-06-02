@@ -3,7 +3,7 @@
 # =============================================================================
 
 resource "aws_s3_bucket" "backup" {
-  bucket = "eaudit-db-backup-${random_id.bucket_suffix_v2.hex}"
+  bucket = "eaudit-db-backup-${random_id.bucket_suffix_v3.hex}"
 
   tags = {
     Name = "eaudit-db-backup"
@@ -11,7 +11,7 @@ resource "aws_s3_bucket" "backup" {
 }
 
 # Random suffix for globally unique bucket name
-resource "random_id" "bucket_suffix_v2" {
+resource "random_id" "bucket_suffix_v3" {
   byte_length = 4
 }
 

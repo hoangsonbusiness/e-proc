@@ -1,0 +1,32 @@
+# =============================================================================
+# E-Audit IPv6 Environment — Variables Template
+# Copy this file to 'terraform.tfvars' and fill in your secrets
+# DO NOT commit 'terraform.tfvars' to Git!
+# =============================================================================
+
+# AWS Region (Singapore for lowest latency from Vietnam)
+aws_region = "ap-southeast-1"
+
+# Domain
+domain_name   = "devfasttrack.cloud"
+app_subdomain = "epoc" # Final URL: https://epoc.devfasttrack.cloud
+
+# EC2
+instance_type         = "t3.micro"
+allowed_ssh_ipv6_cidr = "::/0" # Keep "::/0" for anywhere, or restrict to your home IPv6
+
+# RDS PostgreSQL (Running on Dual-Stack)
+db_instance_class = "db.t3.micro" # Free Tier eligible
+db_name           = "eaudit"
+db_username       = "eaudit_admin"
+db_password       = "YourStrongPassword123!" # Change this! (min 8 characters, capital + number + special)
+
+# Google Gemini AI API Key (Get from: https://aistudio.google.com/app/apikey)
+gemini_api_key = "AIzaSy..."
+
+# Session Secret (random secure string, at least 32 characters)
+session_secret = "change-this-to-a-random-secure-string-at-least-32-chars"
+
+# App Config
+node_env = "production"
+app_port = 3001

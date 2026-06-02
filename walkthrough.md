@@ -353,7 +353,7 @@ cd ..
 
 ```bash
 # Start với PM2
-pm2 start dist/server/index.js \
+pm2 start dist/server/server.js \
   --name eaudit \
   --max-memory-restart 512M \
   --log-date-format "YYYY-MM-DD HH:mm:ss"

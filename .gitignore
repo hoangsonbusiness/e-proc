@@ -44,7 +44,11 @@ Thumbs.db
 # Vercel
 .vercel
 
-# Terraform Files (Extremely Important!)
+# =============================================================================
+# Mapped Terraform Environments (Extremely Important!)
+# =============================================================================
+
+# --- Environment 1: Dual-Stack IPv4 (terraform/) ---
 terraform/.terraform/
 terraform/.terraform.lock.hcl
 terraform/terraform.tfstate
@@ -52,3 +56,12 @@ terraform/terraform.tfstate.backup
 terraform/terraform.tfvars
 terraform/terraform.tfvars.json
 terraform/eaudit-key.pem
+
+# --- Environment 2: IPv6-Only (terraform-ipv6/) ---
+terraform-ipv6/.terraform/
+terraform-ipv6/.terraform.lock.hcl
+terraform-ipv6/terraform.tfstate
+terraform-ipv6/terraform.tfstate.backup
+terraform-ipv6/terraform.tfvars
+terraform-ipv6/terraform.tfvars.json
+terraform-ipv6/eaudit-key-ipv6.pem

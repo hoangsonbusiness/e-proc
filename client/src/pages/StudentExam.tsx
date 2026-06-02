@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-// Trigger Vercel deploy
 import { useNavigate } from 'react-router-dom';
 import { studentApi } from '../services/api';
+
+const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
+const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
 
 interface Question {
   id: string;
@@ -23,8 +25,16 @@ function StudentExam() {
   const [loading, setLoading] = useState(true);
   const [started, setStarted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [clipboardWarning, setClipboardWarning] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  const clipboardCooldownRef = useRef<Record<string, number>>({});
+  const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fullscreenAutoSubmitTriggeredRef = useRef(false);
+  const startedRef = useRef(false);
+  const lockedRef = useRef(false);
+  const submittingRef = useRef(false);
   const navigate = useNavigate();
 
   const studentId = localStorage.getItem('studentId');
@@ -49,19 +59,19 @@ function StudentExam() {
         console.log('[Exam] Step 1 - Getting existing questions...');
         const existingRes = await studentApi.getQuestions(parseInt(studentId));
         console.log('[Exam] Step 1 done, questions:', existingRes.data.length);
-        
+
         if (existingRes.data.length > 0) {
           console.log('[Exam] Found questions, loading...');
           setStarted(true);
           loadQuestions();
           return;
         }
-        
+
         console.log('[Exam] No questions, starting new exam...');
         const res = await studentApi.startExam(parseInt(studentId));
-        
+
         console.log('[Exam] Start result:', res.data);
-        
+
         if (res.data.success) {
           setStarted(true);
           loadQuestions();
@@ -74,16 +84,106 @@ function StudentExam() {
     };
 
     initExam();
+  }, [navigate, studentId]);
 
-    const handleFullscreenChange = () => {
-      if (!document.fullscreenElement && started && !locked) {
-        handleViolation('fullscreen_exit');
+  useEffect(() => {
+    startedRef.current = started;
+  }, [started]);
+
+  useEffect(() => {
+    lockedRef.current = locked;
+  }, [locked]);
+
+  useEffect(() => {
+    submittingRef.current = submitting;
+  }, [submitting]);
+
+  const clearFullscreenExitTimeout = useCallback(() => {
+    if (fullscreenExitTimeoutRef.current) {
+      clearTimeout(fullscreenExitTimeoutRef.current);
+      fullscreenExitTimeoutRef.current = null;
+    }
+  }, []);
+
+  const handleSubmit = useCallback(async (force = false) => {
+    if (submittingRef.current) return;
+    if (!force && !confirm('Are you sure you want to submit?')) return;
+
+    setSubmitting(true);
+    try {
+      await studentApi.submit(parseInt(studentId!));
+      document.exitFullscreen().catch(() => {});
+      navigate('/submit');
+    } catch (error) {
+      console.error(error);
+      alert('Error submitting exam. Please contact support.');
+      setSubmitting(false);
+    }
+  }, [navigate, studentId]);
+
+  const handleViolation = useCallback(async (type: string) => {
+    try {
+      const res = await studentApi.reportViolation(parseInt(studentId!), type);
+      setViolationCount(res.data.total_violations);
+      if (res.data.locked) {
+        setLocked(true);
+        clearFullscreenExitTimeout();
+        document.exitFullscreen().catch(() => {});
+        alert('You have violated the exam rules. Your exam has been locked.');
+        await handleSubmit(true);
+      } else {
+        const warningByType: Record<string, string> = {
+          fullscreen_exit: 'You exited fullscreen',
+          tab_switch: 'You switched tabs',
+          copy_attempt: 'You attempted to copy text',
+          cut_attempt: 'You attempted to cut text',
+          paste_attempt: 'You attempted to paste text'
+        };
+        const warning = warningByType[type] || 'You violated the exam rules';
+        alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
       }
+    } catch (error) {
+      console.error(error);
+    }
+  }, [clearFullscreenExitTimeout, handleSubmit, studentId]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) {
+        clearFullscreenExitTimeout();
+        return;
+      }
+
+      if (document.fullscreenElement) {
+        clearFullscreenExitTimeout();
+        fullscreenAutoSubmitTriggeredRef.current = false;
+        return;
+      }
+
+      if (fullscreenExitTimeoutRef.current || fullscreenAutoSubmitTriggeredRef.current) {
+        return;
+      }
+
+      fullscreenExitTimeoutRef.current = setTimeout(async () => {
+        fullscreenExitTimeoutRef.current = null;
+
+        if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+        if (document.fullscreenElement) return;
+        if (fullscreenAutoSubmitTriggeredRef.current) return;
+
+        fullscreenAutoSubmitTriggeredRef.current = true;
+        await handleViolation('fullscreen_exit');
+
+        if (!lockedRef.current && !submittingRef.current) {
+          alert('You were out of fullscreen for more than 5 seconds. Your exam will be submitted now.');
+          await handleSubmit(true);
+        }
+      }, FULLSCREEN_EXIT_TIMEOUT_MS);
     };
 
     const handleVisibilityChange = () => {
-      if (document.hidden && started && !locked) {
-        handleViolation('tab_switch');
+      if (document.hidden && startedRef.current && !lockedRef.current && !submittingRef.current) {
+        void handleViolation('tab_switch');
       }
     };
 
@@ -91,10 +191,32 @@ function StudentExam() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
+      clearFullscreenExitTimeout();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, []);
+  }, [clearFullscreenExitTimeout, handleSubmit, handleViolation]);
+
+  useEffect(() => {
+    if (locked || submitting) {
+      clearFullscreenExitTimeout();
+    }
+    if (locked) {
+      fullscreenAutoSubmitTriggeredRef.current = true;
+    }
+  }, [clearFullscreenExitTimeout, locked, submitting]);
+
+  useEffect(() => {
+    if (!started) {
+      fullscreenAutoSubmitTriggeredRef.current = false;
+    }
+  }, [started]);
+
+  useEffect(() => {
+    return () => {
+      clearFullscreenExitTimeout();
+    };
+  }, [clearFullscreenExitTimeout]);
 
   useEffect(() => {
     if (started && !locked) {
@@ -109,13 +231,22 @@ function StudentExam() {
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [started, locked]);
+  }, [handleSubmit, locked, started]);
+
+  useEffect(() => {
+    return () => {
+      if (clipboardWarningTimeoutRef.current) {
+        clearTimeout(clipboardWarningTimeoutRef.current);
+      }
+    };
+  }, []);
+
 
   const loadQuestions = async () => {
     try {
       const res = await studentApi.getQuestions(parseInt(studentId!));
       const q = res.data;
-      
+
       setQuestions(q);
       const savedAnswers: { [key: number]: string } = {};
       q.forEach((question: Question) => {
@@ -132,22 +263,49 @@ function StudentExam() {
     }
   };
 
-  const handleViolation = async (type: string) => {
-    try {
-      const res = await studentApi.reportViolation(parseInt(studentId!), type);
-      setViolationCount(res.data.total_violations);
-      if (res.data.locked) {
-        setLocked(true);
-        document.exitFullscreen().catch(() => {});
-        alert('You have violated the exam rules. Your exam has been locked.');
-        await handleSubmit(true);
-      } else {
-        alert(`Warning: ${type === 'fullscreen_exit' ? 'You exited fullscreen' : 'You switched tabs'}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
-      }
-    } catch (error) {
-      console.error(error);
+  const showClipboardWarning = useCallback((message: string) => {
+    setClipboardWarning(message);
+    if (clipboardWarningTimeoutRef.current) {
+      clearTimeout(clipboardWarningTimeoutRef.current);
     }
-  };
+    clipboardWarningTimeoutRef.current = setTimeout(() => {
+      setClipboardWarning('');
+    }, 2500);
+  }, []);
+
+  const handleClipboardAttempt = useCallback((type: 'copy_attempt' | 'cut_attempt' | 'paste_attempt') => {
+    if (!started || locked || submitting) return;
+
+    showClipboardWarning('Copy, cut, and paste are not allowed during the exam.');
+
+    const now = Date.now();
+    const lastTriggeredAt = clipboardCooldownRef.current[type] || 0;
+    if (now - lastTriggeredAt < CLIPBOARD_VIOLATION_COOLDOWN_MS) {
+      return;
+    }
+
+    clipboardCooldownRef.current[type] = now;
+    void handleViolation(type);
+  }, [locked, showClipboardWarning, started, submitting]);
+
+  const handleClipboardShortcut = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!started || locked || submitting) return;
+    if (!event.ctrlKey && !event.metaKey) return;
+
+    const key = event.key.toLowerCase();
+    if (key === 'c') {
+      event.preventDefault();
+      handleClipboardAttempt('copy_attempt');
+    }
+    if (key === 'x') {
+      event.preventDefault();
+      handleClipboardAttempt('cut_attempt');
+    }
+    if (key === 'v') {
+      event.preventDefault();
+      handleClipboardAttempt('paste_attempt');
+    }
+  }, [handleClipboardAttempt, locked, started, submitting]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
@@ -157,21 +315,6 @@ function StudentExam() {
       studentApi.saveAnswer(parseInt(studentId!), order, text).catch(console.error);
     }, 2000);
   }, [studentId]);
-
-  const handleSubmit = async (force = false) => {
-    if (!force && !confirm('Are you sure you want to submit?')) return;
-    
-    setSubmitting(true);
-    try {
-      await studentApi.submit(parseInt(studentId!));
-      document.exitFullscreen().catch(() => {});
-      navigate('/submit');
-    } catch (error) {
-      console.error(error);
-      alert('Error submitting exam. Please contact support.');
-    }
-    setSubmitting(false);
-  };
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -223,8 +366,8 @@ function StudentExam() {
               {currentQuestion.module} - {currentQuestion.level} - {currentQuestion.type}
             </p>
           </div>
-          <button 
-            onClick={() => handleSubmit()} 
+          <button
+            onClick={() => handleSubmit()}
             disabled={submitting}
             className="btn btn-primary"
           >
@@ -235,6 +378,12 @@ function StudentExam() {
         {violationCount > 0 && (
           <div className="violation-warning">
             Warning: {violationCount} violation(s) recorded. After 2 violations, your exam will be locked.
+          </div>
+        )}
+
+        {clipboardWarning && (
+          <div className="violation-warning" style={{ marginTop: 12, marginBottom: 12 }}>
+            {clipboardWarning}
           </div>
         )}
 
@@ -249,6 +398,19 @@ function StudentExam() {
               onChange={e => {
                 saveAnswer(currentQuestion.question_order, e.target.value);
               }}
+              onCopy={e => {
+                e.preventDefault();
+                handleClipboardAttempt('copy_attempt');
+              }}
+              onCut={e => {
+                e.preventDefault();
+                handleClipboardAttempt('cut_attempt');
+              }}
+              onPaste={e => {
+                e.preventDefault();
+                handleClipboardAttempt('paste_attempt');
+              }}
+              onKeyDown={handleClipboardShortcut}
               placeholder="Type your answer here..."
               style={{ fontSize: 16, lineHeight: 1.8 }}
             />
