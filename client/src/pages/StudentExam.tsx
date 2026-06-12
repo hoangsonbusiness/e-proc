@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
@@ -322,6 +323,21 @@ function StudentExam() {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  // Sanitize HTML để chống XSS nhưng vẫn giữ lại các tag định dạng an toàn
+  const sanitizeQuestion = (html: string): string => {
+    return DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: [
+        'br', 'p', 'strong', 'em', 'b', 'i', 'u',
+        'pre', 'code', 'ul', 'ol', 'li',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'span', 'div', 'blockquote',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td'
+      ],
+      ALLOWED_ATTR: ['class', 'style'],
+      FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onfocus', 'onblur'],
+    });
+  };
+
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
@@ -388,7 +404,12 @@ function StudentExam() {
         )}
 
         <div className="card">
-          <h3 style={{ marginBottom: 20 }}>{currentQuestion.question_sample}</h3>
+          <div
+            className="question-content"
+            dangerouslySetInnerHTML={{
+              __html: sanitizeQuestion(currentQuestion.question_sample)
+            }}
+          />
           <div className="form-group">
             <label>Your Answer:</label>
             <textarea
