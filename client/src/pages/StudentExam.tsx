@@ -37,6 +37,7 @@ function StudentExam() {
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
+  const lastViolationTimeRef = useRef<number>(0);
   const navigate = useNavigate();
 
   const studentId = localStorage.getItem('studentId');
@@ -124,6 +125,14 @@ function StudentExam() {
   }, [navigate, studentId]);
 
   const handleViolation = useCallback(async (type: string): Promise<boolean> => {
+    const now = Date.now();
+    // Global cooldown: ignore multiple violations within 3 seconds
+    // This prevents copy+paste or alt+tab from counting as 2 violations instantly
+    if (now - lastViolationTimeRef.current < 3000) {
+      return false;
+    }
+    lastViolationTimeRef.current = now;
+
     try {
       const res = await studentApi.reportViolation(parseInt(studentId!), type);
       setViolationCount(res.data.total_violations);
