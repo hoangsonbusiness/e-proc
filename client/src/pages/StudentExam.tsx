@@ -154,6 +154,8 @@ function StudentExam() {
         };
         const warning = warningByType[type] || 'You violated the exam rules';
         alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
+        // Reset cooldown after alert closes to prevent queued events from firing immediately
+        lastViolationTimeRef.current = Date.now();
         return false;
       }
     } catch (error) {
@@ -269,6 +271,10 @@ function StudentExam() {
 
     const checkDevTools = () => {
       if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      // Do not check for DevTools size differences if not in fullscreen.
+      // Standard browser chrome (toolbars, etc.) naturally causes a size difference > 160px.
+      if (!document.fullscreenElement) return;
+
       const heightDiff = window.outerHeight - window.innerHeight;
       const widthDiff = window.outerWidth - window.innerWidth;
       if (heightDiff > DEVTOOLS_SIZE_THRESHOLD || widthDiff > DEVTOOLS_SIZE_THRESHOLD) {
