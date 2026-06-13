@@ -155,7 +155,7 @@ function StudentExam() {
           devtools_open: 'You attempted to open Developer Tools'
         };
         const warning = warningByType[type] || 'You violated the exam rules';
-        
+
         // Show the warning as a modal toast instead of an alert() so it doesn't break fullscreen
         setViolationWarningModal(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
         if (violationWarningModalTimeoutRef.current) {
@@ -257,9 +257,9 @@ function StudentExam() {
         e.preventDefault();
         e.stopPropagation();
         if (!document.fullscreenElement) {
-          document.documentElement.requestFullscreen().catch(() => {});
+          document.documentElement.requestFullscreen().catch(() => { });
         } else {
-          document.exitFullscreen().catch(() => {});
+          document.exitFullscreen().catch(() => { });
         }
         return;
       }
@@ -471,9 +471,9 @@ function StudentExam() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
           <div>
             <h2>Question {currentIndex + 1} of {questions.length}</h2>
-            <p style={{ color: 'var(--text-light)', fontSize: 14 }}>
+            {/* <p style={{ color: 'var(--text-light)', fontSize: 14 }}>
               {currentQuestion.module} - {currentQuestion.level} - {currentQuestion.type}
-            </p>
+            </p> */}
           </div>
           <button
             onClick={() => handleSubmit()}
