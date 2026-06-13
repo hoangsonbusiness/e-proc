@@ -241,6 +241,18 @@ function StudentExam() {
       const isCtrlShiftK = e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k');
       const isCtrlU = e.ctrlKey && (e.key === 'u' || e.key === 'U');
 
+      // Intercept F11 to force HTML5 Fullscreen API
+      if (e.key === 'F11') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+        return;
+      }
+
       if (isF12 || isCtrlShiftI || isCtrlShiftJ || isCtrlShiftC || isCtrlShiftK || isCtrlU) {
         e.preventDefault();
         e.stopPropagation();
