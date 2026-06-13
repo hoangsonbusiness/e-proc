@@ -27,10 +27,12 @@ function StudentExam() {
   const [started, setStarted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [clipboardWarning, setClipboardWarning] = useState('');
+  const [violationWarningModal, setViolationWarningModal] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
   const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
   const devtoolsViolationCooldownRef = useRef<number>(0);
@@ -153,8 +155,17 @@ function StudentExam() {
           devtools_open: 'You attempted to open Developer Tools'
         };
         const warning = warningByType[type] || 'You violated the exam rules';
-        alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
-        // Reset cooldown after alert closes to prevent queued events from firing immediately
+        
+        // Show the warning as a modal toast instead of an alert() so it doesn't break fullscreen
+        setViolationWarningModal(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
+        if (violationWarningModalTimeoutRef.current) {
+          clearTimeout(violationWarningModalTimeoutRef.current);
+        }
+        violationWarningModalTimeoutRef.current = setTimeout(() => {
+          setViolationWarningModal('');
+        }, 5000);
+
+        // Reset cooldown after warning appears to prevent queued events from firing immediately
         lastViolationTimeRef.current = Date.now();
         return false;
       }
@@ -564,6 +575,37 @@ function StudentExam() {
           </button>
         </div>
       </div>
+
+      {/* Violation Warning Modal (Toast) */}
+      {violationWarningModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999
+        }}>
+          <div style={{
+            background: 'white',
+            padding: '30px',
+            borderRadius: '12px',
+            boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
+            maxWidth: '500px',
+            textAlign: 'center',
+            border: '2px solid var(--danger)'
+          }}>
+            <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '24px' }}>⚠️ Exam Rule Violation</h3>
+            <p style={{ fontSize: '18px', lineHeight: '1.5', color: '#333' }}>
+              {violationWarningModal}
+            </p>
+            <p style={{ marginTop: '20px', color: 'var(--text-light)', fontSize: '14px' }}>
+              This warning will disappear automatically...
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
