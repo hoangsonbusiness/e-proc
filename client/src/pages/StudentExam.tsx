@@ -52,7 +52,7 @@ function StudentExam() {
 
     // Request fullscreen when entering exam
     if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch(() => {});
+      document.documentElement.requestFullscreen().catch(() => { });
     }
 
     const initExam = async () => {
@@ -114,7 +114,7 @@ function StudentExam() {
     setSubmitting(true);
     try {
       await studentApi.submit(parseInt(studentId!));
-      document.exitFullscreen().catch(() => {});
+      document.exitFullscreen().catch(() => { });
       navigate('/submit');
     } catch (error) {
       console.error(error);
@@ -123,16 +123,17 @@ function StudentExam() {
     }
   }, [navigate, studentId]);
 
-  const handleViolation = useCallback(async (type: string) => {
+  const handleViolation = useCallback(async (type: string): Promise<boolean> => {
     try {
       const res = await studentApi.reportViolation(parseInt(studentId!), type);
       setViolationCount(res.data.total_violations);
       if (res.data.locked) {
         setLocked(true);
         clearFullscreenExitTimeout();
-        document.exitFullscreen().catch(() => {});
+        document.exitFullscreen().catch(() => { });
         alert('You have violated the exam rules. Your exam has been locked.');
         await handleSubmit(true);
+        return true;
       } else {
         const warningByType: Record<string, string> = {
           fullscreen_exit: 'You exited fullscreen',
@@ -144,9 +145,11 @@ function StudentExam() {
         };
         const warning = warningByType[type] || 'You violated the exam rules';
         alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
+        return false;
       }
     } catch (error) {
       console.error(error);
+      return false;
     }
   }, [clearFullscreenExitTimeout, handleSubmit, studentId]);
 
@@ -175,11 +178,18 @@ function StudentExam() {
         if (fullscreenAutoSubmitTriggeredRef.current) return;
 
         fullscreenAutoSubmitTriggeredRef.current = true;
-        await handleViolation('fullscreen_exit');
+        const wasLocked = await handleViolation('fullscreen_exit');
 
-        if (!lockedRef.current && !submittingRef.current) {
-          alert('You were out of fullscreen for more than 5 seconds. Your exam will be submitted now.');
-          await handleSubmit(true);
+        if (wasLocked) return;
+
+        if (!document.fullscreenElement) {
+          fullscreenExitTimeoutRef.current = setTimeout(async () => {
+            fullscreenExitTimeoutRef.current = null;
+            if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+            if (document.fullscreenElement) return;
+
+            await handleViolation('fullscreen_exit');
+          }, FULLSCREEN_EXIT_TIMEOUT_MS);
         }
       }, FULLSCREEN_EXIT_TIMEOUT_MS);
     };
