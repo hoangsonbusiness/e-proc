@@ -264,27 +264,9 @@ function StudentExam() {
     };
   }, [triggerDevtoolsViolation]);
 
-  // Phát hiện DevTools đang mở qua sự chênh lệch kích thước cửa sổ
-  useEffect(() => {
-    const DEVTOOLS_SIZE_THRESHOLD = 160;
-    const CHECK_INTERVAL_MS = 1000;
-
-    const checkDevTools = () => {
-      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
-      // Do not check for DevTools size differences if not in fullscreen.
-      // Standard browser chrome (toolbars, etc.) naturally causes a size difference > 160px.
-      if (!document.fullscreenElement) return;
-
-      const heightDiff = window.outerHeight - window.innerHeight;
-      const widthDiff = window.outerWidth - window.innerWidth;
-      if (heightDiff > DEVTOOLS_SIZE_THRESHOLD || widthDiff > DEVTOOLS_SIZE_THRESHOLD) {
-        triggerDevtoolsViolation();
-      }
-    };
-
-    const intervalId = setInterval(checkDevTools, CHECK_INTERVAL_MS);
-    return () => clearInterval(intervalId);
-  }, [triggerDevtoolsViolation]);
+  // Đã gỡ bỏ tính năng phát hiện DevTools qua kích thước cửa sổ vì tính năng này 
+  // không tương thích với quá trình chuyển đổi (transition) Fullscreen của trình duyệt,
+  // gây ra các báo cáo vi phạm giả mạo (false positives).
 
   useEffect(() => {
     if (locked || submitting) {
