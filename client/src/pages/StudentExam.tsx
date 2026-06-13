@@ -33,6 +33,7 @@ function StudentExam() {
   const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
+  const devtoolsViolationCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
@@ -138,7 +139,8 @@ function StudentExam() {
           tab_switch: 'You switched tabs',
           copy_attempt: 'You attempted to copy text',
           cut_attempt: 'You attempted to cut text',
-          paste_attempt: 'You attempted to paste text'
+          paste_attempt: 'You attempted to paste text',
+          devtools_open: 'You attempted to open Developer Tools'
         };
         const warning = warningByType[type] || 'You violated the exam rules';
         alert(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
@@ -197,6 +199,67 @@ function StudentExam() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [clearFullscreenExitTimeout, handleSubmit, handleViolation]);
+
+  const triggerDevtoolsViolation = useCallback(() => {
+    if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+    const now = Date.now();
+    if (now - devtoolsViolationCooldownRef.current < 10000) return; // 10s cooldown
+    devtoolsViolationCooldownRef.current = now;
+    void handleViolation('devtools_open');
+  }, [handleViolation]);
+
+  // Chặn phím tắt mở DevTools và context menu
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+
+      const isF12 = e.key === 'F12';
+      const isCtrlShiftI = e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i');
+      const isCtrlShiftJ = e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'j');
+      const isCtrlShiftC = e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c');
+      const isCtrlShiftK = e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k');
+      const isCtrlU = e.ctrlKey && (e.key === 'u' || e.key === 'U');
+
+      if (isF12 || isCtrlShiftI || isCtrlShiftJ || isCtrlShiftC || isCtrlShiftK || isCtrlU) {
+        e.preventDefault();
+        e.stopPropagation();
+        triggerDevtoolsViolation();
+      }
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      if (startedRef.current && !lockedRef.current && !submittingRef.current) {
+        e.preventDefault();
+      }
+    };
+
+    // Dùng capture phase (true) để bắt trước khi browser xử lý
+    document.addEventListener('keydown', handleKeyDown, true);
+    document.addEventListener('contextmenu', handleContextMenu);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown, true);
+      document.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, [triggerDevtoolsViolation]);
+
+  // Phát hiện DevTools đang mở qua sự chênh lệch kích thước cửa sổ
+  useEffect(() => {
+    const DEVTOOLS_SIZE_THRESHOLD = 160;
+    const CHECK_INTERVAL_MS = 1000;
+
+    const checkDevTools = () => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      const widthDiff = window.outerWidth - window.innerWidth;
+      if (heightDiff > DEVTOOLS_SIZE_THRESHOLD || widthDiff > DEVTOOLS_SIZE_THRESHOLD) {
+        triggerDevtoolsViolation();
+      }
+    };
+
+    const intervalId = setInterval(checkDevTools, CHECK_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [triggerDevtoolsViolation]);
 
   useEffect(() => {
     if (locked || submitting) {
