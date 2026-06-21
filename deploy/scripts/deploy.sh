@@ -22,14 +22,14 @@ git pull origin main
 # --- Rebuild Server ---
 echo ""
 echo ">>> Rebuilding server..."
-npm ci --production=false
+npm install --production=false
 npm run build:server
 
 # --- Rebuild Client ---
 echo ""
 echo ">>> Rebuilding client..."
 cd client
-npm ci --production=false
+npm install --production=false
 npm run build
 cd ..
 
