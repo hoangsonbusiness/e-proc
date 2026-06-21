@@ -36,7 +36,13 @@ function StudentLogin() {
         });
       }
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Invalid access code');
+      if (err.response?.data?.scheduled_start && err.response?.data?.scheduled_end) {
+        const start = new Date(err.response.data.scheduled_start).toLocaleString();
+        const end = new Date(err.response.data.scheduled_end).toLocaleString();
+        setError(`Exam is not active. Scheduled (your local time): ${start} - ${end}`);
+      } else {
+        setError(err.response?.data?.error || 'Invalid access code');
+      }
     }
     setLoading(false);
   };

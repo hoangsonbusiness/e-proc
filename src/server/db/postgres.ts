@@ -33,7 +33,10 @@ async function initPostgres() {
   });
 
   pgPool.on('error', (err) => console.error('[DB] Pool error:', err.message));
-  pgPool.on('connect', () => console.log('[DB] New PG connection'));
+  pgPool.on('connect', (client) => {
+    console.log('[DB] New PG connection');
+    client.query("SET timezone = 'UTC'").catch(err => console.error('[DB] Timezone error:', err.message));
+  });
 
   const client = await pgPool.connect();
   console.log('[DB] PostgreSQL connected!');

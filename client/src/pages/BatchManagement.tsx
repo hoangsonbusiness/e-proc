@@ -2,26 +2,26 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { adminApi } from '../services/api';
 
-// Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
+// Convert "YYYY-MM-DDTHH:mm" (local input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
   if (!localStr) return localStr;
-  // Append +07:00 so browser parses as GMT+7, then convert to UTC
-  return new Date(`${localStr}:00+07:00`).toISOString();
+  return new Date(localStr).toISOString();
 };
 
-// Convert UTC ISO string → "YYYY-MM-DDTHH:mm" in GMT+7 (for datetime-local input)
+// Convert UTC ISO string → "YYYY-MM-DDTHH:mm" in local timezone (for datetime-local input)
 const utcToLocalInput = (utcStr: string): string => {
   if (!utcStr) return '';
   const date = new Date(utcStr);
-  // Shift to GMT+7
-  const gmt7 = new Date(date.getTime() + 7 * 60 * 60 * 1000);
-  return gmt7.toISOString().slice(0, 16);
+  if (isNaN(date.getTime())) return '';
+  const offset = date.getTimezoneOffset();
+  const localDate = new Date(date.getTime() - offset * 60 * 1000);
+  return localDate.toISOString().slice(0, 16);
 };
 
-// Format UTC ISO string → human-readable GMT+7 (for display in table)
-const formatGMT7 = (utcStr: string): string => {
+// Format UTC ISO string → human-readable local time (for display in table)
+const formatLocalTime = (utcStr: string): string => {
   if (!utcStr) return '';
-  return new Date(utcStr).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  return new Date(utcStr).toLocaleString();
 };
 
 interface BlueprintItem {
@@ -464,8 +464,8 @@ function BatchManagement() {
               <tr key={batch.id}>
                 <td>{batch.id}</td>
                 <td>{batch.name}</td>
-                <td>{formatGMT7(batch.start_time)}</td>
-                <td>{formatGMT7(batch.end_time)}</td>
+                 <td>{formatLocalTime(batch.start_time)}</td>
+                 <td>{formatLocalTime(batch.end_time)}</td>
                 <td>{batch.duration} min</td>
                 <td>
                   <button 
