@@ -200,6 +200,30 @@ router.get('/questions/modules', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Returns question counts per module broken down by difficulty level
+router.get('/questions/module-stats', async (req, res) => {
+    try {
+        const result = await db.query(`
+      SELECT
+        module,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module
+      ORDER BY module
+    `);
+        res.json(result.rows.map((r) => ({
+            module: r.module,
+            easy: Number(r.easy) || 0,
+            medium: Number(r.medium) || 0,
+            hard: Number(r.hard) || 0,
+        })));
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 router.delete('/questions/:id', async (req, res) => {
     try {
         const { id } = req.params;
