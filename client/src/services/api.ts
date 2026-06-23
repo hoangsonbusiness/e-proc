@@ -23,6 +23,9 @@ export const adminApi = {
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
   
+  deleteQuestions: (ids: string[]) =>
+    api.post('/admin/questions/bulk-delete', { ids }),
+  
   createBatch: (data: any) =>
     api.post('/admin/batches', data),
   
