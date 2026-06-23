@@ -224,6 +224,25 @@ router.get('/questions/module-stats', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.post('/questions/bulk-delete', async (req, res) => {
+    try {
+        const { ids } = req.body;
+        if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ error: 'No question IDs provided' });
+        }
+        if (USE_SQLITE) {
+            const placeholders = ids.map(() => '?').join(', ');
+            await db.query(`DELETE FROM question_bank WHERE id IN (${placeholders})`, ids);
+        }
+        else {
+            await db.query(`DELETE FROM question_bank WHERE id = ANY($1::text[])`, [ids]);
+        }
+        res.json({ success: true, deleted: ids.length });
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 router.delete('/questions/:id', async (req, res) => {
     try {
         const { id } = req.params;
