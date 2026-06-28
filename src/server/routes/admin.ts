@@ -231,6 +231,50 @@ router.get('/questions/modules', async (req: Request, res: Response) => {
   }
 });
 
+// Returns question counts per module broken down by difficulty level
+router.get('/questions/module-stats', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        module,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module
+      ORDER BY module
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      easy:   Number(r.easy)   || 0,
+      medium: Number(r.medium) || 0,
+      hard:   Number(r.hard)   || 0,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/questions/bulk-delete', async (req: Request, res: Response) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'No question IDs provided' });
+    }
+
+    if (USE_SQLITE) {
+      const placeholders = ids.map(() => '?').join(', ');
+      await db.query(`DELETE FROM question_bank WHERE id IN (${placeholders})`, ids);
+    } else {
+      await db.query(`DELETE FROM question_bank WHERE id = ANY($1::text[])`, [ids]);
+    }
+
+    res.json({ success: true, deleted: ids.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete('/questions/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;

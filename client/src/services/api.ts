@@ -17,8 +17,14 @@ export const adminApi = {
   getModules: () =>
     api.get('/admin/questions/modules'),
   
+  getModuleStats: () =>
+    api.get('/admin/questions/module-stats'),
+  
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
+  
+  deleteQuestions: (ids: string[]) =>
+    api.post('/admin/questions/bulk-delete', { ids }),
   
   createBatch: (data: any) =>
     api.post('/admin/batches', data),
