@@ -97,7 +97,10 @@ router.post('/exam/start', async (req: Request, res: Response) => {
     const { student_id } = req.body;
     console.log('[startExam] student_id:', student_id);
 
-    const studentResult = await db.query('SELECT * FROM students WHERE id = ?', [student_id]);
+    const studentResult = await db.query(
+      'SELECT s.*, b.duration FROM students s JOIN batches b ON s.batch_id = b.id WHERE s.id = ?',
+      [student_id]
+    );
     const student = studentResult.rows[0];
     console.log('[startExam] student:', student);
 
@@ -112,11 +115,17 @@ router.post('/exam/start', async (req: Request, res: Response) => {
     }
 
     if (student.status === 'in_progress') {
-      const existingQuestions = await db.query('SELECT COUNT(*) as count FROM exam_questions WHERE student_id = ?', [student_id]);
+      const existingQuestions = await db.query(
+        'SELECT COUNT(*) as count FROM exam_questions WHERE student_id = ?',
+        [student_id]
+      );
       if (existingQuestions.rows[0].count === 0) {
         console.log('[startExam] Resume but no questions, generating...');
+        // Fall through to generate questions below
       } else {
         console.log('[startExam] Resume exam for student in_progress, questions:', existingQuestions.rows[0].count);
+        // Xoá disconnected_at khi resume thành công
+        await db.query('UPDATE students SET disconnected_at = NULL WHERE id = ?', [student_id]);
         return res.json({ success: true, questions_count: existingQuestions.rows[0].count, resume: true });
       }
     } else {
@@ -129,7 +138,9 @@ router.post('/exam/start', async (req: Request, res: Response) => {
 
     const batchResult = await db.query('SELECT blueprint FROM batches WHERE id = ?', [student.batch_id]);
     const batch = batchResult.rows[0];
-    const blueprint = batch?.blueprint ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint) : [];
+    const blueprint = batch?.blueprint
+      ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint)
+      : [];
 
     const questionIds: string[] = [];
 
@@ -158,13 +169,21 @@ router.post('/exam/start', async (req: Request, res: Response) => {
       `, [student_id, questionIds[i], i + 1]);
     }
 
-    await db.query("UPDATE students SET status = 'in_progress' WHERE id = ?", [student_id]);
+    // Ghi thời điểm bắt đầu và deadline (chỉ set khi chưa có)
+    const durationSeconds = (student.duration || 30) * 60;
+    const now = new Date();
+    const deadline = new Date(now.getTime() + durationSeconds * 1000);
+    await db.query(
+      "UPDATE students SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL WHERE id = ?",
+      [now.toISOString(), deadline.toISOString(), student_id]
+    );
 
     res.json({ success: true, questions_count: questionIds.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 router.get('/exam/questions', async (req: Request, res: Response) => {
   try {
@@ -174,6 +193,80 @@ router.get('/exam/questions', async (req: Request, res: Response) => {
     if (!studentId) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+
+    // === SERVER-SIDE TIMER GUARD ===
+    const studentResult = await db.query(
+      'SELECT status, exam_deadline, disconnected_at FROM students WHERE id = ?',
+      [parseInt(studentId)]
+    );
+    const student = studentResult.rows[0];
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (student.status === 'submitted') {
+      return res.status(410).json({ 
+        error: 'Exam already submitted',
+        reason: 'submitted'
+      });
+    }
+
+    const now = new Date();
+
+    // Kiểm tra deadline đã qua chưa
+    if (student.exam_deadline) {
+      const deadline = new Date(student.exam_deadline);
+      if (now >= deadline) {
+        console.log('[getQuestions] Deadline passed, auto-submitting student:', studentId);
+        await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
+        await cache.flushAnswers();
+        const examQuestionsResult = await db.query(
+          'SELECT id FROM exam_questions WHERE student_id = ?',
+          [parseInt(studentId)]
+        );
+        for (const eq of examQuestionsResult.rows) {
+          cache.addToQueue(eq.id, parseInt(studentId));
+        }
+        return res.status(410).json({
+          error: 'Time is up. Your exam has been automatically submitted.',
+          reason: 'timeout'
+        });
+      }
+    }
+
+    // Kiểm tra thời gian vắng mặt (disconnected > 2 phút)
+    const DISCONNECT_GRACE_SECONDS = 120; // 2 phút
+    if (student.disconnected_at) {
+      const disconnectedAt = new Date(student.disconnected_at);
+      const absentSeconds = (now.getTime() - disconnectedAt.getTime()) / 1000;
+      if (absentSeconds > DISCONNECT_GRACE_SECONDS) {
+        console.log('[getQuestions] Student absent too long (%ds), auto-submitting:', Math.round(absentSeconds));
+        await db.query("UPDATE students SET status = 'submitted', disconnected_at = NULL WHERE id = ?", [parseInt(studentId)]);
+        await cache.flushAnswers();
+        const examQuestionsResult = await db.query(
+          'SELECT id FROM exam_questions WHERE student_id = ?',
+          [parseInt(studentId)]
+        );
+        for (const eq of examQuestionsResult.rows) {
+          cache.addToQueue(eq.id, parseInt(studentId));
+        }
+        return res.status(410).json({
+          error: 'You were absent for more than 2 minutes. Your exam has been automatically submitted.',
+          reason: 'absent_too_long'
+        });
+      }
+      // Trong grace period: xóa disconnected_at (học viên đã quay lại đúng hạn)
+      await db.query('UPDATE students SET disconnected_at = NULL WHERE id = ?', [parseInt(studentId)]);
+    }
+
+    // Tính time_remaining từ server
+    let time_remaining: number | null = null;
+    if (student.exam_deadline) {
+      const deadline = new Date(student.exam_deadline);
+      time_remaining = Math.max(0, Math.floor((deadline.getTime() - now.getTime()) / 1000));
+    }
+    // === END GUARD ===
 
     const result = await db.query(`
       SELECT eq.question_order, eq.answer, q.id, q.type, q.level, q.module, q.question_sample
@@ -188,9 +281,50 @@ router.get('/exam/questions', async (req: Request, res: Response) => {
       answer: q.answer || ''
     }));
 
-    res.json(questions);
+    res.json({ questions, time_remaining });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+
+// Endpoint nhận beacon khi học viên tắt trình duyệt / đóng tab
+router.post('/exam/disconnect', async (req: Request, res: Response) => {
+  try {
+    // sendBeacon có thể gửi body dạng text/plain nên cần parse linh hoạt
+    let studentId: string | undefined = req.headers['x-student-id'] as string;
+
+    if (!studentId) {
+      // Fallback: parse từ body (sendBeacon gửi JSON string)
+      try {
+        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        studentId = body?.student_id?.toString();
+      } catch (_) { /* ignore parse errors */ }
+    }
+
+    if (!studentId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const studentResult = await db.query(
+      'SELECT status FROM students WHERE id = ?',
+      [parseInt(studentId)]
+    );
+    const student = studentResult.rows[0];
+
+    // Chỉ ghi disconnected_at nếu đang in_progress
+    if (student && student.status === 'in_progress') {
+      await db.query(
+        'UPDATE students SET disconnected_at = ? WHERE id = ?',
+        [new Date().toISOString(), parseInt(studentId)]
+      );
+      console.log('[disconnect] Ghi disconnected_at cho student:', studentId);
+    }
+
+    res.status(204).send();
+  } catch (error: any) {
+    // Không trả lỗi để không block beacon
+    res.status(204).send();
   }
 });
 
@@ -205,13 +339,6 @@ router.post('/exam/answer', async (req: Request, res: Response) => {
 
     // Lưu vào buffer trước
     cache.bufferAnswer(parseInt(studentId), question_order, answer);
-
-    // Auto-update status: lần đầu lưu answer thì chuyển sang submitted
-    const studentResult = await db.query('SELECT status FROM students WHERE id = ?', [parseInt(studentId)]);
-    if (studentResult.rows[0]?.status === 'in_progress') {
-      await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
-      console.log('[answer] Auto-update status: in_progress → submitted');
-    }
 
     res.json({ success: true, cached: true });
   } catch (error: any) {

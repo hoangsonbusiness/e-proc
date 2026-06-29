@@ -64,9 +64,24 @@ async function initPostgres() {
       email TEXT NOT NULL,
       access_code VARCHAR(6) NOT NULL,
       status TEXT DEFAULT 'pending',
+      exam_started_at TIMESTAMP,
+      exam_deadline TIMESTAMP,
+      disconnected_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+    // Migration: thêm cột mới nếu chưa tồn tại (cho DB cũ)
+    const colChecks = [
+        { col: 'exam_started_at', def: 'TIMESTAMP' },
+        { col: 'exam_deadline', def: 'TIMESTAMP' },
+        { col: 'disconnected_at', def: 'TIMESTAMP' },
+    ];
+    for (const { col, def } of colChecks) {
+        try {
+            await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+        }
+        catch (_) { /* already exists */ }
+    }
     console.log('[DB] students ready');
     await client.query(`
     CREATE TABLE IF NOT EXISTS exam_questions (
@@ -152,10 +167,25 @@ function initSqlite() {
         email TEXT NOT NULL,
         access_code TEXT NOT NULL,
         status TEXT DEFAULT 'pending',
+        exam_started_at DATETIME,
+        exam_deadline DATETIME,
+        disconnected_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
     `);
+        // Migration: thêm cột mới nếu chưa tồn tại (cho SQLite DB cũ)
+        const existingCols = sqliteDb.prepare("PRAGMA table_info(students)").all();
+        const colNames = existingCols.map((c) => c.name);
+        if (!colNames.includes('exam_started_at')) {
+            sqliteDb.exec('ALTER TABLE students ADD COLUMN exam_started_at DATETIME');
+        }
+        if (!colNames.includes('exam_deadline')) {
+            sqliteDb.exec('ALTER TABLE students ADD COLUMN exam_deadline DATETIME');
+        }
+        if (!colNames.includes('disconnected_at')) {
+            sqliteDb.exec('ALTER TABLE students ADD COLUMN disconnected_at DATETIME');
+        }
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_questions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

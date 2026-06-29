@@ -96,7 +96,22 @@ export const studentApi = {
     api.post('/student/exam/submit', {}, { headers: { 'x-student-id': studentId } }),
   
   reportViolation: (studentId: number, type: string) =>
-    api.post('/student/violation', { type }, { headers: { 'x-student-id': studentId } })
+    api.post('/student/violation', { type }, { headers: { 'x-student-id': studentId } }),
+
+  disconnect: (studentId: number) => {
+    // Dùng sendBeacon để đảm bảo request được gửi ngay cả khi tab đóng
+    const sent = navigator.sendBeacon(
+      '/api/student/exam/disconnect',
+      new Blob([JSON.stringify({ student_id: studentId })], { type: 'application/json' })
+    );
+    // Fallback bằng axios nếu sendBeacon thất bại
+    if (!sent) {
+      return api.post('/student/exam/disconnect', { student_id: studentId },
+        { headers: { 'x-student-id': studentId } }
+      );
+    }
+    return Promise.resolve();
+  }
 };
 
 export default api;
