@@ -153,7 +153,12 @@ router.get('/exam/questions', async (req, res) => {
             return res.status(401).json({ error: 'Unauthorized' });
         }
         // === SERVER-SIDE TIMER GUARD ===
-        const studentResult = await db.query('SELECT status, exam_deadline, disconnected_at FROM students WHERE id = ?', [parseInt(studentId)]);
+        const studentResult = await db.query(`
+      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
+      FROM students s
+      JOIN batches b ON s.batch_id = b.id
+      WHERE s.id = ?
+    `, [parseInt(studentId)]);
         const student = studentResult.rows[0];
         if (!student) {
             return res.status(404).json({ error: 'Student not found' });
@@ -165,6 +170,14 @@ router.get('/exam/questions', async (req, res) => {
             });
         }
         const now = new Date();
+        // Nếu học viên mới bắt đầu truy cập bài thi lần đầu (status = pending)
+        if (student.status === 'pending') {
+            const durationSeconds = (student.duration || 30) * 60;
+            const deadline = new Date(now.getTime() + durationSeconds * 1000);
+            await db.query("UPDATE students SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL WHERE id = ?", [now.toISOString(), deadline.toISOString(), parseInt(studentId)]);
+            student.status = 'in_progress';
+            student.exam_deadline = deadline;
+        }
         // Kiểm tra deadline đã qua chưa
         if (student.exam_deadline) {
             const deadline = new Date(student.exam_deadline);
