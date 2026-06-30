@@ -16,6 +16,8 @@ interface Question {
   answer?: string;
 }
 
+type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
+
 function StudentExam() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -28,6 +30,10 @@ function StudentExam() {
   const [submitting, setSubmitting] = useState(false);
   const [clipboardWarning, setClipboardWarning] = useState('');
   const [violationWarningModal, setViolationWarningModal] = useState('');
+  // Thông báo khi học viên reconnect sau khi tắt trình duyệt
+  const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
+  // Thông báo khi bài thi bị block (timeout / vắng mặt quá lâu)
+  const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
@@ -50,9 +56,6 @@ function StudentExam() {
       return;
     }
 
-    const duration = parseInt(localStorage.getItem('duration') || '30');
-    setTimeLeft(duration * 60);
-
     // Request fullscreen when entering exam
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen().catch(() => { });
@@ -63,12 +66,14 @@ function StudentExam() {
       try {
         console.log('[Exam] Step 1 - Getting existing questions...');
         const existingRes = await studentApi.getQuestions(parseInt(studentId));
-        console.log('[Exam] Step 1 done, questions:', existingRes.data.length);
+        const data = existingRes.data;
+        const existingQuestions = data.questions ?? data; // compat với format cũ
+        console.log('[Exam] Step 1 done, questions:', existingQuestions.length);
 
-        if (existingRes.data.length > 0) {
-          console.log('[Exam] Found questions, loading...');
+        if (existingQuestions.length > 0) {
+          console.log('[Exam] Found questions, loading (resume)...');
           setStarted(true);
-          loadQuestions();
+          loadQuestions(data);
           return;
         }
 
@@ -79,10 +84,20 @@ function StudentExam() {
 
         if (res.data.success) {
           setStarted(true);
-          loadQuestions();
+          // Sau khi start, gọi getQuestions để lấy time_remaining
+          const qRes = await studentApi.getQuestions(parseInt(studentId));
+          loadQuestions(qRes.data);
         }
       } catch (error: any) {
         console.error('[Exam] Error:', error);
+        // Xử lý trường hợp bị block (410 Gone)
+        if (error.response?.status === 410) {
+          const reason: BlockReason = error.response.data?.reason ?? 'submitted';
+          setBlockedReason(reason);
+          setLoading(false);
+          document.exitFullscreen().catch(() => { });
+          return;
+        }
         alert('Error: ' + (error.response?.data?.error || error.message));
         navigate('/');
       }
@@ -90,6 +105,7 @@ function StudentExam() {
 
     initExam();
   }, [navigate, studentId]);
+
 
   useEffect(() => {
     startedRef.current = started;
@@ -102,6 +118,17 @@ function StudentExam() {
   useEffect(() => {
     submittingRef.current = submitting;
   }, [submitting]);
+
+  // Gửi beacon khi học viên tắt trình duyệt / đóng tab
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (startedRef.current && !submittingRef.current && !lockedRef.current && studentId) {
+        studentApi.disconnect(parseInt(studentId));
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [studentId]);
 
   const clearFullscreenExitTimeout = useCallback(() => {
     if (fullscreenExitTimeoutRef.current) {
@@ -336,10 +363,17 @@ function StudentExam() {
   }, []);
 
 
-  const loadQuestions = async () => {
+  const loadQuestions = async (prefetchedData?: any) => {
     try {
-      const res = await studentApi.getQuestions(parseInt(studentId!));
-      const q = res.data;
+      let data = prefetchedData;
+      if (!data) {
+        const res = await studentApi.getQuestions(parseInt(studentId!));
+        data = res.data;
+      }
+
+      // Server trả về { questions, time_remaining } hoặc array (compat cũ)
+      const q: Question[] = data.questions ?? data;
+      const serverTimeRemaining: number | null = data.time_remaining ?? null;
 
       setQuestions(q);
       const savedAnswers: { [key: number]: string } = {};
@@ -347,15 +381,40 @@ function StudentExam() {
         if (question.answer) savedAnswers[question.question_order] = question.answer;
       });
       setAnswers(savedAnswers);
+
+      // Set timer từ server (ưu tiên server, fallback sang localStorage)
+      if (serverTimeRemaining !== null && serverTimeRemaining > 0) {
+        const wasAlreadyStarted = timeLeft > 0;
+        setTimeLeft(serverTimeRemaining);
+        // Nếu đây là resume (đã có timeLeft trước đó khác với giá trị mặc định)
+        // và thời gian còn lại khác với duration đầy đủ → hiện thông báo resume
+        const fullDuration = parseInt(localStorage.getItem('duration') || '30') * 60;
+        if (wasAlreadyStarted || serverTimeRemaining < fullDuration - 5) {
+          setResumeInfo({ timeLeft: serverTimeRemaining });
+        }
+      } else if (serverTimeRemaining === null) {
+        // Fallback: server chưa có deadline (DB cũ chưa migrate)
+        const duration = parseInt(localStorage.getItem('duration') || '30');
+        setTimeLeft(duration * 60);
+      }
+
       setLoading(false);
 
       if (textareaRef.current) {
         textareaRef.current.focus();
       }
-    } catch (error) {
+    } catch (error: any) {
+      if (error.response?.status === 410) {
+        const reason: BlockReason = error.response.data?.reason ?? 'submitted';
+        setBlockedReason(reason);
+        setLoading(false);
+        document.exitFullscreen().catch(() => { });
+        return;
+      }
       console.error(error);
     }
   };
+
 
   const showClipboardWarning = useCallback((message: string) => {
     setClipboardWarning(message);
@@ -446,6 +505,37 @@ function StudentExam() {
           <h2 style={{ color: 'var(--danger)' }}>Exam Locked</h2>
           <p>You have violated exam rules multiple times.</p>
           <p>Please contact your administrator.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (blockedReason) {
+    const blockedMessages: Record<BlockReason, { title: string; message: string; icon: string }> = {
+      timeout: {
+        icon: '⏰',
+        title: 'Time\'s Up',
+        message: 'Your exam time has expired. Your answers have been automatically submitted.'
+      },
+      absent_too_long: {
+        icon: '🚫',
+        title: 'Session Expired',
+        message: 'You were absent for more than 2 minutes. Your exam has been automatically submitted to prevent cheating.'
+      },
+      submitted: {
+        icon: '✅',
+        title: 'Exam Already Submitted',
+        message: 'Your exam has already been submitted. You cannot re-enter the exam.'
+      }
+    };
+    const { icon, title, message } = blockedMessages[blockedReason];
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: 'var(--background)' }}>
+        <div className="card" style={{ textAlign: 'center', maxWidth: 480 }}>
+          <div style={{ fontSize: 64, marginBottom: 16 }}>{icon}</div>
+          <h2 style={{ color: 'var(--danger)', marginBottom: 12 }}>{title}</h2>
+          <p style={{ lineHeight: 1.6, color: 'var(--text)' }}>{message}</p>
+          <p style={{ marginTop: 20, color: 'var(--text-light)', fontSize: 14 }}>Please contact your administrator if you believe this is an error.</p>
         </div>
       </div>
     );
@@ -603,6 +693,58 @@ function StudentExam() {
             <p style={{ marginTop: '20px', color: 'var(--text-light)', fontSize: '14px' }}>
               This warning will disappear automatically...
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Resume Notification Modal — xuất hiện khi học viên quay lại sau khi tắt trình duyệt */}
+      {resumeInfo && (
+        <div style={{
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            background: 'white',
+            padding: '36px 40px',
+            borderRadius: '16px',
+            boxShadow: '0 12px 40px rgba(0,0,0,0.3)',
+            maxWidth: '480px',
+            textAlign: 'center',
+            border: '2px solid #22c55e'
+          }}>
+            <div style={{ fontSize: 52, marginBottom: 12 }}>🔄</div>
+            <h3 style={{ color: '#16a34a', marginBottom: '12px', fontSize: '22px' }}>
+              Exam Resumed
+            </h3>
+            <p style={{ fontSize: '16px', lineHeight: '1.6', color: '#333', marginBottom: 8 }}>
+              Your session has been restored. Time remaining:
+            </p>
+            <p style={{ fontSize: '32px', fontWeight: 700, color: '#16a34a', marginBottom: 16, fontVariantNumeric: 'tabular-nums' }}>
+              {formatTime(resumeInfo.timeLeft)}
+            </p>
+            <p style={{ color: '#666', fontSize: '13px', marginBottom: 20 }}>
+              ⚠️ If you close the browser again, you will have 2 minutes to return before your exam is automatically submitted.
+            </p>
+            <button
+              onClick={() => setResumeInfo(null)}
+              style={{
+                background: '#16a34a',
+                color: 'white',
+                border: 'none',
+                borderRadius: 8,
+                padding: '10px 28px',
+                fontSize: 15,
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              Continue Exam
+            </button>
           </div>
         </div>
       )}
