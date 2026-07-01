@@ -31,7 +31,7 @@ async function initPostgres() {
     await client.query(`
     CREATE TABLE IF NOT EXISTS question_bank (
       id VARCHAR(50) PRIMARY KEY,
-      type TEXT NOT NULL CHECK(type IN ('Coding', 'Conceptual')),
+      type TEXT NOT NULL CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug')),
       level TEXT NOT NULL CHECK(level IN ('Easy', 'Medium', 'Hard')),
       module TEXT NOT NULL,
       question_sample TEXT NOT NULL,
@@ -42,6 +42,46 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+    // Migration: cập nhật CHECK constraint type cho DB cũ
+    // Dùng transaction atomic: check exists → chỉ drop+add nếu constraint chưa đúng
+    try {
+        await client.query('BEGIN');
+        const constraintCheck = await client.query(`
+      SELECT conname, pg_get_constraintdef(oid) AS condef
+      FROM pg_constraint
+      WHERE conrelid = 'question_bank'::regclass
+        AND conname = 'question_bank_type_check'
+    `);
+        const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text])))`;
+        const existing = constraintCheck.rows[0];
+        if (!existing) {
+            // Constraint chưa tồn tại → ADD mới
+            console.log('[DB] question_bank_type_check: not found → adding');
+            await client.query(`
+        ALTER TABLE question_bank
+          ADD CONSTRAINT question_bank_type_check
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+      `);
+        }
+        else if (existing.condef !== targetDef) {
+            // Constraint tồn tại nhưng định nghĩa cũ → DROP rồi ADD mới
+            console.log('[DB] question_bank_type_check: outdated →', existing.condef);
+            await client.query(`ALTER TABLE question_bank DROP CONSTRAINT question_bank_type_check`);
+            await client.query(`
+        ALTER TABLE question_bank
+          ADD CONSTRAINT question_bank_type_check
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+      `);
+        }
+        else {
+            console.log('[DB] question_bank_type_check: already up-to-date, skipping');
+        }
+        await client.query('COMMIT');
+    }
+    catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[DB] question_bank_type_check migration error:', err);
+    }
     console.log('[DB] question_bank ready');
     await client.query(`
     CREATE TABLE IF NOT EXISTS batches (

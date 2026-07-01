@@ -104,7 +104,7 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
         console.log('[Import] Header:', header);
         console.log('[Import] Rubric header:', rubricHeader);
         const validLevels = ['Easy', 'Medium', 'Hard'];
-        const validTypes = ['Coding', 'Conceptual'];
+        const validTypes = ['Coding', 'Conceptual', 'Fill-in', 'Debug'];
         const errors = [];
         let imported = 0;
         let updated = 0;
@@ -224,6 +224,44 @@ router.get('/questions/module-stats', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Returns question counts per type broken down by difficulty level
+router.get('/questions/type-stats', async (req, res) => {
+    try {
+        const result = await db.query(`
+      SELECT
+        type,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY type
+      ORDER BY type
+    `);
+        res.json(result.rows.map((r) => ({
+            type: r.type,
+            easy: Number(r.easy) || 0,
+            medium: Number(r.medium) || 0,
+            hard: Number(r.hard) || 0,
+        })));
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+/**
+ * Parse blueprint supporting both formats:
+ *  - Legacy (array): [{ module, easy, medium, hard }]
+ *  - New (object):   { blueprintMode: 'module'|'type', items: [...] }
+ */
+function parseBlueprintCompat(raw) {
+    if (Array.isArray(raw)) {
+        return { blueprintMode: 'module', items: raw };
+    }
+    if (raw && typeof raw === 'object' && raw.blueprintMode) {
+        return { blueprintMode: raw.blueprintMode || 'module', items: raw.items || [] };
+    }
+    return { blueprintMode: 'module', items: [] };
+}
 router.post('/questions/bulk-delete', async (req, res) => {
     try {
         const { ids } = req.body;
@@ -260,7 +298,9 @@ router.post('/batches', async (req, res) => {
         if (!name || !start_time || !end_time || !duration) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
-        const totalQuestions = blueprint?.reduce((sum, item) => sum + item.easy + item.medium + item.hard, 0) || 0;
+        // Support both legacy array format and new { blueprintMode, items } object format
+        const { items: blueprintItems } = parseBlueprintCompat(blueprint);
+        const totalQuestions = blueprintItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
         if (totalQuestions < 1 || totalQuestions > 20) {
             return res.status(400).json({ error: 'Total questions must be between 1 and 20' });
         }
@@ -462,29 +502,51 @@ router.post('/batches/:id/students/import', async (req, res) => {
             if (!studentId)
                 continue;
             const questionIds = [];
-            for (const item of blueprint) {
-                const moduleName = (item.module || '').toLowerCase().trim();
+            // Parse blueprint supporting both legacy (array) and new ({ blueprintMode, items }) formats
+            const { blueprintMode, items: blueprintItems } = parseBlueprintCompat(blueprint);
+            console.log(`[Import Students] blueprintMode=${blueprintMode}, items count=${blueprintItems.length}`);
+            for (const item of blueprintItems) {
                 const easy = item.easy || 0;
                 const medium = item.medium || 0;
                 const hard = item.hard || 0;
-                console.log(`Processing: ${item.module} -> ${moduleName}, easy=${easy}, medium=${medium}, hard=${hard}`);
-                // Easy
-                if (easy > 0) {
-                    const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'easy', easy]);
-                    console.log(`  Easy: found ${r.rows.length}`);
-                    r.rows.forEach((q) => questionIds.push(q.id));
+                if (blueprintMode === 'type') {
+                    const typeName = (item.type || '').toLowerCase().trim();
+                    console.log(`Processing by type: ${item.type} -> ${typeName}, easy=${easy}, medium=${medium}, hard=${hard}`);
+                    if (easy > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'easy', easy]);
+                        console.log(`  Type Easy: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
+                    if (medium > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'medium', medium]);
+                        console.log(`  Type Medium: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
+                    if (hard > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'hard', hard]);
+                        console.log(`  Type Hard: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
                 }
-                // Medium
-                if (medium > 0) {
-                    const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'medium', medium]);
-                    console.log(`  Medium: found ${r.rows.length}`);
-                    r.rows.forEach((q) => questionIds.push(q.id));
-                }
-                // Hard
-                if (hard > 0) {
-                    const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'hard', hard]);
-                    console.log(`  Hard: found ${r.rows.length}`);
-                    r.rows.forEach((q) => questionIds.push(q.id));
+                else {
+                    // Default: By Module
+                    const moduleName = (item.module || '').toLowerCase().trim();
+                    console.log(`Processing by module: ${item.module} -> ${moduleName}, easy=${easy}, medium=${medium}, hard=${hard}`);
+                    if (easy > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'easy', easy]);
+                        console.log(`  Module Easy: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
+                    if (medium > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'medium', medium]);
+                        console.log(`  Module Medium: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
+                    if (hard > 0) {
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'hard', hard]);
+                        console.log(`  Module Hard: found ${r.rows.length}`);
+                        r.rows.forEach((q) => questionIds.push(q.id));
+                    }
                 }
             }
             console.log('Total questions:', questionIds.length);
