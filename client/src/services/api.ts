@@ -23,6 +23,9 @@ export const adminApi = {
   getTypeStats: () =>
     api.get('/admin/questions/type-stats'),
   
+  getModuleTypeStats: () =>
+    api.get('/admin/questions/module-type-stats'),
+  
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
   

@@ -248,6 +248,32 @@ router.get('/questions/type-stats', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Returns question counts per (module, type) combination broken down by difficulty level
+router.get('/questions/module-type-stats', async (req, res) => {
+    try {
+        const result = await db.query(`
+      SELECT
+        module,
+        type,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module, type
+      ORDER BY module, type
+    `);
+        res.json(result.rows.map((r) => ({
+            module: r.module,
+            type: r.type,
+            easy: Number(r.easy) || 0,
+            medium: Number(r.medium) || 0,
+            hard: Number(r.hard) || 0,
+        })));
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 /**
  * Parse blueprint supporting both formats:
  *  - Legacy (array): [{ module, easy, medium, hard }]
@@ -510,26 +536,28 @@ router.post('/batches/:id/students/import', async (req, res) => {
                 const medium = item.medium || 0;
                 const hard = item.hard || 0;
                 if (blueprintMode === 'type') {
+                    // By Module + Type: query WHERE module = ? AND type = ? AND level = ?
+                    const moduleName = (item.module || '').toLowerCase().trim();
                     const typeName = (item.type || '').toLowerCase().trim();
-                    console.log(`Processing by type: ${item.type} -> ${typeName}, easy=${easy}, medium=${medium}, hard=${hard}`);
+                    console.log(`Processing by module+type: ${item.module}/${item.type}, easy=${easy}, medium=${medium}, hard=${hard}`);
                     if (easy > 0) {
-                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'easy', easy]);
-                        console.log(`  Type Easy: found ${r.rows.length}`);
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'easy', easy]);
+                        console.log(`  Module+Type Easy: found ${r.rows.length}`);
                         r.rows.forEach((q) => questionIds.push(q.id));
                     }
                     if (medium > 0) {
-                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'medium', medium]);
-                        console.log(`  Type Medium: found ${r.rows.length}`);
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'medium', medium]);
+                        console.log(`  Module+Type Medium: found ${r.rows.length}`);
                         r.rows.forEach((q) => questionIds.push(q.id));
                     }
                     if (hard > 0) {
-                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [typeName, 'hard', hard]);
-                        console.log(`  Type Hard: found ${r.rows.length}`);
+                        const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'hard', hard]);
+                        console.log(`  Module+Type Hard: found ${r.rows.length}`);
                         r.rows.forEach((q) => questionIds.push(q.id));
                     }
                 }
                 else {
-                    // Default: By Module
+                    // Default: By Module only
                     const moduleName = (item.module || '').toLowerCase().trim();
                     console.log(`Processing by module: ${item.module} -> ${moduleName}, easy=${easy}, medium=${medium}, hard=${hard}`);
                     if (easy > 0) {

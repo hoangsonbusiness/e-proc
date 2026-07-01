@@ -36,7 +36,8 @@ interface BlueprintItem {
   hard: number;
 }
 
-interface BlueprintItemType {
+interface BlueprintItemByType {
+  module: string;
   type: QuestionType;
   easy: number;
   medium: number;
@@ -57,12 +58,21 @@ interface TypeStats {
   hard: number;
 }
 
+interface ModuleTypeStats {
+  module: string;
+  type: string;
+  easy: number;
+  medium: number;
+  hard: number;
+}
+
 function BatchManagement() {
   const navigate = useNavigate();
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
   const [typeStats, setTypeStats] = useState<TypeStats[]>([]);
+  const [moduleTypeStats, setModuleTypeStats] = useState<ModuleTypeStats[]>([]);
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
   const [showForm, setShowForm] = useState(false);
@@ -72,7 +82,7 @@ function BatchManagement() {
     end_time: '',
     duration: 30,
     blueprint: [] as BlueprintItem[],
-    blueprintByType: [] as BlueprintItemType[]
+    blueprintByType: [] as BlueprintItemByType[]
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
@@ -90,9 +100,10 @@ function BatchManagement() {
   const getStatsForModule = (moduleName: string): ModuleStats =>
     moduleStats.find(s => s.module === moduleName) ?? { module: moduleName, easy: 0, medium: 0, hard: 0 };
 
-  /** Return stats for a given question type (zeros if not found) */
-  const getStatsForType = (typeName: string): TypeStats =>
-    typeStats.find(s => s.type === typeName) ?? { type: typeName, easy: 0, medium: 0, hard: 0 };
+  /** Return stats for a given (module, type) combination (zeros if not found) */
+  const getStatsForModuleType = (moduleName: string, typeName: string): ModuleTypeStats =>
+    moduleTypeStats.find(s => s.module === moduleName && s.type === typeName)
+      ?? { module: moduleName, type: typeName, easy: 0, medium: 0, hard: 0 };
 
   /** Validate blueprint (by module) against available question counts */
   const validateBlueprintAgainstStats = (blueprint: BlueprintItem[]): string[] => {
@@ -109,17 +120,17 @@ function BatchManagement() {
     return errors;
   };
 
-  /** Validate blueprint (by type) against available question counts */
-  const validateTypesBlueprintAgainstStats = (blueprint: BlueprintItemType[]): string[] => {
+  /** Validate blueprint (by module+type) against available question counts */
+  const validateTypesBlueprintAgainstStats = (blueprint: BlueprintItemByType[]): string[] => {
     const errors: string[] = [];
     for (const item of blueprint) {
-      const stats = getStatsForType(item.type);
+      const stats = getStatsForModuleType(item.module, item.type);
       if (item.easy > stats.easy)
-        errors.push(`Type "${item.type}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
       if (item.medium > stats.medium)
-        errors.push(`Type "${item.type}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
       if (item.hard > stats.hard)
-        errors.push(`Type "${item.type}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
     }
     return errors;
   };
@@ -128,7 +139,7 @@ function BatchManagement() {
    * Build the blueprint payload to send to the server.
    * Wraps into { blueprintMode, items } object.
    */
-  const buildBlueprintPayload = (mode: BlueprintMode, moduleItems: BlueprintItem[], typeItems: BlueprintItemType[]) => ({
+  const buildBlueprintPayload = (mode: BlueprintMode, moduleItems: BlueprintItem[], typeItems: BlueprintItemByType[]) => ({
     blueprintMode: mode,
     items: mode === 'type' ? typeItems : moduleItems,
   });
@@ -145,6 +156,7 @@ function BatchManagement() {
     loadModules();
     loadModuleStats();
     loadTypeStats();
+    loadModuleTypeStats();
   }, []);
 
   useEffect(() => {
@@ -197,6 +209,16 @@ function BatchManagement() {
     }
   };
 
+  const loadModuleTypeStats = async () => {
+    try {
+      const res = await adminApi.getModuleTypeStats();
+      console.log('[BatchManagement] Module-type stats loaded:', res.data);
+      setModuleTypeStats(res.data);
+    } catch (error) {
+      console.error('[BatchManagement] loadModuleTypeStats error:', error);
+    }
+  };
+
   // ─── Blueprint helpers (Create form) ────────────────────────────────────────
 
   const addBlueprintRow = () => {
@@ -223,22 +245,33 @@ function BatchManagement() {
 
   // ─── Blueprint helpers (By Type – Create form) ───────────────────────────────
 
-  /** Types already used in the current blueprint */
-  const usedTypes = formData.blueprintByType.map(i => i.type);
-  /** First type not yet added */
-  const nextAvailableType = QUESTION_TYPES.find(t => !usedTypes.includes(t));
+  /** (module, type) combos already used in By Type blueprint */
+  const usedModuleTypeCombos = formData.blueprintByType.map(i => `${i.module}||${i.type}`);
+
+  /** Find first available (module, type) combo not yet used */
+  const getNextAvailableModuleType = (): { module: string; type: QuestionType } | null => {
+    for (const m of modules) {
+      for (const t of QUESTION_TYPES) {
+        if (!usedModuleTypeCombos.includes(`${m}||${t}`)) {
+          return { module: m, type: t };
+        }
+      }
+    }
+    return null;
+  };
+  const nextAvailableModuleType = getNextAvailableModuleType();
 
   const addTypeBlueprintRow = () => {
-    if (!nextAvailableType) return;
+    if (!nextAvailableModuleType) return;
     setFormData(prev => ({
       ...prev,
-      blueprintByType: [...prev.blueprintByType, { type: nextAvailableType, easy: 0, medium: 0, hard: 0 }]
+      blueprintByType: [...prev.blueprintByType, { module: nextAvailableModuleType.module, type: nextAvailableModuleType.type, easy: 0, medium: 0, hard: 0 }]
     }));
   };
 
-  const updateTypeBlueprint = (index: number, field: keyof BlueprintItemType, value: any) => {
+  const updateTypeBlueprint = (index: number, field: keyof BlueprintItemByType, value: any) => {
     const newBlueprint = [...formData.blueprintByType];
-    const convertedValue = field === 'type' ? value : Number(value);
+    const convertedValue = (field === 'module' || field === 'type') ? value : Number(value);
     newBlueprint[index] = { ...newBlueprint[index], [field]: convertedValue };
     setFormData(prev => ({ ...prev, blueprintByType: newBlueprint }));
   };
@@ -259,8 +292,18 @@ function BatchManagement() {
 
   // ─── Blueprint helpers (Edit form) ───────────────────────────────────────────
 
-  const usedTypesEdit = (editingBatch?.blueprintByType || []).map((i: BlueprintItemType) => i.type);
-  const nextAvailableTypeEdit = QUESTION_TYPES.find(t => !usedTypesEdit.includes(t));
+  const usedModuleTypeCombosEdit = ((editingBatch?.blueprintByType || []) as BlueprintItemByType[]).map(i => `${i.module}||${i.type}`);
+  const getNextAvailableModuleTypeEdit = (): { module: string; type: QuestionType } | null => {
+    for (const m of modules) {
+      for (const t of QUESTION_TYPES) {
+        if (!usedModuleTypeCombosEdit.includes(`${m}||${t}`)) {
+          return { module: m, type: t };
+        }
+      }
+    }
+    return null;
+  };
+  const nextAvailableModuleTypeEdit = getNextAvailableModuleTypeEdit();
 
   /** Switch blueprint mode in Edit form – resets rows */
   const switchEditBlueprintMode = (newMode: BlueprintMode) => {
@@ -275,7 +318,7 @@ function BatchManagement() {
     // Detect blueprint mode from saved data
     let detectedMode: BlueprintMode = 'module';
     let moduleItems: BlueprintItem[] = [];
-    let typeItems: BlueprintItemType[] = [];
+    let typeItems: BlueprintItemByType[] = [];
 
     if (Array.isArray(rawBlueprint)) {
       // Legacy format: plain array → by module
@@ -450,7 +493,7 @@ function BatchManagement() {
     : validateBlueprintAgainstStats(formData.blueprint);
 
   const editBlueprintErrors = editBlueprintMode === 'type'
-    ? validateTypesBlueprintAgainstStats(editingBatch?.blueprintByType || [])
+    ? validateTypesBlueprintAgainstStats((editingBatch?.blueprintByType || []) as BlueprintItemByType[])
     : validateBlueprintAgainstStats(editingBatch?.blueprint || []);
 
   // ─── Sub-components ─────────────────────────────────────────────────────────
@@ -532,10 +575,15 @@ function BatchManagement() {
     );
   };
 
-  /** Panel showing available question counts by type */
+  /** Panel showing available question counts by module × type */
   const QuestionBankTypeStatsPanel = () => {
-    if (typeStats.length === 0) return null;
+    if (moduleTypeStats.length === 0) return null;
     const typeEmoji: Record<string, string> = { Coding: '💻', Conceptual: '🧠', 'Fill-in': '✏️', Debug: '🐛' };
+    // Group by module
+    const grouped = modules.reduce<Record<string, ModuleTypeStats[]>>((acc, m) => {
+      acc[m] = moduleTypeStats.filter(s => s.module === m);
+      return acc;
+    }, {});
     return (
       <div style={{
         marginBottom: 20,
@@ -546,14 +594,15 @@ function BatchManagement() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <span style={{ fontSize: 18 }}>🏷</span>
-          <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Type</strong>
+          <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Module + Type</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn theo Type
+            — Số câu hỏi có sẵn theo từng Module × Type
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ background: 'rgba(139,92,246,0.1)' }}>
+              <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Module</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Type</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#15803d' }}>🟢 Easy</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b45309' }}>🟡 Medium</th>
@@ -562,19 +611,24 @@ function BatchManagement() {
             </tr>
           </thead>
           <tbody>
-            {typeStats.map((stat, i) => (
-              <tr key={stat.type} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
-                <td style={{ padding: '5px 10px', fontWeight: 500, color: '#1f2937' }}>
-                  {typeEmoji[stat.type] || '❓'} {stat.type}
-                </td>
-                <td style={{ padding: '5px 10px', textAlign: 'center', color: '#166534', fontWeight: 600 }}>{stat.easy}</td>
-                <td style={{ padding: '5px 10px', textAlign: 'center', color: '#92400e', fontWeight: 600 }}>{stat.medium}</td>
-                <td style={{ padding: '5px 10px', textAlign: 'center', color: '#991b1b', fontWeight: 600 }}>{stat.hard}</td>
-                <td style={{ padding: '5px 10px', textAlign: 'center', color: '#374151', fontWeight: 700 }}>
-                  {stat.easy + stat.medium + stat.hard}
-                </td>
-              </tr>
-            ))}
+            {Object.entries(grouped).map(([mod, stats]) =>
+              stats.map((stat, i) => (
+                <tr key={`${mod}-${stat.type}`} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
+                  {i === 0 && (
+                    <td rowSpan={stats.length} style={{ padding: '5px 10px', fontWeight: 600, color: '#1f2937', verticalAlign: 'top', borderRight: '1px solid #e5e7eb' }}>
+                      {mod}
+                    </td>
+                  )}
+                  <td style={{ padding: '5px 10px', color: '#374151' }}>{typeEmoji[stat.type] || '❓'} {stat.type}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#166534', fontWeight: 600 }}>{stat.easy}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#92400e', fontWeight: 600 }}>{stat.medium}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#991b1b', fontWeight: 600 }}>{stat.hard}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#374151', fontWeight: 700 }}>
+                    {stat.easy + stat.medium + stat.hard}
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -763,12 +817,13 @@ function BatchManagement() {
               </>
             ) : (
               <>
-                {/* Stats panel – By Type */}
+                {/* Stats panel – By Module + Type */}
                 <QuestionBankTypeStatsPanel />
 
                 <table className="matrix-table">
                   <thead>
                     <tr>
+                      <th>Module</th>
                       <th>Type</th>
                       <th>🟢 Easy</th>
                       <th>🟡 Medium</th>
@@ -779,25 +834,39 @@ function BatchManagement() {
                   </thead>
                   <tbody>
                     {formData.blueprintByType.map((item, index) => {
-                      const stats = getStatsForType(item.type);
-                      const otherUsedTypes = formData.blueprintByType
+                      const stats = getStatsForModuleType(item.module, item.type);
+                      // Combos used by OTHER rows
+                      const otherCombos = formData.blueprintByType
                         .filter((_, i) => i !== index)
-                        .map(i => i.type);
+                        .map(i => `${i.module}||${i.type}`);
                       return (
                         <tr key={index}>
-                          <td>
+                          <td style={{ minWidth: 140 }}>
                             <select
-                              name={`type_${index}`}
-                              id={`type_${index}`}
+                              style={{ width: '100%', padding: '8px' }}
+                              value={item.module}
+                              onChange={e => updateTypeBlueprint(index, 'module', e.target.value)}
+                            >
+                              {modules.map(m => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ minWidth: 120 }}>
+                            <select
                               style={{ width: '100%', padding: '8px' }}
                               value={item.type}
                               onChange={e => updateTypeBlueprint(index, 'type', e.target.value as QuestionType)}
                             >
-                              {QUESTION_TYPES.map(t => (
-                                <option key={t} value={t} disabled={otherUsedTypes.includes(t)}>
-                                  {t}{otherUsedTypes.includes(t) ? ' (đã chọn)' : ''}
-                                </option>
-                              ))}
+                              {QUESTION_TYPES.map(t => {
+                                const combo = `${item.module}||${t}`;
+                                const isUsed = otherCombos.includes(combo);
+                                return (
+                                  <option key={t} value={t} disabled={isUsed}>
+                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                  </option>
+                                );
+                              })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
                               Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
@@ -828,12 +897,12 @@ function BatchManagement() {
                 <button
                   type="button"
                   onClick={addTypeBlueprintRow}
-                  disabled={!nextAvailableType}
+                  disabled={!nextAvailableModuleType}
                   className="btn btn-secondary"
                   style={{ marginTop: 10 }}
-                  title={!nextAvailableType ? 'Tất cả 4 types đã được thêm' : ''}
+                  title={!nextAvailableModuleType ? 'Tất cả combinations đã được thêm' : ''}
                 >
-                  + Add Type
+                  + Add Module / Type
                 </button>
               </>
             )}
@@ -855,7 +924,7 @@ function BatchManagement() {
                 totalQuestions < 1 ||
                 totalQuestions > 20 ||
                 (blueprintMode === 'module' && modules.length === 0) ||
-                (blueprintMode === 'type' && typeStats.length === 0) ||
+                (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
                 createBlueprintErrors.length > 0
               }
               className="btn btn-primary"
@@ -1116,7 +1185,7 @@ function BatchManagement() {
               </>
             )
           ) : (
-            typeStats.length === 0 ? (
+            moduleTypeStats.length === 0 ? (
               <p className="error">No type data available</p>
             ) : (
               <>
@@ -1124,6 +1193,7 @@ function BatchManagement() {
                 <table className="matrix-table">
                   <thead>
                     <tr>
+                      <th>Module</th>
                       <th>Type</th>
                       <th>🟢 Easy</th>
                       <th>🟡 Medium</th>
@@ -1132,14 +1202,27 @@ function BatchManagement() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(editingBatch.blueprintByType || []).map((item: any, index: number) => {
-                      const stats = getStatsForType(item.type);
-                      const otherUsed = (editingBatch.blueprintByType || [])
-                        .filter((_: any, i: number) => i !== index)
-                        .map((i: any) => i.type);
+                    {((editingBatch.blueprintByType || []) as BlueprintItemByType[]).map((item, index) => {
+                      const stats = getStatsForModuleType(item.module, item.type);
+                      const otherCombos = ((editingBatch.blueprintByType || []) as BlueprintItemByType[])
+                        .filter((_, i) => i !== index)
+                        .map(i => `${i.module}||${i.type}`);
                       return (
                         <tr key={index}>
-                          <td>
+                          <td style={{ minWidth: 140 }}>
+                            <select
+                              value={item.module}
+                              onChange={e => {
+                                const nb = [...editingBatch.blueprintByType];
+                                nb[index].module = e.target.value;
+                                setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                              }}
+                              style={{ width: '100%' }}
+                            >
+                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </td>
+                          <td style={{ minWidth: 120 }}>
                             <select
                               value={item.type}
                               onChange={e => {
@@ -1149,11 +1232,15 @@ function BatchManagement() {
                               }}
                               style={{ width: '100%' }}
                             >
-                              {QUESTION_TYPES.map(t => (
-                                <option key={t} value={t} disabled={otherUsed.includes(t)}>
-                                  {t}{otherUsed.includes(t) ? ' (đã chọn)' : ''}
-                                </option>
-                              ))}
+                              {QUESTION_TYPES.map(t => {
+                                const combo = `${item.module}||${t}`;
+                                const isUsed = otherCombos.includes(combo);
+                                return (
+                                  <option key={t} value={t} disabled={isUsed}>
+                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                  </option>
+                                );
+                              })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
                               Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
@@ -1220,17 +1307,20 @@ function BatchManagement() {
             ) : (
               <button
                 onClick={() => {
-                  if (!nextAvailableTypeEdit) return;
+                  if (!nextAvailableModuleTypeEdit) return;
                   setEditingBatch({
                     ...editingBatch,
-                    blueprintByType: [...(editingBatch.blueprintByType || []), { type: nextAvailableTypeEdit, easy: 0, medium: 0, hard: 0 }]
+                    blueprintByType: [
+                      ...(editingBatch.blueprintByType || []),
+                      { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                    ]
                   });
                 }}
-                disabled={!nextAvailableTypeEdit}
+                disabled={!nextAvailableModuleTypeEdit}
                 className="btn btn-secondary"
-                title={!nextAvailableTypeEdit ? 'Tất cả 4 types đã được thêm' : ''}
+                title={!nextAvailableModuleTypeEdit ? 'Tất cả combinations đã được thêm' : ''}
               >
-                + Add Type
+                + Add Module / Type
               </button>
             )}
 
