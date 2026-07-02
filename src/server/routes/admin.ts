@@ -546,7 +546,9 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     
     console.log('Parsed blueprint:', JSON.stringify(blueprint));
     
-    if (!Array.isArray(blueprint) || blueprint.length === 0) {
+    // Support both legacy array and new { blueprintMode, items } formats
+    const { items: parsedBlueprintItems } = parseBlueprintCompat(blueprint);
+    if (!parsedBlueprintItems || parsedBlueprintItems.length === 0) {
       return res.status(400).json({ error: 'Blueprint is empty' });
     }
     
