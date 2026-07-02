@@ -16,6 +16,10 @@ cd "$APP_DIR"
 
 # --- Pull Latest ---
 echo ""
+echo ">>> Cleaning conflicting local files..."
+git checkout -- . || true
+rm -rf dist client/dist package-lock.json client/package-lock.json
+
 echo ">>> Pulling latest code..."
 git pull origin main
 
