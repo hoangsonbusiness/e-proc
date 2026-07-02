@@ -1,7 +1,12 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
+import { detectLanguage } from '../components/CodeEditor';
+import type { CodeEditorHandle } from '../components/CodeEditor';
+
+// Lazy-load Monaco Editor to avoid bloating the initial bundle
+const CodeEditor = lazy(() => import('../components/CodeEditor'));
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
@@ -34,7 +39,7 @@ function StudentExam() {
   const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
   // Thông báo khi bài thi bị block (timeout / vắng mặt quá lâu)
   const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<CodeEditorHandle>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
   const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -400,8 +405,8 @@ function StudentExam() {
 
       setLoading(false);
 
-      if (textareaRef.current) {
-        textareaRef.current.focus();
+      if (editorRef.current) {
+        editorRef.current.focus();
       }
     } catch (error: any) {
       if (error.response?.status === 410) {
@@ -441,24 +446,14 @@ function StudentExam() {
     void handleViolation(type);
   }, [locked, showClipboardWarning, started, submitting]);
 
-  const handleClipboardShortcut = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!started || locked || submitting) return;
-    if (!event.ctrlKey && !event.metaKey) return;
-
-    const key = event.key.toLowerCase();
-    if (key === 'c') {
-      event.preventDefault();
-      handleClipboardAttempt('copy_attempt');
-    }
-    if (key === 'x') {
-      event.preventDefault();
-      handleClipboardAttempt('cut_attempt');
-    }
-    if (key === 'v') {
-      event.preventDefault();
-      handleClipboardAttempt('paste_attempt');
-    }
-  }, [handleClipboardAttempt, locked, started, submitting]);
+  // NOTE: Clipboard shortcuts (Ctrl+C/X/V) are now intercepted INSIDE the
+  // CodeEditor component via Monaco's addCommand() API. This is required because
+  // Monaco stops DOM event propagation internally, so React synthetic keyboard
+  // events on a wrapper div never fire for shortcuts handled by Monaco.
+  // The CodeEditor calls these callbacks directly:
+  const handleCopyAttempt  = useCallback(() => handleClipboardAttempt('copy_attempt'),  [handleClipboardAttempt]);
+  const handleCutAttempt   = useCallback(() => handleClipboardAttempt('cut_attempt'),   [handleClipboardAttempt]);
+  const handlePasteAttempt = useCallback(() => handleClipboardAttempt('paste_attempt'), [handleClipboardAttempt]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
@@ -595,29 +590,28 @@ function StudentExam() {
           />
           <div className="form-group">
             <label>Your Answer:</label>
-            <textarea
-              ref={textareaRef}
-              rows={15}
-              value={answers[currentQuestion.question_order] || ''}
-              onChange={e => {
-                saveAnswer(currentQuestion.question_order, e.target.value);
-              }}
-              onCopy={e => {
-                e.preventDefault();
-                handleClipboardAttempt('copy_attempt');
-              }}
-              onCut={e => {
-                e.preventDefault();
-                handleClipboardAttempt('cut_attempt');
-              }}
-              onPaste={e => {
-                e.preventDefault();
-                handleClipboardAttempt('paste_attempt');
-              }}
-              onKeyDown={handleClipboardShortcut}
-              placeholder="Type your answer here..."
-              style={{ fontSize: 16, lineHeight: 1.8 }}
-            />
+            <Suspense
+              fallback={
+                <div className="code-editor-loading-fallback">
+                  Loading editor...
+                </div>
+              }
+            >
+              <CodeEditor
+                ref={editorRef}
+                value={answers[currentQuestion.question_order] || ''}
+                onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
+                onCopyAttempt={handleCopyAttempt}
+                onCutAttempt={handleCutAttempt}
+                onPasteAttempt={handlePasteAttempt}
+                defaultLanguage={detectLanguage(
+                  currentQuestion.type,
+                  currentQuestion.module
+                )}
+                disabled={locked || submitting}
+                height="400px"
+              />
+            </Suspense>
           </div>
         </div>
 
