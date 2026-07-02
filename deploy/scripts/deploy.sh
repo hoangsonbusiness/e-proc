@@ -45,7 +45,8 @@ cd ..
 # --- Restart App ---
 echo ""
 echo ">>> Restarting application..."
-pm2 restart eaudit
+pm2 delete eaudit || true
+pm2 start dist/server/server.js --name eaudit --max-memory-restart 512M
 pm2 save
 
 # --- Health Check ---
