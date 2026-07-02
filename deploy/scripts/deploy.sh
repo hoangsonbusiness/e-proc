@@ -23,6 +23,11 @@ rm -rf dist client/dist package-lock.json client/package-lock.json
 echo ">>> Pulling latest code..."
 git pull origin main
 
+# --- Stop App (To Avoid Conflicts and Free Up RAM) ---
+echo ""
+echo ">>> Stopping application..."
+pm2 stop eaudit || true
+
 # --- Rebuild Server ---
 echo ""
 echo ">>> Rebuilding server..."
