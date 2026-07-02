@@ -202,21 +202,15 @@ set -euo pipefail
 echo "=== Deploying E-Audit: $(date) ==="
 cd /opt/eaudit/app
 
+# Clean conflicting local files to ensure clean git pull
+git checkout -- . || true
+rm -rf dist client/dist package-lock.json client/package-lock.json
+
+echo ">>> Pulling latest code..."
 git pull origin main
 
-echo ">>> Building client..."
-cd client && npm install && npm run build && cd ..
-
-echo ">>> Building server..."
-npm install && npm run build:server
-
-echo ">>> Restarting app..."
-pm2 restart eaudit || pm2 start dist/server/server.js --name eaudit --env production --max-memory-restart 512M
-pm2 save
-
-sleep 3
-echo ">>> Health: $(curl -s http://localhost:3001/api/health)"
-echo "=== Deploy complete: $(date) ==="
+echo ">>> Executing repository deploy script..."
+bash deploy/scripts/deploy.sh
 DEPLOYEOF
 chmod +x /opt/eaudit/deploy.sh
 chown ubuntu:ubuntu /opt/eaudit/deploy.sh
