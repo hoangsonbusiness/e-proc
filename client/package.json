@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@types/dompurify": "^3.0.5",
     "axios": "^1.6.5",
     "dompurify": "^3.4.9",

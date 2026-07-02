@@ -24,8 +24,21 @@ const formatGMT7 = (utcStr: string): string => {
   return new Date(utcStr).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
 };
 
+type BlueprintMode = 'module' | 'type';
+
+const QUESTION_TYPES = ['Coding', 'Conceptual', 'Fill-in', 'Debug'] as const;
+type QuestionType = typeof QUESTION_TYPES[number];
+
 interface BlueprintItem {
   module: string;
+  easy: number;
+  medium: number;
+  hard: number;
+}
+
+interface BlueprintItemByType {
+  module: string;
+  type: QuestionType;
   easy: number;
   medium: number;
   hard: number;
@@ -38,19 +51,41 @@ interface ModuleStats {
   hard: number;
 }
 
+interface TypeStats {
+  type: string;
+  easy: number;
+  medium: number;
+  hard: number;
+}
+
+interface ModuleTypeStats {
+  module: string;
+  type: string;
+  easy: number;
+  medium: number;
+  hard: number;
+}
+
 function BatchManagement() {
   const navigate = useNavigate();
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
+  const [typeStats, setTypeStats] = useState<TypeStats[]>([]);
+  const [moduleTypeStats, setModuleTypeStats] = useState<ModuleTypeStats[]>([]);
+  // Create form state
+  const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     start_time: '',
     end_time: '',
     duration: 30,
-    blueprint: [] as BlueprintItem[]
+    blueprint: [] as BlueprintItem[],
+    blueprintByType: [] as BlueprintItemByType[]
   });
+  // Edit form state
+  const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [editingBatch, setEditingBatch] = useState<any>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
@@ -65,10 +100,12 @@ function BatchManagement() {
   const getStatsForModule = (moduleName: string): ModuleStats =>
     moduleStats.find(s => s.module === moduleName) ?? { module: moduleName, easy: 0, medium: 0, hard: 0 };
 
-  /**
-   * Validate a blueprint array against available question counts.
-   * Returns an array of human-readable error strings (empty = valid).
-   */
+  /** Return stats for a given (module, type) combination (zeros if not found) */
+  const getStatsForModuleType = (moduleName: string, typeName: string): ModuleTypeStats =>
+    moduleTypeStats.find(s => s.module === moduleName && s.type === typeName)
+      ?? { module: moduleName, type: typeName, easy: 0, medium: 0, hard: 0 };
+
+  /** Validate blueprint (by module) against available question counts */
   const validateBlueprintAgainstStats = (blueprint: BlueprintItem[]): string[] => {
     const errors: string[] = [];
     for (const item of blueprint) {
@@ -83,6 +120,30 @@ function BatchManagement() {
     return errors;
   };
 
+  /** Validate blueprint (by module+type) against available question counts */
+  const validateTypesBlueprintAgainstStats = (blueprint: BlueprintItemByType[]): string[] => {
+    const errors: string[] = [];
+    for (const item of blueprint) {
+      const stats = getStatsForModuleType(item.module, item.type);
+      if (item.easy > stats.easy)
+        errors.push(`Module "${item.module}" / Type "${item.type}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+      if (item.medium > stats.medium)
+        errors.push(`Module "${item.module}" / Type "${item.type}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+      if (item.hard > stats.hard)
+        errors.push(`Module "${item.module}" / Type "${item.type}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+    }
+    return errors;
+  };
+
+  /**
+   * Build the blueprint payload to send to the server.
+   * Wraps into { blueprintMode, items } object.
+   */
+  const buildBlueprintPayload = (mode: BlueprintMode, moduleItems: BlueprintItem[], typeItems: BlueprintItemByType[]) => ({
+    blueprintMode: mode,
+    items: mode === 'type' ? typeItems : moduleItems,
+  });
+
   // ─── Effects ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -94,6 +155,8 @@ function BatchManagement() {
     loadBatches();
     loadModules();
     loadModuleStats();
+    loadTypeStats();
+    loadModuleTypeStats();
   }, []);
 
   useEffect(() => {
@@ -136,6 +199,26 @@ function BatchManagement() {
     }
   };
 
+  const loadTypeStats = async () => {
+    try {
+      const res = await adminApi.getTypeStats();
+      console.log('[BatchManagement] Type stats loaded:', res.data);
+      setTypeStats(res.data);
+    } catch (error) {
+      console.error('[BatchManagement] loadTypeStats error:', error);
+    }
+  };
+
+  const loadModuleTypeStats = async () => {
+    try {
+      const res = await adminApi.getModuleTypeStats();
+      console.log('[BatchManagement] Module-type stats loaded:', res.data);
+      setModuleTypeStats(res.data);
+    } catch (error) {
+      console.error('[BatchManagement] loadModuleTypeStats error:', error);
+    }
+  };
+
   // ─── Blueprint helpers (Create form) ────────────────────────────────────────
 
   const addBlueprintRow = () => {
@@ -160,26 +243,126 @@ function BatchManagement() {
     }));
   };
 
+  // ─── Blueprint helpers (By Type – Create form) ───────────────────────────────
+
+  /** (module, type) combos already used in By Type blueprint */
+  const usedModuleTypeCombos = formData.blueprintByType.map(i => `${i.module}||${i.type}`);
+
+  /** Find first available (module, type) combo not yet used */
+  const getNextAvailableModuleType = (): { module: string; type: QuestionType } | null => {
+    for (const m of modules) {
+      for (const t of QUESTION_TYPES) {
+        if (!usedModuleTypeCombos.includes(`${m}||${t}`)) {
+          return { module: m, type: t };
+        }
+      }
+    }
+    return null;
+  };
+  const nextAvailableModuleType = getNextAvailableModuleType();
+
+  const addTypeBlueprintRow = () => {
+    if (!nextAvailableModuleType) return;
+    setFormData(prev => ({
+      ...prev,
+      blueprintByType: [...prev.blueprintByType, { module: nextAvailableModuleType.module, type: nextAvailableModuleType.type, easy: 0, medium: 0, hard: 0 }]
+    }));
+  };
+
+  const updateTypeBlueprint = (index: number, field: keyof BlueprintItemByType, value: any) => {
+    const newBlueprint = [...formData.blueprintByType];
+    const convertedValue = (field === 'module' || field === 'type') ? value : Number(value);
+    newBlueprint[index] = { ...newBlueprint[index], [field]: convertedValue };
+    setFormData(prev => ({ ...prev, blueprintByType: newBlueprint }));
+  };
+
+  const removeTypeBlueprintRow = (index: number) => {
+    setFormData(prev => ({
+      ...prev,
+      blueprintByType: prev.blueprintByType.filter((_, i) => i !== index)
+    }));
+  };
+
+  /** Switch blueprint mode in Create form – resets rows */
+  const switchBlueprintMode = (newMode: BlueprintMode) => {
+    setBlueprintMode(newMode);
+    setFormData(prev => ({ ...prev, blueprint: [], blueprintByType: [] }));
+    setFeasibilityErrors([]);
+  };
+
+  // ─── Blueprint helpers (Edit form) ───────────────────────────────────────────
+
+  const usedModuleTypeCombosEdit = ((editingBatch?.blueprintByType || []) as BlueprintItemByType[]).map(i => `${i.module}||${i.type}`);
+  const getNextAvailableModuleTypeEdit = (): { module: string; type: QuestionType } | null => {
+    for (const m of modules) {
+      for (const t of QUESTION_TYPES) {
+        if (!usedModuleTypeCombosEdit.includes(`${m}||${t}`)) {
+          return { module: m, type: t };
+        }
+      }
+    }
+    return null;
+  };
+  const nextAvailableModuleTypeEdit = getNextAvailableModuleTypeEdit();
+
+  /** Switch blueprint mode in Edit form – resets rows */
+  const switchEditBlueprintMode = (newMode: BlueprintMode) => {
+    setEditBlueprintMode(newMode);
+    setEditingBatch((prev: any) => ({ ...prev, blueprint: [], blueprintByType: [] }));
+  };
+
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
   const handleEditBatch = (batch: any) => {
+    const rawBlueprint = typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : (batch.blueprint || []);
+    // Detect blueprint mode from saved data
+    let detectedMode: BlueprintMode = 'module';
+    let moduleItems: BlueprintItem[] = [];
+    let typeItems: BlueprintItemByType[] = [];
+
+    if (Array.isArray(rawBlueprint)) {
+      // Legacy format: plain array → by module
+      detectedMode = 'module';
+      moduleItems = rawBlueprint;
+    } else if (rawBlueprint && rawBlueprint.blueprintMode) {
+      detectedMode = rawBlueprint.blueprintMode;
+      if (detectedMode === 'type') {
+        typeItems = rawBlueprint.items || [];
+      } else {
+        moduleItems = rawBlueprint.items || [];
+      }
+    }
+
+    setEditBlueprintMode(detectedMode);
     setEditingBatch({
       ...batch,
       start_time: utcToLocalInput(batch.start_time),
       end_time: utcToLocalInput(batch.end_time),
-      blueprint: typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : (batch.blueprint || [])
+      blueprint: moduleItems,
+      blueprintByType: typeItems,
     });
   };
 
   const handleUpdateBatch = async () => {
     if (!editingBatch) return;
 
-    // Validate against question bank availability
-    const statsErrors = validateBlueprintAgainstStats(editingBatch.blueprint || []);
+    // Validate against question bank availability based on edit mode
+    let statsErrors: string[] = [];
+    if (editBlueprintMode === 'type') {
+      statsErrors = validateTypesBlueprintAgainstStats(editingBatch.blueprintByType || []);
+    } else {
+      statsErrors = validateBlueprintAgainstStats(editingBatch.blueprint || []);
+    }
     if (statsErrors.length > 0) {
       alert('Không thể lưu vì blueprint vượt quá số câu hỏi có sẵn:\n\n' + statsErrors.join('\n'));
       return;
     }
+
+    const blueprintPayload = buildBlueprintPayload(
+      editBlueprintMode,
+      editingBatch.blueprint || [],
+      editingBatch.blueprintByType || []
+    );
 
     setLoading(true);
     try {
@@ -188,7 +371,7 @@ function BatchManagement() {
         start_time: localToUTC(editingBatch.start_time),
         end_time: localToUTC(editingBatch.end_time),
         duration: editingBatch.duration,
-        blueprint: editingBatch.blueprint
+        blueprint: blueprintPayload
       });
       loadBatches();
       setEditingBatch(null);
@@ -200,11 +383,13 @@ function BatchManagement() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[BatchManagement] handleSubmit called, formData:', formData);
+    console.log('[BatchManagement] handleSubmit called, blueprintMode:', blueprintMode, 'formData:', formData);
     setLoading(true);
     setFeasibilityErrors([]);
 
-    const total = formData.blueprint.reduce((sum, item) => sum + item.easy + item.medium + item.hard, 0);
+    // Compute total based on active mode
+    const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
+    const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
     console.log('[BatchManagement] Total questions:', total);
     if (total < 1 || total > 20) {
       setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
@@ -213,24 +398,34 @@ function BatchManagement() {
     }
 
     // Validate against question bank availability
-    const statsErrors = validateBlueprintAgainstStats(formData.blueprint);
+    let statsErrors: string[] = [];
+    if (blueprintMode === 'type') {
+      statsErrors = validateTypesBlueprintAgainstStats(formData.blueprintByType);
+    } else {
+      statsErrors = validateBlueprintAgainstStats(formData.blueprint);
+    }
     if (statsErrors.length > 0) {
       setFeasibilityErrors(statsErrors);
       setLoading(false);
       return;
     }
 
+    const blueprintPayload = buildBlueprintPayload(blueprintMode, formData.blueprint, formData.blueprintByType);
+
     try {
-      console.log('[BatchManagement] Submitting formData:', JSON.stringify(formData));
+      console.log('[BatchManagement] Submitting blueprintPayload:', JSON.stringify(blueprintPayload));
       const res = await adminApi.createBatch({
-        ...formData,
+        name: formData.name,
         start_time: localToUTC(formData.start_time),
         end_time: localToUTC(formData.end_time),
+        duration: formData.duration,
+        blueprint: blueprintPayload,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [] });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [] });
+      setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
       setShowInviteForm(true);
@@ -290,14 +485,51 @@ function BatchManagement() {
 
   // ─── Derived state ───────────────────────────────────────────────────────────
 
-  const totalQuestions = formData.blueprint.reduce((sum, item) => sum + item.easy + item.medium + item.hard, 0);
+  const activeCreateItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
+  const totalQuestions = activeCreateItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
 
-  const createBlueprintErrors = validateBlueprintAgainstStats(formData.blueprint);
-  const editBlueprintErrors   = validateBlueprintAgainstStats(editingBatch?.blueprint || []);
+  const createBlueprintErrors = blueprintMode === 'type'
+    ? validateTypesBlueprintAgainstStats(formData.blueprintByType)
+    : validateBlueprintAgainstStats(formData.blueprint);
+
+  const editBlueprintErrors = editBlueprintMode === 'type'
+    ? validateTypesBlueprintAgainstStats((editingBatch?.blueprintByType || []) as BlueprintItemByType[])
+    : validateBlueprintAgainstStats(editingBatch?.blueprint || []);
 
   // ─── Sub-components ─────────────────────────────────────────────────────────
 
-  /** Panel showing available question counts from the question bank */
+  /** Tab-style blueprint mode toggle */
+  const BlueprintModeToggle = ({
+    value,
+    onChange,
+  }: {
+    value: BlueprintMode;
+    onChange: (m: BlueprintMode) => void;
+  }) => (
+    <div style={{ display: 'flex', gap: 0, marginBottom: 16, border: '1.5px solid #6366f1', borderRadius: 8, overflow: 'hidden', width: 'fit-content' }}>
+      {(['module', 'type'] as BlueprintMode[]).map(mode => (
+        <button
+          key={mode}
+          type="button"
+          onClick={() => onChange(mode)}
+          style={{
+            padding: '7px 22px',
+            fontSize: 13,
+            fontWeight: 600,
+            border: 'none',
+            cursor: 'pointer',
+            background: value === mode ? '#6366f1' : '#f5f3ff',
+            color: value === mode ? '#fff' : '#6366f1',
+            transition: 'background 0.18s, color 0.18s',
+          }}
+        >
+          {mode === 'module' ? '🗂 By Module' : '🏷 By Type'}
+        </button>
+      ))}
+    </div>
+  );
+
+  /** Panel showing available question counts by module */
   const QuestionBankStatsPanel = () => {
     if (moduleStats.length === 0) return null;
     return (
@@ -310,9 +542,9 @@ function BatchManagement() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <span style={{ fontSize: 18 }}>📊</span>
-          <strong style={{ color: '#1e40af', fontSize: 14 }}>Question Bank Availability</strong>
+          <strong style={{ color: '#1e40af', fontSize: 14 }}>Question Bank – By Module</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn trong hệ thống
+            — Số câu hỏi có sẵn theo Module
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -337,6 +569,66 @@ function BatchManagement() {
                 </td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  /** Panel showing available question counts by module × type */
+  const QuestionBankTypeStatsPanel = () => {
+    if (moduleTypeStats.length === 0) return null;
+    const typeEmoji: Record<string, string> = { Coding: '💻', Conceptual: '🧠', 'Fill-in': '✏️', Debug: '🐛' };
+    // Group by module
+    const grouped = modules.reduce<Record<string, ModuleTypeStats[]>>((acc, m) => {
+      acc[m] = moduleTypeStats.filter(s => s.module === m);
+      return acc;
+    }, {});
+    return (
+      <div style={{
+        marginBottom: 20,
+        padding: '14px 18px',
+        background: 'linear-gradient(135deg, #faf5ff 0%, #f0fdf4 100%)',
+        border: '1px solid #c4b5fd',
+        borderRadius: 10,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+          <span style={{ fontSize: 18 }}>🏷</span>
+          <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Module + Type</strong>
+          <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
+            — Số câu hỏi có sẵn theo từng Module × Type
+          </span>
+        </div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: 'rgba(139,92,246,0.1)' }}>
+              <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Module</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Type</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', color: '#15803d' }}>🟢 Easy</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b45309' }}>🟡 Medium</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b91c1c' }}>🔴 Hard</th>
+              <th style={{ padding: '6px 10px', textAlign: 'center', color: '#374151' }}>Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {Object.entries(grouped).map(([mod, stats]) =>
+              stats.map((stat, i) => (
+                <tr key={`${mod}-${stat.type}`} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
+                  {i === 0 && (
+                    <td rowSpan={stats.length} style={{ padding: '5px 10px', fontWeight: 600, color: '#1f2937', verticalAlign: 'top', borderRight: '1px solid #e5e7eb' }}>
+                      {mod}
+                    </td>
+                  )}
+                  <td style={{ padding: '5px 10px', color: '#374151' }}>{typeEmoji[stat.type] || '❓'} {stat.type}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#166534', fontWeight: 600 }}>{stat.easy}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#92400e', fontWeight: 600 }}>{stat.medium}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#991b1b', fontWeight: 600 }}>{stat.hard}</td>
+                  <td style={{ padding: '5px 10px', textAlign: 'center', color: '#374151', fontWeight: 700 }}>
+                    {stat.easy + stat.medium + stat.hard}
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
@@ -453,11 +745,16 @@ function BatchManagement() {
 
             <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/20)</h4>
 
-            {modules.length === 0 ? (
+            {/* Blueprint Mode Toggle */}
+            <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
+
+            {modules.length === 0 && blueprintMode === 'module' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
-            ) : (
+            ) : typeStats.length === 0 && blueprintMode === 'type' ? (
+              <p className="error">Please import questions first to configure the blueprint.</p>
+            ) : blueprintMode === 'module' ? (
               <>
-                {/* Stats panel */}
+                {/* Stats panel – By Module */}
                 <QuestionBankStatsPanel />
 
                 <table className="matrix-table">
@@ -477,7 +774,7 @@ function BatchManagement() {
                       return (
                         <tr key={index}>
                           <td>
-                            <select 
+                            <select
                               name={`module_${index}`}
                               id={`module_${index}`}
                               style={{ width: '100%', padding: '8px' }}
@@ -488,42 +785,24 @@ function BatchManagement() {
                                 <option key={m} value={m}>{m}</option>
                               ))}
                             </select>
-                            {/* Available hint */}
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
                               Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
-                            <ValidatedInput
-                              value={item.easy}
-                              max={stats.easy}
-                              onChange={v => updateBlueprint(index, 'easy', v)}
-                            />
+                            <ValidatedInput value={item.easy} max={stats.easy} onChange={v => updateBlueprint(index, 'easy', v)} />
                           </td>
                           <td>
-                            <ValidatedInput
-                              value={item.medium}
-                              max={stats.medium}
-                              onChange={v => updateBlueprint(index, 'medium', v)}
-                            />
+                            <ValidatedInput value={item.medium} max={stats.medium} onChange={v => updateBlueprint(index, 'medium', v)} />
                           </td>
                           <td>
-                            <ValidatedInput
-                              value={item.hard}
-                              max={stats.hard}
-                              onChange={v => updateBlueprint(index, 'hard', v)}
-                            />
+                            <ValidatedInput value={item.hard} max={stats.hard} onChange={v => updateBlueprint(index, 'hard', v)} />
                           </td>
                           <td style={{ textAlign: 'center', fontWeight: 600 }}>
                             {Number(item.easy) + Number(item.medium) + Number(item.hard)}
                           </td>
                           <td>
-                            <button 
-                              type="button" 
-                              onClick={() => removeBlueprintRow(index)}
-                              className="btn btn-danger"
-                              style={{ padding: '5px 10px', fontSize: 12 }}
-                            >
+                            <button type="button" onClick={() => removeBlueprintRow(index)} className="btn btn-danger" style={{ padding: '5px 10px', fontSize: 12 }}>
                               Remove
                             </button>
                           </td>
@@ -534,6 +813,96 @@ function BatchManagement() {
                 </table>
                 <button type="button" onClick={addBlueprintRow} className="btn btn-secondary" style={{ marginTop: 10 }}>
                   + Add Module
+                </button>
+              </>
+            ) : (
+              <>
+                {/* Stats panel – By Module + Type */}
+                <QuestionBankTypeStatsPanel />
+
+                <table className="matrix-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      <th>Type</th>
+                      <th>🟢 Easy</th>
+                      <th>🟡 Medium</th>
+                      <th>🔴 Hard</th>
+                      <th>Total</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {formData.blueprintByType.map((item, index) => {
+                      const stats = getStatsForModuleType(item.module, item.type);
+                      // Combos used by OTHER rows
+                      const otherCombos = formData.blueprintByType
+                        .filter((_, i) => i !== index)
+                        .map(i => `${i.module}||${i.type}`);
+                      return (
+                        <tr key={index}>
+                          <td style={{ minWidth: 140 }}>
+                            <select
+                              style={{ width: '100%', padding: '8px' }}
+                              value={item.module}
+                              onChange={e => updateTypeBlueprint(index, 'module', e.target.value)}
+                            >
+                              {modules.map(m => (
+                                <option key={m} value={m}>{m}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ minWidth: 120 }}>
+                            <select
+                              style={{ width: '100%', padding: '8px' }}
+                              value={item.type}
+                              onChange={e => updateTypeBlueprint(index, 'type', e.target.value as QuestionType)}
+                            >
+                              {QUESTION_TYPES.map(t => {
+                                const combo = `${item.module}||${t}`;
+                                const isUsed = otherCombos.includes(combo);
+                                return (
+                                  <option key={t} value={t} disabled={isUsed}>
+                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
+                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                            </div>
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.easy} max={stats.easy} onChange={v => updateTypeBlueprint(index, 'easy', v)} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.medium} max={stats.medium} onChange={v => updateTypeBlueprint(index, 'medium', v)} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.hard} max={stats.hard} onChange={v => updateTypeBlueprint(index, 'hard', v)} />
+                          </td>
+                          <td style={{ textAlign: 'center', fontWeight: 600 }}>
+                            {Number(item.easy) + Number(item.medium) + Number(item.hard)}
+                          </td>
+                          <td>
+                            <button type="button" onClick={() => removeTypeBlueprintRow(index)} className="btn btn-danger" style={{ padding: '5px 10px', fontSize: 12 }}>
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <button
+                  type="button"
+                  onClick={addTypeBlueprintRow}
+                  disabled={!nextAvailableModuleType}
+                  className="btn btn-secondary"
+                  style={{ marginTop: 10 }}
+                  title={!nextAvailableModuleType ? 'Tất cả combinations đã được thêm' : ''}
+                >
+                  + Add Module / Type
                 </button>
               </>
             )}
@@ -548,10 +917,17 @@ function BatchManagement() {
               </div>
             )}
 
-            <button 
-              type="submit" 
-              disabled={loading || totalQuestions < 1 || totalQuestions > 20 || modules.length === 0 || createBlueprintErrors.length > 0}
-              className="btn btn-primary" 
+            <button
+              type="submit"
+              disabled={
+                loading ||
+                totalQuestions < 1 ||
+                totalQuestions > 20 ||
+                (blueprintMode === 'module' && modules.length === 0) ||
+                (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
+                createBlueprintErrors.length > 0
+              }
+              className="btn btn-primary"
               style={{ marginTop: 20 }}
             >
               {loading ? 'Creating...' : 'Create Batch'}
@@ -733,94 +1109,178 @@ function BatchManagement() {
 
           <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>
 
-          {modules.length === 0 ? (
-            <p className="error">No modules available</p>
-          ) : (
-            <>
-              {/* Stats panel */}
-              <QuestionBankStatsPanel />
+          {/* Blueprint Mode Toggle for Edit form */}
+          <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
 
-              <table className="matrix-table">
-                <thead>
-                  <tr>
-                    <th>Module</th>
-                    <th>🟢 Easy</th>
-                    <th>🟡 Medium</th>
-                    <th>🔴 Hard</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {editingBatch.blueprint?.map((item: any, index: number) => {
-                    const stats = getStatsForModule(item.module);
-                    return (
-                      <tr key={index}>
-                        <td>
-                          <select 
-                            value={item.module}
-                            onChange={e => {
-                              const newBlueprint = [...editingBatch.blueprint];
-                              newBlueprint[index].module = e.target.value;
-                              setEditingBatch({...editingBatch, blueprint: newBlueprint});
-                            }}
-                            style={{ width: '100%' }}
-                          >
-                            {modules.map(m => <option key={m} value={m}>{m}</option>)}
-                          </select>
-                          {/* Available hint */}
-                          <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                            Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
-                          </div>
-                        </td>
-                        <td>
-                          <ValidatedInput
-                            value={item.easy || 0}
-                            max={stats.easy}
-                            onChange={v => {
-                              const newBlueprint = [...editingBatch.blueprint];
-                              newBlueprint[index].easy = parseInt(v) || 0;
-                              setEditingBatch({...editingBatch, blueprint: newBlueprint});
-                            }}
-                          />
-                        </td>
-                        <td>
-                          <ValidatedInput
-                            value={item.medium || 0}
-                            max={stats.medium}
-                            onChange={v => {
-                              const newBlueprint = [...editingBatch.blueprint];
-                              newBlueprint[index].medium = parseInt(v) || 0;
-                              setEditingBatch({...editingBatch, blueprint: newBlueprint});
-                            }}
-                          />
-                        </td>
-                        <td>
-                          <ValidatedInput
-                            value={item.hard || 0}
-                            max={stats.hard}
-                            onChange={v => {
-                              const newBlueprint = [...editingBatch.blueprint];
-                              newBlueprint[index].hard = parseInt(v) || 0;
-                              setEditingBatch({...editingBatch, blueprint: newBlueprint});
-                            }}
-                          />
-                        </td>
-                        <td>
-                          <button 
-                            onClick={() => {
-                              const newBlueprint = editingBatch.blueprint.filter((_: any, i: number) => i !== index);
-                              setEditingBatch({...editingBatch, blueprint: newBlueprint});
-                            }}
-                            className="btn btn-danger"
-                            style={{ fontSize: 12, padding: '4px 8px' }}
-                          >X</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </>
+          {editBlueprintMode === 'module' ? (
+            modules.length === 0 ? (
+              <p className="error">No modules available</p>
+            ) : (
+              <>
+                <QuestionBankStatsPanel />
+                <table className="matrix-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      <th>🟢 Easy</th>
+                      <th>🟡 Medium</th>
+                      <th>🔴 Hard</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(editingBatch.blueprint || []).map((item: any, index: number) => {
+                      const stats = getStatsForModule(item.module);
+                      return (
+                        <tr key={index}>
+                          <td>
+                            <select
+                              value={item.module}
+                              onChange={e => {
+                                const newBlueprint = [...editingBatch.blueprint];
+                                newBlueprint[index].module = e.target.value;
+                                setEditingBatch({ ...editingBatch, blueprint: newBlueprint });
+                              }}
+                              style={{ width: '100%' }}
+                            >
+                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
+                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                            </div>
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
+                              const nb = [...editingBatch.blueprint]; nb[index].easy = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprint: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
+                              const nb = [...editingBatch.blueprint]; nb[index].medium = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprint: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
+                              const nb = [...editingBatch.blueprint]; nb[index].hard = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprint: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <button
+                              onClick={() => setEditingBatch({
+                                ...editingBatch,
+                                blueprint: editingBatch.blueprint.filter((_: any, i: number) => i !== index)
+                              })}
+                              className="btn btn-danger"
+                              style={{ fontSize: 12, padding: '4px 8px' }}
+                            >X</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )
+          ) : (
+            moduleTypeStats.length === 0 ? (
+              <p className="error">No type data available</p>
+            ) : (
+              <>
+                <QuestionBankTypeStatsPanel />
+                <table className="matrix-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      <th>Type</th>
+                      <th>🟢 Easy</th>
+                      <th>🟡 Medium</th>
+                      <th>🔴 Hard</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {((editingBatch.blueprintByType || []) as BlueprintItemByType[]).map((item, index) => {
+                      const stats = getStatsForModuleType(item.module, item.type);
+                      const otherCombos = ((editingBatch.blueprintByType || []) as BlueprintItemByType[])
+                        .filter((_, i) => i !== index)
+                        .map(i => `${i.module}||${i.type}`);
+                      return (
+                        <tr key={index}>
+                          <td style={{ minWidth: 140 }}>
+                            <select
+                              value={item.module}
+                              onChange={e => {
+                                const nb = [...editingBatch.blueprintByType];
+                                nb[index].module = e.target.value;
+                                setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                              }}
+                              style={{ width: '100%' }}
+                            >
+                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </td>
+                          <td style={{ minWidth: 120 }}>
+                            <select
+                              value={item.type}
+                              onChange={e => {
+                                const nb = [...editingBatch.blueprintByType];
+                                nb[index].type = e.target.value;
+                                setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                              }}
+                              style={{ width: '100%' }}
+                            >
+                              {QUESTION_TYPES.map(t => {
+                                const combo = `${item.module}||${t}`;
+                                const isUsed = otherCombos.includes(combo);
+                                return (
+                                  <option key={t} value={t} disabled={isUsed}>
+                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
+                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                            </div>
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
+                              const nb = [...editingBatch.blueprintByType]; nb[index].easy = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
+                              const nb = [...editingBatch.blueprintByType]; nb[index].medium = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
+                              const nb = [...editingBatch.blueprintByType]; nb[index].hard = parseInt(v) || 0;
+                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                            }} />
+                          </td>
+                          <td>
+                            <button
+                              onClick={() => setEditingBatch({
+                                ...editingBatch,
+                                blueprintByType: (editingBatch.blueprintByType || []).filter((_: any, i: number) => i !== index)
+                              })}
+                              className="btn btn-danger"
+                              style={{ fontSize: 12, padding: '4px 8px' }}
+                            >X</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )
           )}
 
           {/* Edit blueprint validation errors */}
@@ -834,17 +1294,35 @@ function BatchManagement() {
           )}
 
           <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button 
-              onClick={() => {
-                setEditingBatch({
+            {editBlueprintMode === 'module' ? (
+              <button
+                onClick={() => setEditingBatch({
                   ...editingBatch,
                   blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
-                });
-              }}
-              className="btn btn-secondary"
-            >
-              + Add Module
-            </button>
+                })}
+                className="btn btn-secondary"
+              >
+                + Add Module
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  if (!nextAvailableModuleTypeEdit) return;
+                  setEditingBatch({
+                    ...editingBatch,
+                    blueprintByType: [
+                      ...(editingBatch.blueprintByType || []),
+                      { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                    ]
+                  });
+                }}
+                disabled={!nextAvailableModuleTypeEdit}
+                className="btn btn-secondary"
+                title={!nextAvailableModuleTypeEdit ? 'Tất cả combinations đã được thêm' : ''}
+              >
+                + Add Module / Type
+              </button>
+            )}
 
             <button 
               onClick={handleUpdateBatch}

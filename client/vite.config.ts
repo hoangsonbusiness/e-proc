@@ -11,5 +11,18 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  optimizeDeps: {
+    include: ['@monaco-editor/react']
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Tách Monaco Editor thành chunk riêng để lazy-load
+          'monaco-editor': ['@monaco-editor/react']
+        }
+      }
+    }
   }
 });

@@ -20,6 +20,12 @@ export const adminApi = {
   getModuleStats: () =>
     api.get('/admin/questions/module-stats'),
   
+  getTypeStats: () =>
+    api.get('/admin/questions/type-stats'),
+  
+  getModuleTypeStats: () =>
+    api.get('/admin/questions/module-type-stats'),
+  
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
   
