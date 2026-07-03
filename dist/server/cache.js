@@ -1,5 +1,7 @@
 import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
+import { stripHtml } from '../utils/string.js';
 dotenv.config();
 class FileCache {
     cache = new Map();
@@ -9,8 +11,8 @@ class FileCache {
     queueFlushInterval = null;
     cachedAISettings = null;
     settingsLastFetched = 0;
-    dataDir;
-    queueFile;
+    dataDir = path.join(process.cwd(), 'data');
+    queueFile = path.join(process.cwd(), 'data', 'queue.json');
     constructor() {
         this.ensureDataDir();
         // Call loadQueue - for async DB load we need to handle separately
@@ -311,7 +313,7 @@ class FileCache {
                 await this.updateQueueInDB(job);
                 const { query } = await import('../server/db/postgres.js');
                 const examResult = await query(`
-          SELECT eq.*, q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
+          SELECT eq.*, q.question_sample, q.question_plain, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
           FROM exam_questions eq
           JOIN question_bank q ON eq.question_id = q.id
           WHERE eq.id = ?
@@ -327,9 +329,10 @@ class FileCache {
                     await this.updateQueueInDB(job);
                     return;
                 }
+                const questionText = eq.question_plain || stripHtml(eq.question_sample);
                 const prompt = `You are an expert technical interviewer. Evaluate the following answer based on the rubric.
 
-Question: ${eq.question_sample}
+Question: ${questionText}
 Answer: ${eq.answer}
 
 Rubric Must-have (70%): ${eq.rubric_must_have}

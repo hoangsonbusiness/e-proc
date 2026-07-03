@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
 import db from '../db/postgres.js';
-import { normalizeUnicode } from '../../utils/string.js';
+import { normalizeUnicode, stripHtml, sanitizeFilename, buildContentDisposition } from '../../utils/string.js';
 import dotenv from 'dotenv';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
@@ -118,6 +118,8 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
             const level = colIndex['Level'] !== undefined ? row[colIndex['Level']] : row[2];
             const module = colIndex['Topic'] !== undefined ? row[colIndex['Topic']] : (colIndex['Module'] !== undefined ? row[colIndex['Module']] : row[3]);
             const question = colIndex['Question Sample'] !== undefined ? row[colIndex['Question Sample']] : row[4];
+            const questionGroupRaw = colIndex['QuestionGroup'] ?? colIndex['Question Set'] ?? colIndex['Bộ đề'];
+            const questionGroup = (questionGroupRaw !== undefined ? row[questionGroupRaw]?.toString().trim() : '') || '';
             const rubricMustHave = row[rubricMustHaveCol]?.toString() || '';
             const rubricNice = row[rubricNiceCol]?.toString() || '';
             const rubricOpt = row[rubricOptCol]?.toString() || '';
@@ -135,7 +137,8 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
                 continue;
             }
             const normalizedModule = normalizeUnicode(module.toString());
-            const existing = await db.query('SELECT id FROM question_bank WHERE id = $1', [id]);
+            const questionPlain = stripHtml(question.toString());
+            const existing = await db.query('SELECT id FROM question_bank WHERE id = ?', [id]);
             if (existing.rows.length > 0) {
                 updated++;
             }
@@ -144,28 +147,30 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
             }
             if (USE_SQLITE) {
                 await db.query(`
-          INSERT OR REPLACE INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+          INSERT OR REPLACE INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
             }
             else {
                 const pgQuery = `
-          INSERT INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+          INSERT INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
             module = EXCLUDED.module,
+            question_group = EXCLUDED.question_group,
             question_sample = EXCLUDED.question_sample,
+            question_plain = EXCLUDED.question_plain,
             rubric_must_have = EXCLUDED.rubric_must_have,
             rubric_nice_to_have = EXCLUDED.rubric_nice_to_have,
             rubric_optional = EXCLUDED.rubric_optional,
             updated_at = CURRENT_TIMESTAMP
         `;
                 console.log('[Import] PG Query:', pgQuery);
-                await db.query(pgQuery, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+                await db.query(pgQuery, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
             }
         }
         console.log(`[Import] Imported: ${imported}, Updated: ${updated}, Skipped: ${skipped}`);
@@ -195,6 +200,19 @@ router.get('/questions/modules', async (req, res) => {
     try {
         const result = await db.query('SELECT DISTINCT module FROM question_bank ORDER BY module');
         res.json(result.rows.map((m) => m.module));
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+router.get('/questions/question-groups', async (req, res) => {
+    try {
+        const result = await db.query(`
+      SELECT DISTINCT question_group FROM question_bank
+      WHERE question_group IS NOT NULL AND question_group != ''
+      ORDER BY question_group
+    `);
+        res.json(result.rows.map((r) => r.question_group));
     }
     catch (error) {
         res.status(500).json({ error: error.message });
@@ -623,10 +641,14 @@ router.delete('/students/:id', async (req, res) => {
 router.get('/batches/:id/students/export', async (req, res) => {
     try {
         const { id } = req.params;
-        const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [parseInt(id)]);
+        const batchId = parseInt(id);
+        const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+        const batchName = batchResult.rows[0]?.name;
+        const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-students`;
+        const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [batchId]);
         const students = result.rows;
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=students-${id}.xlsx`);
+        res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
         const workbook = XLSX.utils.book_new();
         const sheet = XLSX.utils.json_to_sheet(students);
         XLSX.utils.book_append_sheet(workbook, sheet, 'Students');
@@ -711,11 +733,14 @@ router.get('/batches/:id/results/export', async (req, res) => {
     try {
         const { id } = req.params;
         const batchId = parseInt(id);
+        const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+        const batchName = batchResult.rows[0]?.name;
+        const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-results`;
         const studentsResult = await db.query('SELECT id, email FROM students WHERE batch_id = ?', [batchId]);
         const workbook = XLSX.utils.book_new();
         for (const student of studentsResult.rows) {
             const questionsResult = await db.query(`
-        SELECT eq.*, q.type, q.level, q.module, q.question_sample, 
+        SELECT eq.*, q.type, q.level, q.module, q.question_sample, q.question_plain,
           q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
         FROM exam_questions eq
         JOIN question_bank q ON eq.question_id = q.id
@@ -730,7 +755,7 @@ router.get('/batches/:id/results/export', async (req, res) => {
                 Type: q.type,
                 Level: q.level,
                 Module: q.module,
-                Question: q.question_sample,
+                Question: q.question_plain || stripHtml(q.question_sample),
                 Answer: q.answer || '',
                 'Rubric Must-have': q.rubric_must_have,
                 'Rubric Nice-to-have': q.rubric_nice_to_have,
@@ -746,7 +771,7 @@ router.get('/batches/:id/results/export', async (req, res) => {
             XLSX.utils.book_append_sheet(workbook, sheet, sheetName.substring(0, 31));
         }
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', `attachment; filename=results-${id}.xlsx`);
+        res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
         res.send(XLSX.write(workbook, { type: 'buffer' }));
     }
     catch (error) {
