@@ -20,15 +20,24 @@ export const adminApi = {
   getQuestionGroups: () =>
     api.get('/admin/questions/question-groups'),
 
+  getModuleGroups: () =>
+    api.get('/admin/questions/module-groups'),
+
   getModuleStats: () =>
     api.get('/admin/questions/module-stats'),
-  
+
+  getModuleGroupStats: () =>
+    api.get('/admin/questions/module-group-stats'),
+
   getTypeStats: () =>
     api.get('/admin/questions/type-stats'),
-  
+
   getModuleTypeStats: () =>
     api.get('/admin/questions/module-type-stats'),
-  
+
+  getModuleGroupTypeStats: () =>
+    api.get('/admin/questions/module-group-type-stats'),
+
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
   
