@@ -9,16 +9,20 @@ import {
 import Editor, { OnMount, BeforeMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 import { registerJavaCompletions } from '../hooks/useMonacoJavaCompletions';
+import { useFrontendCompletions } from '../hooks/useFrontendCompletions';
 
 // ─── Language options displayed in the selector dropdown ──────────────────
 
 export const LANGUAGE_OPTIONS: { value: SupportedLanguage; label: string }[] = [
-  { value: 'java',      label: 'Java' },
-  { value: 'sql',       label: 'SQL' },
-  { value: 'plaintext', label: 'Plain Text' },
+  { value: 'java',       label: 'Java' },
+  { value: 'sql',        label: 'SQL' },
+  { value: 'html',       label: 'HTML / Bootstrap 5' },
+  { value: 'css',        label: 'CSS' },
+  { value: 'javascript', label: 'JavaScript' },
+  { value: 'plaintext',  label: 'Plain Text' },
 ];
 
-export type SupportedLanguage = 'java' | 'sql' | 'plaintext';
+export type SupportedLanguage = 'java' | 'sql' | 'html' | 'css' | 'javascript' | 'plaintext';
 
 // ─── Auto-detect language from question metadata ───────────────────────────
 
@@ -29,6 +33,9 @@ export function detectLanguage(
   const combined = `${questionType ?? ''} ${questionModule ?? ''}`.toLowerCase();
 
   if (/\bsql\b/.test(combined)) return 'sql';
+  if (/\bhtml\b|\bbootstrap\b/.test(combined)) return 'html';
+  if (/\bcss\b/.test(combined)) return 'css';
+  if (/\bjavascript\b|\bjs\b|\bdom\b/.test(combined)) return 'javascript';
   // Default to java for all Java/Spring/Hibernate contexts
   return 'java';
 }
@@ -70,8 +77,14 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
   ) {
     const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
     const monacoRef = useRef<typeof Monaco | null>(null);
+    const [monacoInstance, setMonacoInstance] = useState<typeof Monaco | null>(null);
     const [language, setLanguage] = useState<SupportedLanguage>(defaultLanguage);
     const [showGuide, setShowGuide] = useState(false);
+
+    // Register frontend completions (HTML/CSS/JS/Bootstrap 5)
+    // monacoInstance is set in handleBeforeMount; useFrontendCompletions
+    // is a no-op until monacoInstance becomes non-null.
+    useFrontendCompletions(monacoInstance);
 
     const toggleGuide = useCallback(() => setShowGuide(v => !v), []);
 
@@ -634,6 +647,344 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           ['DateRangeCheck', 'Check if today is within a date range (inclusive)'],
         ],
       },
+      // ─── Frontend: HTML / Bootstrap 5 ────────────────────────────────────
+      {
+        group: '🌐 HTML5 Structural Snippets',
+        rows: [
+          ['html5', 'Full HTML5 boilerplate (<!DOCTYPE html> + head + body)'],
+          ['html5-bootstrap', 'HTML5 + Bootstrap 5 CDN (CSS + JS bundle)'],
+          ['meta:viewport', '<meta name="viewport" content="width=device-width, initial-scale=1.0">'],
+          ['meta:charset', '<meta charset="UTF-8">'],
+          ['meta:og', 'Open Graph meta tags (og:title, og:description, og:image)'],
+          ['link:css', '<link rel="stylesheet" href="styles.css">'],
+          ['link:favicon', '<link rel="icon" ...>'],
+          ['script:src', '<script src="script.js"></script>'],
+          ['script:defer', '<script defer src="..."></script>'],
+          ['script:module', '<script type="module" src="..."></script>'],
+          ['header', '<header>...</header>'],
+          ['nav', '<nav>...</nav>'],
+          ['main', '<main>...</main>'],
+          ['footer', '<footer>...</footer>'],
+          ['section', '<section><h2>Title</h2>...</section>'],
+          ['article', '<article><h2>Title</h2>...</article>'],
+          ['aside', '<aside>...</aside>'],
+          ['figure', '<figure><img><figcaption>...</figcaption></figure>'],
+          ['details', '<details><summary>...</summary>...</details>'],
+          ['dialog', 'Native HTML <dialog> element'],
+          ['div', '<div class="...">...</div>'],
+          ['span', '<span class="...">text</span>'],
+          ['a', '<a href="#" target="_blank">Link text</a>'],
+          ['a:blank', 'External link with rel="noopener noreferrer"'],
+          ['h1', '<h1>Heading 1</h1>'],
+          ['h2', '<h2>Heading 2</h2>'],
+          ['h3', '<h3>Heading 3</h3>'],
+          ['p', '<p>Paragraph.</p>'],
+        ],
+      },
+      {
+        group: '📋 HTML Form Snippets',
+        rows: [
+          ['form', '<form action method id> ... <button type="submit">'],
+          ['input:text', '<input type="text" id name placeholder required>'],
+          ['input:email', '<input type="email"> — email field'],
+          ['input:password', '<input type="password"> — password field'],
+          ['input:number', '<input type="number" min max value>'],
+          ['input:date', '<input type="date"> — date picker'],
+          ['input:file', '<input type="file" accept>'],
+          ['input:checkbox', '<input type="checkbox">'],
+          ['input:radio', '<input type="radio"> + <label>'],
+          ['input:hidden', '<input type="hidden">'],
+          ['input:search', '<input type="search"> — search input'],
+          ['input:range', '<input type="range" min max> — slider'],
+          ['input:color', '<input type="color"> — color picker'],
+          ['label', '<label for="id">Label text</label>'],
+          ['textarea', '<textarea rows cols placeholder>'],
+          ['select', '<select> with <option> list'],
+          ['datalist', '<input list> + <datalist> autocomplete'],
+          ['fieldset', '<fieldset><legend>...</legend>...</fieldset>'],
+          ['button', '<button type="button" id>Click Me</button>'],
+          ['button:submit', '<button type="submit">Submit</button>'],
+        ],
+      },
+      {
+        group: '📊 HTML Table & List Snippets',
+        rows: [
+          ['table', '<table><thead><tr><th>...</th></tr></thead><tbody>...</tbody></table>'],
+          ['table:full', 'Table with caption, thead, tbody, tfoot'],
+          ['tr', '<tr><td>...</td></tr>'],
+          ['ul', '<ul><li>...</li></ul> — bullet list'],
+          ['ol', '<ol><li>...</li></ol> — numbered list'],
+          ['li', '<li>Item</li>'],
+          ['dl', '<dl><dt>Term</dt><dd>Definition</dd></dl>'],
+        ],
+      },
+      {
+        group: '🎬 HTML Media & Embed',
+        rows: [
+          ['img', '<img src alt width height>'],
+          ['img:responsive', '<img class="img-fluid"> — Bootstrap responsive'],
+          ['picture', '<picture><source media><img></picture>'],
+          ['video', '<video controls><source src type></video>'],
+          ['audio', '<audio controls><source src type></audio>'],
+          ['iframe', '<iframe src width height frameborder allowfullscreen>'],
+          ['iframe:youtube', 'YouTube embed iframe'],
+          ['canvas', '<canvas id width height>'],
+          ['svg', 'Inline SVG with xmlns, width, height, viewBox'],
+        ],
+      },
+      // ─── Frontend: Bootstrap 5 Layout ────────────────────────────────────
+      {
+        group: '📐 Bootstrap 5 — Layout Snippets',
+        rows: [
+          ['container', '<div class="container">'],
+          ['container-fluid', '<div class="container-fluid">'],
+          ['row', '<div class="row">'],
+          ['col', '<div class="col">'],
+          ['col-md', '<div class="col-12 col-md-{n}">'],
+          ['col-layout-2', '2-column responsive row (col-12 col-md-6)'],
+          ['col-layout-3', '3-column responsive row (col-12 col-md-4)'],
+          ['col-layout-sidebar', 'Sidebar (col-md-3) + Main (col-md-9) layout'],
+        ],
+      },
+      // ─── Frontend: Bootstrap 5 Components ────────────────────────────────
+      {
+        group: '🧩 Bootstrap 5 — Component Snippets',
+        rows: [
+          ['navbar', 'Responsive navbar with brand, toggler, nav links'],
+          ['card', 'Card with image, title, text, button'],
+          ['card-simple', 'Card with header, body, footer'],
+          ['card-group', 'Row of cards with equal height'],
+          ['modal', 'Modal with trigger button, header, body, footer'],
+          ['alert', 'Dismissible alert (alert-success/danger/warning...)'],
+          ['btn', '<button class="btn btn-primary">'],
+          ['btn-group', 'Button group'],
+          ['badge', '<span class="badge bg-primary">'],
+          ['breadcrumb', 'Breadcrumb nav'],
+          ['pagination', 'Pagination nav with page items'],
+          ['accordion', 'Accordion with collapse items'],
+          ['tabs', 'Nav tabs + tab-content panes'],
+          ['dropdown', 'Dropdown button with menu items'],
+          ['form-bs', 'Bootstrap 5 styled form with mb-3, form-control'],
+          ['form-floating', 'Floating label input'],
+          ['input-group', 'Input group with addon text'],
+          ['form-check', 'Bootstrap checkbox / radio with form-check'],
+          ['form-select', 'Bootstrap styled <select class="form-select">'],
+          ['table-bs', 'Responsive, striped, hover Bootstrap table'],
+          ['spinner', 'spinner-border loading indicator'],
+          ['progress', 'Progress bar with aria attributes'],
+          ['toast', 'Toast notification (position-fixed)'],
+          ['offcanvas', 'Offcanvas sliding panel'],
+          ['hero', 'Hero / jumbotron section'],
+          ['list-group', 'Vertical list group'],
+          ['carousel', 'Image carousel with controls'],
+        ],
+      },
+      // ─── Frontend: Bootstrap 5 Utility Classes ────────────────────────────
+      {
+        group: '🎨 Bootstrap 5 — Utility Classes (gõ tên class)',
+        rows: [
+          ['d-flex / d-grid / d-none / d-block', 'Display utilities'],
+          ['justify-content-{start|end|center|between|evenly}', 'Flex justify-content'],
+          ['align-items-{start|end|center|stretch}', 'Flex align-items'],
+          ['flex-{row|column|wrap|nowrap|grow-1|shrink-0}', 'Flex direction/wrap'],
+          ['gap-{0..5} / gx-{n} / gy-{n}', 'Gap utilities'],
+          ['ms-auto / me-auto / mx-auto', 'Margin auto (flex centering)'],
+          ['vstack / hstack', 'Vertical / horizontal stack'],
+          ['m-{0..5} / mb/mt/ms/me/mx/my-{n}', 'Margin utilities'],
+          ['p-{0..5} / pb/pt/ps/pe/px/py-{n}', 'Padding utilities'],
+          ['text-{start|center|end}', 'Text alignment'],
+          ['text-{primary|secondary|success|danger|warning|info|muted|white|dark}', 'Text colors'],
+          ['fw-{bold|normal|light|semibold} / fst-italic', 'Font weight / style'],
+          ['fs-{1..6}', 'Font size (2.5rem → 1rem)'],
+          ['display-{1..6}', 'Display headings (5rem → 2.5rem)'],
+          ['lead', 'Larger lead paragraph'],
+          ['text-truncate / text-nowrap / text-uppercase / text-decoration-none', 'Text utilities'],
+          ['bg-{primary|secondary|success|danger|warning|info|light|dark|white}', 'Background colors'],
+          ['bg-gradient / bg-opacity-{25|50|75}', 'Gradient + opacity'],
+          ['border / border-{0|top|bottom|primary|danger}', 'Border utilities'],
+          ['border-{1|2|3}', 'Border width'],
+          ['rounded / rounded-{0|3|4|5|circle|pill}', 'Border radius'],
+          ['shadow / shadow-{sm|lg|none}', 'Box shadows'],
+          ['w-{25|50|75|100|auto} / h-{25|50|75|100}', 'Width / height utilities'],
+          ['min-vh-100 / vh-100 / mw-100', 'Viewport height / max-width'],
+          ['position-{relative|absolute|fixed|sticky}', 'Position utilities'],
+          ['top-0 / bottom-0 / start-0 / end-0 / top-50 / start-50', 'Position offset'],
+          ['translate-middle', 'Center with translate(-50%, -50%)'],
+          ['overflow-{auto|hidden|scroll}', 'Overflow utilities'],
+          ['visible / invisible / visually-hidden', 'Visibility utilities'],
+          ['z-{0|1|2|n1}', 'Z-index utilities'],
+          ['object-fit-{cover|contain}', 'Object-fit utilities'],
+          ['img-fluid / img-thumbnail', 'Responsive / thumbnail image'],
+          ['btn / btn-{color} / btn-outline-{color}', 'Button variants'],
+          ['btn-{sm|lg} / btn-close', 'Button size / close button'],
+          ['nav-link / nav-tabs / nav-pills', 'Nav link styles'],
+          ['table / table-{striped|hover|bordered|responsive|dark|sm}', 'Table utilities'],
+          ['form-control / form-label / form-text', 'Form input styling'],
+          ['is-valid / is-invalid / valid-feedback / invalid-feedback', 'Form validation styles'],
+          ['ratio-{16x9|4x3|1x1}', 'Aspect ratio'],
+          ['stretched-link / pe-none / user-select-none', 'Misc utilities'],
+          ['float-{start|end} / clearfix', 'Float utilities'],
+        ],
+      },
+      // ─── Frontend: CSS Snippets ───────────────────────────────────────────
+      {
+        group: '🎨 CSS — Layout Snippets',
+        rows: [
+          ['flex-center', '.container { display:flex; justify-content:center; align-items:center; }'],
+          ['flex-column', 'Flex column layout'],
+          ['flex-row', 'Flex row layout with gap'],
+          ['flex-space-between', 'Flex justify-content:space-between'],
+          ['flex-wrap', 'Flex with flex-wrap:wrap + gap'],
+          ['grid-2col', 'display:grid; grid-template-columns: repeat(2, 1fr)'],
+          ['grid-3col', '3-column CSS Grid'],
+          ['grid-auto', 'Auto-fit responsive grid (minmax)'],
+          ['grid-layout', 'Named grid areas (header/sidebar/main/footer)'],
+          ['grid-place-center', 'display:grid; place-items:center'],
+          ['position-center', 'Absolute center trick (top:50% + transform:-50%)'],
+          ['sticky-header', 'position:sticky; top:0 with shadow'],
+          ['truncate', 'Single-line text ellipsis (white-space:nowrap + overflow:hidden)'],
+          ['multiline-clamp', '-webkit-line-clamp: N lines'],
+          ['reset-css', '*, *::before, *::after { box-sizing:border-box; margin:0; padding:0 }'],
+          ['visually-hidden', 'Screen-reader only utility class'],
+          ['scrollbar-hidden', 'Hide scrollbar cross-browser'],
+        ],
+      },
+      {
+        group: '✨ CSS — Animation Snippets',
+        rows: [
+          ['@keyframes', '@keyframes name { from {...} to {...} }'],
+          ['@keyframes-steps', '@keyframes with 0%, 50%, 100% steps'],
+          ['animation', 'animation: name duration easing iteration'],
+          ['transition', 'transition: property duration easing'],
+          ['transition-multiple', 'Multiple CSS transitions (opacity + transform)'],
+          ['hover-lift', ':hover { transform:translateY(-4px); box-shadow:... }'],
+          ['fade-in', '@keyframes fadeIn + animation'],
+          ['slide-in-left', '@keyframes slideInLeft + animation'],
+          ['spin', 'Infinite spin for loader'],
+          ['transform-rotate', 'transform: rotate(45deg)'],
+          ['transform-scale', 'transform: scale(1.2)'],
+          ['transform-translate', 'transform: translateX(0) translateY(0)'],
+        ],
+      },
+      {
+        group: '📱 CSS — Media Query Snippets',
+        rows: [
+          ['@media-sm', '@media (max-width: 576px) { } — mobile'],
+          ['@media-md', '@media (max-width: 768px) { } — tablet'],
+          ['@media-lg', '@media (max-width: 992px) { } — small desktop'],
+          ['@media-xl', '@media (max-width: 1200px) { } — desktop'],
+          ['@media-min-md', '@media (min-width: 768px) { } — tablet+'],
+          ['@media-min-lg', '@media (min-width: 992px) { } — desktop+'],
+          ['@media-dark', '@media (prefers-color-scheme: dark) { }'],
+          ['@media-print', '@media print { }'],
+          ['@media-landscape', '@media (orientation: landscape) { }'],
+          ['@media-hover', '@media (hover: hover) { .el:hover { } }'],
+        ],
+      },
+      {
+        group: '🎨 CSS — Other Snippets',
+        rows: [
+          [':root-vars', ':root { --primary:#007bff; --font-size:16px; ... }'],
+          ['var()', 'var(--variableName) — use CSS custom property'],
+          ['var-fallback', 'var(--name, fallback)'],
+          ['color-scheme', ':root {} + [data-theme="dark"] {} — light/dark vars'],
+          [':hover', '.el:hover { }'],
+          [':focus', '.el:focus { outline:2px solid ... }'],
+          ['::before / ::after', 'Pseudo-elements with content'],
+          ['::placeholder', 'Input placeholder styling'],
+          [':nth-child / :not() / :is() / :where()', 'CSS selector helpers'],
+          ['bg-gradient-linear', 'background: linear-gradient(135deg, ...)'],
+          ['bg-gradient-radial', 'background: radial-gradient(circle, ...)'],
+          ['box-shadow-card', 'Card-style multi-layer box shadow'],
+          ['text-gradient', 'Gradient colored text via background-clip'],
+          ['glassmorphism', 'Glass effect: rgba bg + backdrop-filter:blur'],
+          ['aspect-ratio', 'aspect-ratio: 16 / 9'],
+          ['font-import', '@import url(Google Fonts)'],
+          ['font-face', '@font-face { font-family, src woff2/woff, font-display:swap }'],
+        ],
+      },
+      // ─── Frontend: JavaScript ─────────────────────────────────────────────
+      {
+        group: '🟨 JavaScript — DOM Snippets',
+        rows: [
+          ['qsel', 'document.querySelector("#id")'],
+          ['qsel-all', 'document.querySelectorAll(".class")'],
+          ['getById / getByClass / getByTag', 'getElementById / getElementsByClassName / Tag'],
+          ['createElement', 'create + className + textContent + appendChild'],
+          ['innerHTML / textContent', 'Set element content'],
+          ['setAttribute / getAttribute / removeAttribute', 'Element attributes'],
+          ['classList-add / remove / toggle / contains', 'CSS class manipulation'],
+          ['style-set', 'element.style.property = value'],
+          ['dataset / dataset-set', 'element.dataset.key — read/write data attributes'],
+          ['appendChild / removeChild / remove', 'DOM tree mutation'],
+          ['insertBefore / insertAdjacentHTML', 'Insert elements'],
+          ['cloneNode / closest / matches', 'Clone, traverse, test'],
+          ['getBoundingClientRect', 'Get element position and size'],
+          ['scrollIntoView', 'Smooth scroll to element'],
+          ['querySelectorAll-forEach', 'querySelectorAll + .forEach()'],
+          ['dom-ready', 'document.addEventListener("DOMContentLoaded", ...)'],
+          ['window-load', 'window.addEventListener("load", ...)'],
+        ],
+      },
+      {
+        group: '🟨 JavaScript — Event Snippets',
+        rows: [
+          ['addEventListener', 'element.addEventListener("click", function(event) { })'],
+          ['addEventListener-arrow', 'addEventListener with arrow function'],
+          ['removeEventListener', 'element.removeEventListener(event, handler)'],
+          ['event-delegation', 'Parent listens → event.target.matches(".item")'],
+          ['preventDefault', 'event.preventDefault()'],
+          ['stopPropagation', 'event.stopPropagation()'],
+          ['input-change', 'listen for input value changes'],
+          ['form-submit', 'preventDefault + FormData'],
+          ['keyboard-event', 'keydown → e.key check'],
+          ['scroll-event', 'window.scrollY'],
+          ['resize-event', 'window.innerWidth / innerHeight'],
+          ['custom-event', 'new CustomEvent() + dispatchEvent()'],
+          ['once-event', 'addEventListener with { once: true }'],
+          ['passive-event', 'addEventListener with { passive: true }'],
+        ],
+      },
+      {
+        group: '🟨 JavaScript — Fetch / Async Snippets',
+        rows: [
+          ['fetch-get', 'fetch(url).then().then().catch() — GET'],
+          ['fetch-async', 'async/await GET with try/catch'],
+          ['fetch-post', 'fetch with method:POST, headers, JSON.stringify(body)'],
+          ['fetch-post-async', 'async POST function'],
+          ['fetch-put / fetch-delete', 'PUT / DELETE requests'],
+          ['fetch-headers', 'Headers with Authorization Bearer token'],
+          ['fetch-abort', 'AbortController + setTimeout abort'],
+          ['Promise-new', 'new Promise((resolve, reject) => { })'],
+          ['Promise-all', 'await Promise.all([p1, p2])'],
+          ['Promise-allSettled', 'await Promise.allSettled(...)'],
+          ['async-function', 'async function with try/catch'],
+          ['try-catch', 'try { } catch (error) { } finally { }'],
+        ],
+      },
+      {
+        group: '🟨 JavaScript — Storage & Patterns',
+        rows: [
+          ['ls-set / ls-get / ls-remove / ls-clear', 'localStorage CRUD'],
+          ['ls-json-set / ls-json-get', 'localStorage with JSON.stringify/parse'],
+          ['ss-set / ss-get / ss-remove', 'sessionStorage CRUD'],
+          ['cookie-set / cookie-get', 'Document cookie set/get'],
+          ['setTimeout / setInterval / clearTimeout / clearInterval', 'Timing functions'],
+          ['requestAnimationFrame', 'rAF animation loop'],
+          ['class', 'ES6 class with constructor + method'],
+          ['export-default / export-named / import', 'ES modules'],
+          ['destructure-obj / destructure-arr', 'Destructuring assignment'],
+          ['spread-obj / spread-arr', 'Spread operator for merge/clone'],
+          ['for-of / for-in / for-entries', 'Modern loop patterns'],
+          ['ternary / nullish / optional-chain', 'Modern operators'],
+          ['cl / ce / ct / cw', 'console.log/error/table/warn'],
+          ['Array-map / filter / reduce / find / flat', 'Array higher-order methods'],
+          ['Object-keys / values / entries / assign / freeze', 'Object utilities'],
+          ['JSON-stringify / JSON-parse / JSON-parse-safe', 'JSON serialization'],
+          ['Math-random / Math-range', 'Random number generation'],
+          ['URL-params / history-push / location-redirect', 'URL & routing'],
+        ],
+      },
     ], []);
 
 
@@ -650,6 +1001,8 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       monacoRef.current = monaco;
       // Register Java/Spring/Hibernate IntelliSense completions (once)
       registerJavaCompletions(monaco);
+      // Trigger useFrontendCompletions by updating state
+      setMonacoInstance(monaco);
     }, []);
 
     // ── On mount: bind anti-cheat commands ────────────────────────────────
@@ -793,9 +1146,15 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
             <div className="code-editor-guide-header">
               <strong>📖 IntelliSense Prefix Reference</strong>
               <p className="code-editor-guide-desc">
-                Gõ đúng <strong>prefix</strong> bên dưới (ví dụ: <code>str.</code>, <code>list.</code>, <code>ldt.</code>)
-                rồi nhấn <kbd>Ctrl</kbd>+<kbd>Space</kbd> để xem gợi ý method.
-                Hoặc gõ tên snippet đầy đủ (ví dụ: <code>JDBC Connect</code>, <code>ScannerStdin</code>).
+                Gõ đúng <strong>prefix</strong> bên dưới rồi nhấn <kbd>Ctrl</kbd>+<kbd>Space</kbd> để xem gợi ý.
+                <br />
+                <strong>Java:</strong> <code>str.</code>, <code>list.</code>, <code>ldt.</code>, <code>ScannerStdin</code>, <code>JDBC Connect</code>...
+                <br />
+                <strong>HTML/BS5:</strong> <code>html5</code>, <code>navbar</code>, <code>card</code>, <code>modal</code>, <code>form-bs</code>, <code>table-bs</code>...
+                <br />
+                <strong>CSS:</strong> <code>flex-center</code>, <code>grid-2col</code>, <code>@media-md</code>, <code>fade-in</code>, <code>glassmorphism</code>...
+                <br />
+                <strong>JS:</strong> <code>qsel</code>, <code>fetch-async</code>, <code>addEventListener</code>, <code>cl</code>, <code>Array-map</code>...
               </p>
             </div>
             <div className="code-editor-guide-groups">

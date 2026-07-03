@@ -1,0 +1,290 @@
+import type * as Monaco from 'monaco-editor';
+
+function snip(
+  monaco: typeof Monaco,
+  label: string,
+  insertText: string,
+  detail: string,
+  documentation: string
+): Monaco.languages.CompletionItem {
+  return {
+    label,
+    kind: monaco.languages.CompletionItemKind.Snippet,
+    detail,
+    documentation: { value: documentation, isTrusted: true },
+    insertText,
+    insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+    range: undefined as unknown as Monaco.IRange,
+  };
+}
+
+// ─── CSS Layout Snippets ────────────────────────────────────────────────────
+
+function getCssLayoutSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, 'flex-center',
+      '.${1:container} {\n\tdisplay: flex;\n\tjustify-content: center;\n\talign-items: center;\n}',
+      'Flex center', 'Flexbox horizontal + vertical centering'),
+    snip(monaco, 'flex-column',
+      '.${1:container} {\n\tdisplay: flex;\n\tflex-direction: column;\n\tjustify-content: ${2:flex-start};\n\talign-items: ${3:stretch};\n}',
+      'Flex column', 'Flexbox column layout'),
+    snip(monaco, 'flex-row',
+      '.${1:container} {\n\tdisplay: flex;\n\tflex-direction: row;\n\tjustify-content: ${2:space-between};\n\talign-items: ${3:center};\n\tgap: ${4:1rem};\n}',
+      'Flex row', 'Flexbox row layout with gap'),
+    snip(monaco, 'flex-space-between',
+      '.${1:container} {\n\tdisplay: flex;\n\tjustify-content: space-between;\n\talign-items: center;\n}',
+      'Flex space-between', 'Flex row with space between'),
+    snip(monaco, 'flex-wrap',
+      '.${1:container} {\n\tdisplay: flex;\n\tflex-wrap: wrap;\n\tgap: ${2:1rem};\n}',
+      'Flex wrap', 'Flexbox with wrapping'),
+    snip(monaco, 'grid-2col',
+      '.${1:container} {\n\tdisplay: grid;\n\tgrid-template-columns: repeat(2, 1fr);\n\tgap: ${2:1rem};\n}',
+      'Grid 2 columns', '2-column CSS Grid'),
+    snip(monaco, 'grid-3col',
+      '.${1:container} {\n\tdisplay: grid;\n\tgrid-template-columns: repeat(3, 1fr);\n\tgap: ${2:1rem};\n}',
+      'Grid 3 columns', '3-column CSS Grid'),
+    snip(monaco, 'grid-auto',
+      '.${1:container} {\n\tdisplay: grid;\n\tgrid-template-columns: repeat(auto-fit, minmax(${2:250px}, 1fr));\n\tgap: ${3:1rem};\n}',
+      'Grid auto-fit', 'Auto-fit responsive grid'),
+    snip(monaco, 'grid-layout',
+      '.${1:layout} {\n\tdisplay: grid;\n\tgrid-template-areas:\n\t\t"${2:header header}"\n\t\t"${3:sidebar main}"\n\t\t"${4:footer footer}";\n\tgrid-template-rows: ${5:auto 1fr auto};\n\tgrid-template-columns: ${6:200px 1fr};\n\tmin-height: 100vh;\n}',
+      'Grid named layout', 'Named grid areas layout'),
+    snip(monaco, 'grid-place-center',
+      '.${1:container} {\n\tdisplay: grid;\n\tplace-items: center;\n}',
+      'Grid place center', 'Grid centering with place-items'),
+    snip(monaco, 'position-center',
+      '.${1:element} {\n\tposition: absolute;\n\ttop: 50%;\n\tleft: 50%;\n\ttransform: translate(-50%, -50%);\n}',
+      'Absolute center', 'Absolute position center trick'),
+    snip(monaco, 'sticky-header',
+      '.${1:header} {\n\tposition: sticky;\n\ttop: 0;\n\tz-index: ${2:100};\n\tbackground-color: ${3:#fff};\n\tbox-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);\n}',
+      'Sticky header', 'Sticky positioned header'),
+    snip(monaco, 'truncate',
+      '.${1:element} {\n\twhite-space: nowrap;\n\toverflow: hidden;\n\ttext-overflow: ellipsis;\n}',
+      'Text truncate', 'Single-line text truncation'),
+    snip(monaco, 'multiline-clamp',
+      '.${1:element} {\n\tdisplay: -webkit-box;\n\t-webkit-line-clamp: ${2:3};\n\t-webkit-box-orient: vertical;\n\toverflow: hidden;\n}',
+      'Multi-line clamp', 'Clamp text to N lines'),
+    snip(monaco, 'reset-css',
+      '*, *::before, *::after {\n\tbox-sizing: border-box;\n\tmargin: 0;\n\tpadding: 0;\n}',
+      'CSS Reset', 'Universal box-sizing reset'),
+    snip(monaco, 'box-sizing',
+      '* {\n\tbox-sizing: border-box;\n}',
+      'Box sizing', 'Global border-box sizing'),
+    snip(monaco, 'visually-hidden',
+      '.visually-hidden {\n\tposition: absolute;\n\twidth: 1px;\n\theight: 1px;\n\tpadding: 0;\n\tmargin: -1px;\n\toverflow: hidden;\n\tclip: rect(0, 0, 0, 0);\n\twhite-space: nowrap;\n\tborder: 0;\n}',
+      'Visually hidden', 'Screen-reader-only utility'),
+    snip(monaco, 'scrollbar-hidden',
+      '.${1:element} {\n\tscrollbar-width: none; /* Firefox */\n\t-ms-overflow-style: none; /* IE */\n}\n.${1:element}::-webkit-scrollbar {\n\tdisplay: none; /* Chrome/Safari */\n}',
+      'Hide scrollbar', 'Hide scrollbar cross-browser'),
+  ];
+}
+
+// ─── CSS Animation Snippets ─────────────────────────────────────────────────
+
+function getCssAnimationSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, '@keyframes',
+      '@keyframes ${1:animationName} {\n\tfrom {\n\t\t${2:opacity: 0;}\n\t}\n\tto {\n\t\t${3:opacity: 1;}\n\t}\n}',
+      '@keyframes', 'CSS keyframe animation definition'),
+    snip(monaco, '@keyframes-steps',
+      '@keyframes ${1:animationName} {\n\t0% { ${2:transform: translateX(0);} }\n\t50% { ${3:transform: translateX(100px);} }\n\t100% { ${4:transform: translateX(0);} }\n}',
+      '@keyframes with steps', 'Multi-step keyframe animation'),
+    snip(monaco, 'animation',
+      'animation: ${1:name} ${2:1s} ${3:ease-in-out} ${4:infinite};',
+      'animation shorthand', 'CSS animation shorthand property'),
+    snip(monaco, 'transition',
+      'transition: ${1:all} ${2:0.3s} ${3:ease};',
+      'transition shorthand', 'CSS transition shorthand'),
+    snip(monaco, 'transition-multiple',
+      'transition:\n\topacity ${1:0.3s} ease,\n\ttransform ${2:0.3s} ease;',
+      'Multiple transitions', 'Multiple CSS transitions'),
+    snip(monaco, 'transform-rotate',
+      'transform: rotate(${1:45deg});',
+      'Transform rotate', 'CSS rotate transform'),
+    snip(monaco, 'transform-scale',
+      'transform: scale(${1:1.2});',
+      'Transform scale', 'CSS scale transform'),
+    snip(monaco, 'transform-translate',
+      'transform: translateX(${1:0}) translateY(${2:0});',
+      'Transform translate', 'CSS translate transform'),
+    snip(monaco, 'hover-lift',
+      '.${1:element}:hover {\n\ttransform: translateY(-${2:4px});\n\tbox-shadow: 0 ${3:8px} ${4:16px} rgba(0, 0, 0, ${5:0.15});\n\ttransition: transform ${6:0.2s} ease, box-shadow ${6:0.2s} ease;\n}',
+      'Hover lift effect', 'Lift on hover animation'),
+    snip(monaco, 'fade-in',
+      '@keyframes fadeIn {\n\tfrom { opacity: 0; }\n\tto { opacity: 1; }\n}\n.${1:element} {\n\tanimation: fadeIn ${2:0.5s} ease-in;\n}',
+      'Fade in', 'Fade in animation'),
+    snip(monaco, 'slide-in-left',
+      '@keyframes slideInLeft {\n\tfrom { transform: translateX(-100%); opacity: 0; }\n\tto { transform: translateX(0); opacity: 1; }\n}\n.${1:element} {\n\tanimation: slideInLeft ${2:0.4s} ease-out;\n}',
+      'Slide in left', 'Slide in from left animation'),
+    snip(monaco, 'spin',
+      '@keyframes spin {\n\tfrom { transform: rotate(0deg); }\n\tto { transform: rotate(360deg); }\n}\n.${1:spinner} {\n\tanimation: spin ${2:1s} linear infinite;\n}',
+      'Spin animation', 'Infinite spin / loading spinner'),
+  ];
+}
+
+// ─── CSS Responsive Snippets ────────────────────────────────────────────────
+
+function getCssResponsiveSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, '@media-sm',
+      '@media (max-width: 576px) {\n\t$0\n}',
+      '@media sm', 'Media query ≤ 576px (mobile)'),
+    snip(monaco, '@media-md',
+      '@media (max-width: 768px) {\n\t$0\n}',
+      '@media md', 'Media query ≤ 768px (tablet)'),
+    snip(monaco, '@media-lg',
+      '@media (max-width: 992px) {\n\t$0\n}',
+      '@media lg', 'Media query ≤ 992px (small desktop)'),
+    snip(monaco, '@media-xl',
+      '@media (max-width: 1200px) {\n\t$0\n}',
+      '@media xl', 'Media query ≤ 1200px (desktop)'),
+    snip(monaco, '@media-min-md',
+      '@media (min-width: 768px) {\n\t$0\n}',
+      '@media min-md', 'Media query ≥ 768px (tablet+)'),
+    snip(monaco, '@media-min-lg',
+      '@media (min-width: 992px) {\n\t$0\n}',
+      '@media min-lg', 'Media query ≥ 992px (desktop+)'),
+    snip(monaco, '@media-dark',
+      '@media (prefers-color-scheme: dark) {\n\t$0\n}',
+      '@media dark mode', 'Prefers dark color scheme'),
+    snip(monaco, '@media-print',
+      '@media print {\n\t$0\n}',
+      '@media print', 'Print media query'),
+    snip(monaco, '@media-landscape',
+      '@media (orientation: landscape) {\n\t$0\n}',
+      '@media landscape', 'Landscape orientation query'),
+    snip(monaco, '@media-hover',
+      '@media (hover: hover) {\n\t.${1:element}:hover {\n\t\t$0\n\t}\n}',
+      '@media hover capable', 'Hover-capable device query'),
+  ];
+}
+
+// ─── CSS Variable Snippets ──────────────────────────────────────────────────
+
+function getCssVariableSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, ':root-vars',
+      ':root {\n\t--${1:primary}: ${2:#007bff};\n\t--${3:secondary}: ${4:#6c757d};\n\t--${5:font-size}: ${6:16px};\n\t--${7:border-radius}: ${8:0.375rem};\n}',
+      ':root variables', 'CSS custom properties definition'),
+    snip(monaco, 'var()',
+      'var(--${1:variableName})',
+      'var()', 'Use CSS custom property'),
+    snip(monaco, 'var-fallback',
+      'var(--${1:variableName}, ${2:fallback})',
+      'var() with fallback', 'CSS variable with fallback value'),
+    snip(monaco, 'color-scheme',
+      ':root {\n\t--color-bg: ${1:#ffffff};\n\t--color-text: ${2:#212529};\n\t--color-primary: ${3:#0d6efd};\n}\n[data-theme="dark"] {\n\t--color-bg: ${4:#1a1a2e};\n\t--color-text: ${5:#f8f9fa};\n\t--color-primary: ${6:#4da8ff};\n}',
+      'Color scheme vars', 'Light/dark theme CSS variables'),
+  ];
+}
+
+// ─── CSS Selector Snippets ──────────────────────────────────────────────────
+
+function getCssSelectorSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, ':hover',
+      '.${1:element}:hover {\n\t$0\n}',
+      ':hover', 'Hover pseudo-class'),
+    snip(monaco, ':focus',
+      '.${1:element}:focus {\n\toutline: ${2:2px solid #0d6efd};\n\toutline-offset: ${3:2px};\n}',
+      ':focus', 'Focus pseudo-class'),
+    snip(monaco, ':focus-visible',
+      '.${1:element}:focus-visible {\n\toutline: 2px solid ${2:#0d6efd};\n\toutline-offset: 2px;\n}',
+      ':focus-visible', 'Focus visible (keyboard nav)'),
+    snip(monaco, ':nth-child',
+      '.${1:element}:nth-child(${2:odd}) {\n\t$0\n}',
+      ':nth-child', 'nth-child selector'),
+    snip(monaco, ':not()',
+      '.${1:element}:not(${2:.excluded}) {\n\t$0\n}',
+      ':not()', ':not() negation selector'),
+    snip(monaco, ':is()',
+      ':is(${1:h1, h2, h3}) {\n\t$0\n}',
+      ':is()', ':is() forgiving selector list'),
+    snip(monaco, ':where()',
+      ':where(${1:header, footer}) {\n\t$0\n}',
+      ':where()', ':where() zero-specificity selector'),
+    snip(monaco, '::before',
+      '.${1:element}::before {\n\tcontent: "${2:}";\n\tdisplay: ${3:block};\n\t$0\n}',
+      '::before', '::before pseudo-element'),
+    snip(monaco, '::after',
+      '.${1:element}::after {\n\tcontent: "${2:}";\n\tdisplay: ${3:block};\n\t$0\n}',
+      '::after', '::after pseudo-element'),
+    snip(monaco, '::placeholder',
+      '.${1:input}::placeholder {\n\tcolor: ${2:#adb5bd};\n\tfont-style: ${3:italic};\n}',
+      '::placeholder', 'Input placeholder styling'),
+    snip(monaco, ':first-child',
+      '.${1:element}:first-child {\n\t$0\n}',
+      ':first-child', 'First child selector'),
+    snip(monaco, ':last-child',
+      '.${1:element}:last-child {\n\t$0\n}',
+      ':last-child', 'Last child selector'),
+    snip(monaco, 'child-combinator',
+      '.${1:parent} > .${2:child} {\n\t$0\n}',
+      'Child combinator >', 'Direct child selector'),
+    snip(monaco, 'sibling-combinator',
+      '.${1:element} + .${2:sibling} {\n\t$0\n}',
+      'Adjacent sibling +', 'Adjacent sibling selector'),
+    snip(monaco, 'general-sibling',
+      '.${1:element} ~ .${2:sibling} {\n\t$0\n}',
+      'General sibling ~', 'General sibling selector'),
+    snip(monaco, 'attr-selector',
+      '[${1:data-type}="${2:value}"] {\n\t$0\n}',
+      'Attribute selector', 'CSS attribute selector'),
+  ];
+}
+
+// ─── CSS Common Property Snippets ───────────────────────────────────────────
+
+function getCssCommonSnippets(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    snip(monaco, 'class',
+      '.${1:className} {\n\t$0\n}',
+      'CSS class', 'New CSS class block'),
+    snip(monaco, 'id',
+      '#${1:id} {\n\t$0\n}',
+      'CSS id', 'New CSS ID block'),
+    snip(monaco, 'bg-gradient-linear',
+      'background: linear-gradient(${1:135deg}, ${2:#667eea} 0%, ${3:#764ba2} 100%);',
+      'Linear gradient', 'CSS linear gradient'),
+    snip(monaco, 'bg-gradient-radial',
+      'background: radial-gradient(circle, ${1:#f5f7fa} 0%, ${2:#c3cfe2} 100%);',
+      'Radial gradient', 'CSS radial gradient'),
+    snip(monaco, 'box-shadow-card',
+      'box-shadow: 0 ${1:4px} ${2:6px} -1px rgba(0, 0, 0, ${3:0.1}), 0 2px 4px -1px rgba(0, 0, 0, 0.06);',
+      'Box shadow card', 'Card-style box shadow'),
+    snip(monaco, 'box-shadow-elevated',
+      'box-shadow: 0 ${1:20px} ${2:25px} -5px rgba(0, 0, 0, ${3:0.1}), 0 10px 10px -5px rgba(0, 0, 0, 0.04);',
+      'Box shadow elevated', 'Elevated component shadow'),
+    snip(monaco, 'text-gradient',
+      'background: linear-gradient(${1:135deg}, ${2:#667eea}, ${3:#764ba2});\n-webkit-background-clip: text;\n-webkit-text-fill-color: transparent;\nbackground-clip: text;',
+      'Text gradient', 'Gradient colored text'),
+    snip(monaco, 'glassmorphism',
+      'background: rgba(${1:255, 255, 255}, ${2:0.1});\nbackdrop-filter: blur(${3:10px});\n-webkit-backdrop-filter: blur(${3:10px});\nborder: 1px solid rgba(255, 255, 255, 0.2);\nborder-radius: ${4:16px};',
+      'Glassmorphism', 'Glass effect with backdrop blur'),
+    snip(monaco, 'aspect-ratio',
+      'aspect-ratio: ${1:16} / ${2:9};',
+      'Aspect ratio', 'CSS aspect-ratio property'),
+    snip(monaco, 'scroll-smooth',
+      'html {\n\tscroll-behavior: smooth;\n}',
+      'Scroll smooth', 'Smooth scrolling behavior'),
+    snip(monaco, 'font-import',
+      '@import url("https://fonts.googleapis.com/css2?family=${1:Inter}:wght@${2:300;400;500;600;700}&display=swap");',
+      'Google Font import', 'Import font from Google Fonts'),
+    snip(monaco, 'font-face',
+      '@font-face {\n\tfont-family: "${1:MyFont}";\n\tsrc: url("${2:fonts/myfont.woff2}") format("woff2"),\n\t\turl("${3:fonts/myfont.woff}") format("woff");\n\tfont-weight: ${4:normal};\n\tfont-style: ${5:normal};\n\tfont-display: swap;\n}',
+      '@font-face', 'Custom font face definition'),
+  ];
+}
+
+// ─── Public Export ─────────────────────────────────────────────────────────
+
+export function getCssCompletions(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    ...getCssLayoutSnippets(monaco),
+    ...getCssAnimationSnippets(monaco),
+    ...getCssResponsiveSnippets(monaco),
+    ...getCssVariableSnippets(monaco),
+    ...getCssSelectorSnippets(monaco),
+    ...getCssCommonSnippets(monaco),
+  ];
+}
