@@ -305,7 +305,8 @@ export async function query(text, params) {
     if (USE_SQLITE && sqliteDb) {
         try {
             const stmt = sqliteDb.prepare(text);
-            if (text.trim().toUpperCase().startsWith('SELECT')) {
+            const upperText = text.trim().toUpperCase();
+            if (upperText.startsWith('SELECT') || upperText.includes('RETURNING')) {
                 return { rows: stmt.all(...(params || [])), rowCount: 0 };
             }
             else {

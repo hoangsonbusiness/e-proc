@@ -8,11 +8,17 @@ import {
 import Editor, { OnMount, BeforeMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 import { registerJavaCompletions } from '../hooks/useMonacoJavaCompletions';
+import { registerCobolLanguage } from '../hooks/useMonacoCobolLanguage';
 
 // ─── Language options displayed in the selector dropdown ──────────────────
 
 export const LANGUAGE_OPTIONS: { value: SupportedLanguage; label: string }[] = [
   { value: 'java',      label: 'Java' },
+  { value: 'c',         label: 'C' },
+  { value: 'cpp',       label: 'C++' },
+  { value: 'csharp',    label: 'C#' },
+  { value: 'python',    label: 'Python' },
+  { value: 'cobol',     label: 'COBOL' },
   { value: 'sql',       label: 'SQL' },
   { value: 'xml',       label: 'XML / Hibernate HBM' },
   { value: 'yaml',      label: 'YAML / Spring Config' },
@@ -20,7 +26,7 @@ export const LANGUAGE_OPTIONS: { value: SupportedLanguage; label: string }[] = [
   { value: 'plaintext', label: 'Plain Text' },
 ];
 
-export type SupportedLanguage = 'java' | 'sql' | 'xml' | 'yaml' | 'json' | 'plaintext';
+export type SupportedLanguage = 'java' | 'c' | 'cpp' | 'csharp' | 'python' | 'cobol' | 'sql' | 'xml' | 'yaml' | 'json' | 'plaintext';
 
 // ─── Auto-detect language from question metadata ───────────────────────────
 
@@ -30,11 +36,16 @@ export function detectLanguage(
 ): SupportedLanguage {
   const combined = `${questionType ?? ''} ${questionModule ?? ''}`.toLowerCase();
 
+  if (/\bcobol\b/.test(combined)) return 'cobol';
   if (/\bsql\b/.test(combined)) return 'sql';
   if (/\bxml\b|hibernate.*mapping|hbm/.test(combined)) return 'xml';
   if (/\byaml\b|yml\b|spring.*config/.test(combined)) return 'yaml';
   if (/\bjson\b/.test(combined)) return 'json';
+  if (/\bpython\b|\bpy\b|django|flask|pandas/.test(combined)) return 'python';
+  if (/c#|csharp|\.net|dotnet|asp\.net/.test(combined)) return 'csharp';
   if (/\bjava\b|spring|hibernate|jpa/.test(combined)) return 'java';
+  if (/c\+\+|cpp|embedded|mcu|isr|autosar/.test(combined)) return 'cpp';
+  if (/\bc\b/.test(combined)) return 'c';
 
   return 'java'; // sensible default for Java exams
 }
@@ -90,6 +101,8 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       monacoRef.current = monaco;
       // Register Java/Spring/Hibernate IntelliSense completions (once)
       registerJavaCompletions(monaco);
+      // Monaco has no built-in COBOL support — register a minimal Monarch tokenizer
+      registerCobolLanguage(monaco);
     }, []);
 
     // ── On mount: bind anti-cheat commands ────────────────────────────────
