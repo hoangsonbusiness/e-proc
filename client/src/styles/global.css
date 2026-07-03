@@ -343,4 +343,157 @@ th {
   border-radius: 8px;
   border: 1px solid var(--border);
 }
+
+/* ── IntelliSense Guide toggle button ─────────────────────────────────────── */
+.code-editor-guide-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: #3a3a3a;
+  color: #d4c897;
+  border: 1px solid #5a5030;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.code-editor-guide-btn:hover {
+  background: #4a4520;
+  border-color: #c9a84c;
+  color: #ffe082;
+}
+
+.code-editor-guide-btn.active {
+  background: #3d3210;
+  border-color: #c9a84c;
+  color: #ffe082;
+  box-shadow: 0 0 0 2px rgba(201,168,76,0.25);
+}
+
+/* ── IntelliSense Guide panel ─────────────────────────────────────────────── */
+.code-editor-guide {
+  background: #1a1a2e;
+  border-bottom: 1px solid #333;
+  padding: 14px 16px 18px;
+  max-height: 520px;
+  overflow-y: auto;
+  animation: guideSlideDown 0.18s ease;
+}
+
+@keyframes guideSlideDown {
+  from { opacity: 0; max-height: 0; }
+  to   { opacity: 1; max-height: 520px; }
+}
+
+.code-editor-guide::-webkit-scrollbar { width: 6px; }
+.code-editor-guide::-webkit-scrollbar-track { background: #111; }
+.code-editor-guide::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+
+.code-editor-guide-header {
+  margin-bottom: 12px;
+}
+
+.code-editor-guide-header strong {
+  color: #ffe082;
+  font-size: 14px;
+}
+
+.code-editor-guide-desc {
+  color: #aaa;
+  font-size: 12px;
+  margin: 6px 0 0;
+  line-height: 1.6;
+}
+
+.code-editor-guide-desc code {
+  background: #2d2d2d;
+  color: #80cbc4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+
+.code-editor-guide-desc kbd {
+  background: #3c3c3c;
+  border: 1px solid #555;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11px;
+  color: #ccc;
+}
+
+/* Responsive multi-column grid */
+.code-editor-guide-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.code-editor-guide-group {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.code-editor-guide-group-title {
+  background: #0f3460;
+  color: #90caf9;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.code-editor-guide-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.code-editor-guide-table thead tr {
+  background: #1a2744;
+}
+
+.code-editor-guide-table th {
+  color: #7986cb;
+  font-weight: 600;
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.code-editor-guide-table td {
+  padding: 3px 8px;
+  color: #bbb;
+  border-top: 1px solid #1f1f3a;
+  vertical-align: middle;
+  line-height: 1.5;
+}
+
+.code-editor-guide-table tr:hover td {
+  background: #1c2a4a;
+  color: #e0e0e0;
+}
+
+.code-editor-guide-table td:first-child {
+  width: 44%;
+}
+
+.code-editor-guide-table td code {
+  background: #1e2d4a;
+  color: #80cbc4;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  white-space: nowrap;
+}
 
