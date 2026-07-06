@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import { stripHtml } from '../utils/string.js';
 
 dotenv.config();
 
@@ -49,8 +50,8 @@ class FileCache {
   private cachedAISettings: AISettings | null = null;
   private settingsLastFetched: number = 0;
   
-  private dataDir: string;
-  private queueFile: string;
+  private dataDir: string = path.join(process.cwd(), 'data');
+  private queueFile: string = path.join(process.cwd(), 'data', 'queue.json');
 
   constructor() {
     this.ensureDataDir();
@@ -390,7 +391,7 @@ class FileCache {
         const { query } = await import('../server/db/postgres.js');
         
         const examResult = await query(`
-          SELECT eq.*, q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
+          SELECT eq.*, q.question_sample, q.question_plain, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
           FROM exam_questions eq
           JOIN question_bank q ON eq.question_id = q.id
           WHERE eq.id = ?
@@ -410,9 +411,11 @@ class FileCache {
           return;
         }
 
+        const questionText = eq.question_plain || stripHtml(eq.question_sample);
+
         const prompt = `You are an expert technical interviewer. Evaluate the following answer based on the rubric.
 
-Question: ${eq.question_sample}
+Question: ${questionText}
 Answer: ${eq.answer}
 
 Rubric Must-have (70%): ${eq.rubric_must_have}

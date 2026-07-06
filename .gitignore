@@ -6,3 +6,15 @@ data/*.db-wal
 .env
 *.log
 .DS_Store
+
+# Build outputs
+dist/
+client/dist/
+
+# Package manager locks
+package-lock.json
+client/package-lock.json
+
+# Local environments
+client/.env.local
+

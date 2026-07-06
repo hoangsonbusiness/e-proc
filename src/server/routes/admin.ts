@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
 import db from '../db/postgres.js';
-import { normalizeUnicode } from '../../utils/string.js';
+import { normalizeUnicode, stripHtml, sanitizeFilename, buildContentDisposition } from '../../utils/string.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -140,7 +140,9 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       const level = colIndex['Level'] !== undefined ? row[colIndex['Level']] : row[2];
       const module = colIndex['Topic'] !== undefined ? row[colIndex['Topic']] : (colIndex['Module'] !== undefined ? row[colIndex['Module']] : row[3]);
       const question = colIndex['Question Sample'] !== undefined ? row[colIndex['Question Sample']] : row[4];
-      
+      const questionGroupRaw = colIndex['QuestionGroup'] ?? colIndex['Question Set'] ?? colIndex['Bộ đề'];
+      const questionGroup = (questionGroupRaw !== undefined ? row[questionGroupRaw]?.toString().trim() : '') || '';
+
       const rubricMustHave = row[rubricMustHaveCol]?.toString() || '';
       const rubricNice = row[rubricNiceCol]?.toString() || '';
       const rubricOpt = row[rubricOptCol]?.toString() || '';
@@ -163,9 +165,10 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       }
 
       const normalizedModule = normalizeUnicode(module.toString());
+      const questionPlain = stripHtml(question.toString());
 
-      const existing = await db.query('SELECT id FROM question_bank WHERE id = $1', [id]);
-      
+      const existing = await db.query('SELECT id FROM question_bank WHERE id = ?', [id]);
+
       if (existing.rows.length > 0) {
         updated++;
       } else {
@@ -174,27 +177,29 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
 
       if (USE_SQLITE) {
         await db.query(`
-          INSERT OR REPLACE INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+          INSERT OR REPLACE INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
       } else {
         const pgQuery = `
-          INSERT INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+          INSERT INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
             module = EXCLUDED.module,
+            question_group = EXCLUDED.question_group,
             question_sample = EXCLUDED.question_sample,
+            question_plain = EXCLUDED.question_plain,
             rubric_must_have = EXCLUDED.rubric_must_have,
             rubric_nice_to_have = EXCLUDED.rubric_nice_to_have,
             rubric_optional = EXCLUDED.rubric_optional,
             updated_at = CURRENT_TIMESTAMP
         `;
         console.log('[Import] PG Query:', pgQuery);
-        await db.query(pgQuery, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+        await db.query(pgQuery, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
       }
     }
 
@@ -231,6 +236,37 @@ router.get('/questions/modules', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/questions/question-groups', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT DISTINCT question_group FROM question_bank
+      WHERE question_group IS NOT NULL AND question_group != ''
+      ORDER BY question_group
+    `);
+    res.json(result.rows.map((r: any) => r.question_group));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Distinct (module, question_group) combos — used to disambiguate modules that
+// exist under multiple question groups (e.g. "Unit Testing" in both CPP_EMB_PRINT_IOT
+// and CPP_EMB_AUTOSAR) when building exam blueprints.
+router.get('/questions/module-groups', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT DISTINCT module, question_group FROM question_bank
+      ORDER BY module, question_group
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Returns question counts per module broken down by difficulty level
 router.get('/questions/module-stats', async (req: Request, res: Response) => {
   try {
@@ -246,6 +282,32 @@ router.get('/questions/module-stats', async (req: Request, res: Response) => {
     `);
     res.json(result.rows.map((r: any) => ({
       module: r.module,
+      easy:   Number(r.easy)   || 0,
+      medium: Number(r.medium) || 0,
+      hard:   Number(r.hard)   || 0,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Returns question counts per (module, question_group) combination broken down by difficulty level
+router.get('/questions/module-group-stats', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        module,
+        question_group,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module, question_group
+      ORDER BY module, question_group
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
       easy:   Number(r.easy)   || 0,
       medium: Number(r.medium) || 0,
       hard:   Number(r.hard)   || 0,
@@ -295,6 +357,34 @@ router.get('/questions/module-type-stats', async (req: Request, res: Response) =
     `);
     res.json(result.rows.map((r: any) => ({
       module: r.module,
+      type:   r.type,
+      easy:   Number(r.easy)   || 0,
+      medium: Number(r.medium) || 0,
+      hard:   Number(r.hard)   || 0,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Returns question counts per (module, question_group, type) combination broken down by difficulty level
+router.get('/questions/module-group-type-stats', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        module,
+        question_group,
+        type,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module, question_group, type
+      ORDER BY module, question_group, type
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
       type:   r.type,
       easy:   Number(r.easy)   || 0,
       medium: Number(r.medium) || 0,
@@ -477,14 +567,22 @@ router.post('/batches/:id/check-feasibility', async (req: Request, res: Response
       for (const level of ['Easy', 'Medium', 'Hard'] as const) {
         const count = item[level.toLowerCase() as 'easy' | 'medium' | 'hard'];
         if (count > 0) {
+          const conditions = ['module = ?', 'level = ?'];
+          const params: any[] = [item.module, level];
+          if (item.question_group) {
+            conditions.push('question_group = ?');
+            params.push(item.question_group);
+          }
+
           const result = await db.query(`
             SELECT COUNT(*) as count FROM question_bank
-            WHERE module = ? AND level = ?
-          `, [item.module, level]);
+            WHERE ${conditions.join(' AND ')}
+          `, params);
 
+          const label = item.question_group ? `${item.module} (${item.question_group})` : item.module;
           const available = parseInt(result.rows[0].count);
           if (available < count) {
-            errors.push(`Module ${item.module} Level ${level} has only ${available} questions, need ${count}`);
+            errors.push(`Module ${label} Level ${level} has only ${available} questions, need ${count}`);
           }
         }
       }
@@ -495,6 +593,30 @@ router.post('/batches/:id/check-feasibility', async (req: Request, res: Response
     res.status(500).json({ error: error.message });
   }
 });
+
+/** Randomly pick `count` question IDs matching module/level (+ optional type, question_group). */
+async function pickQuestionIds(opts: { module: string; level: string; type?: string; questionGroup?: string; count: number }): Promise<string[]> {
+  const { module, level, type, questionGroup, count } = opts;
+  if (count <= 0) return [];
+
+  const conditions = ['LOWER(module) = ?', 'LOWER(level) = ?'];
+  const params: any[] = [module.toLowerCase().trim(), level.toLowerCase().trim()];
+  if (type) {
+    conditions.push('LOWER(type) = ?');
+    params.push(type.toLowerCase().trim());
+  }
+  if (questionGroup) {
+    conditions.push('LOWER(question_group) = ?');
+    params.push(questionGroup.toLowerCase().trim());
+  }
+  params.push(count);
+
+  const r = await db.query(
+    `SELECT id FROM question_bank WHERE ${conditions.join(' AND ')} ORDER BY RANDOM() LIMIT ?`,
+    params
+  );
+  return r.rows.map((q: any) => q.id);
+}
 
 router.post('/batches/:id/students/import', async (req: Request, res: Response) => {
   try {
@@ -606,48 +728,16 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
         const easy   = item.easy   || 0;
         const medium = item.medium || 0;
         const hard   = item.hard   || 0;
+        const module = item.module || '';
+        const questionGroup = item.question_group || '';
+        const type = blueprintMode === 'type' ? (item.type || '') : undefined;
 
-        if (blueprintMode === 'type') {
-          // By Module + Type: query WHERE module = ? AND type = ? AND level = ?
-          const moduleName = (item.module || '').toLowerCase().trim();
-          const typeName   = (item.type   || '').toLowerCase().trim();
-          console.log(`Processing by module+type: ${item.module}/${item.type}, easy=${easy}, medium=${medium}, hard=${hard}`);
+        console.log(`Processing ${blueprintMode === 'type' ? `${module}/${type}` : module}${questionGroup ? ` (${questionGroup})` : ''}, easy=${easy}, medium=${medium}, hard=${hard}`);
 
-          if (easy > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'easy', easy]);
-            console.log(`  Module+Type Easy: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (medium > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'medium', medium]);
-            console.log(`  Module+Type Medium: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (hard > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'hard', hard]);
-            console.log(`  Module+Type Hard: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-        } else {
-          // Default: By Module only
-          const moduleName = (item.module || '').toLowerCase().trim();
-          console.log(`Processing by module: ${item.module} -> ${moduleName}, easy=${easy}, medium=${medium}, hard=${hard}`);
-
-          if (easy > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'easy', easy]);
-            console.log(`  Module Easy: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (medium > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'medium', medium]);
-            console.log(`  Module Medium: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (hard > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'hard', hard]);
-            console.log(`  Module Hard: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
+        for (const [level, count] of [['easy', easy], ['medium', medium], ['hard', hard]] as const) {
+          const ids = await pickQuestionIds({ module, level, type, questionGroup, count });
+          console.log(`  ${level}: found ${ids.length}`);
+          questionIds.push(...ids);
         }
       }
       
@@ -698,11 +788,17 @@ router.delete('/students/:id', async (req: Request, res: Response) => {
 router.get('/batches/:id/students/export', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [parseInt(id)]);
+    const batchId = parseInt(id);
+
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-students`;
+
+    const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [batchId]);
     const students = result.rows;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=students-${id}.xlsx`);
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
 
     const workbook = XLSX.utils.book_new();
     const sheet = XLSX.utils.json_to_sheet(students);
@@ -800,13 +896,17 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
     const { id } = req.params;
     const batchId = parseInt(id);
 
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-results`;
+
     const studentsResult = await db.query('SELECT id, email FROM students WHERE batch_id = ?', [batchId]);
 
     const workbook = XLSX.utils.book_new();
 
     for (const student of studentsResult.rows) {
       const questionsResult = await db.query(`
-        SELECT eq.*, q.type, q.level, q.module, q.question_sample, 
+        SELECT eq.*, q.type, q.level, q.module, q.question_sample, q.question_plain,
           q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
         FROM exam_questions eq
         JOIN question_bank q ON eq.question_id = q.id
@@ -823,7 +923,7 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
         Type: q.type,
         Level: q.level,
         Module: q.module,
-        Question: q.question_sample,
+        Question: q.question_plain || stripHtml(q.question_sample),
         Answer: q.answer || '',
         'Rubric Must-have': q.rubric_must_have,
         'Rubric Nice-to-have': q.rubric_nice_to_have,
@@ -841,7 +941,7 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
     }
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=results-${id}.xlsx`);
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
     res.send(XLSX.write(workbook, { type: 'buffer' }));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
