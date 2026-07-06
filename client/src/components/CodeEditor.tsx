@@ -11,6 +11,10 @@ import type * as Monaco from 'monaco-editor';
 import { registerJavaCompletions } from '../hooks/useMonacoJavaCompletions';
 import { useFrontendCompletions } from '../hooks/useFrontendCompletions';
 import { registerCobolLanguage } from '../hooks/useMonacoCobolLanguage';
+import { registerCobolCompletions } from '../hooks/useMonacoCobolCompletions';
+import { registerCCompletions } from '../hooks/useMonacoCCompletions';
+import { registerCppCompletions } from '../hooks/useMonacoCppCompletions';
+import { registerPythonCompletions } from '../hooks/useMonacoPythonCompletions';
 
 // ─── Language options displayed in the selector dropdown ──────────────────
 
@@ -1014,6 +1018,11 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       registerJavaCompletions(monaco);
       // Monaco has no built-in COBOL support — register a minimal Monarch tokenizer
       registerCobolLanguage(monaco);
+      registerCobolCompletions(monaco);
+      // Register IntelliSense completions for C, C++, Python (built-in Monaco languages)
+      registerCCompletions(monaco);
+      registerCppCompletions(monaco);
+      registerPythonCompletions(monaco);
       // Trigger useFrontendCompletions by updating state
       setMonacoInstance(monaco);
     }, []);
