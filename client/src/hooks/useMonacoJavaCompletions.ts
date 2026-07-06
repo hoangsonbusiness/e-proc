@@ -1,4 +1,5 @@
 import type * as Monaco from 'monaco-editor';
+import { getJavaMethodCompletions } from './javaMethodCompletions';
 
 // ─── Helper ────────────────────────────────────────────────────────────────
 
@@ -684,6 +685,7 @@ export function registerJavaCompletions(monaco: typeof Monaco): void {
       const allItems = [
         ...getJavaKeywords(monaco),
         ...getJavaSnippets(monaco),
+        ...getJavaMethodCompletions(monaco),
         ...getSpringAnnotations(monaco),
         ...getSpringWebMvcCompletions(monaco),
         ...getHibernateAnnotations(monaco),
