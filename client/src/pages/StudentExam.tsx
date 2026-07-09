@@ -552,7 +552,7 @@ function StudentExam() {
         {formatTime(timeLeft)}
       </div>
 
-      <div style={{ maxWidth: 800, margin: '0 auto', padding: 20 }}>
+      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 32px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
           <div>
             <h2>Question {currentIndex + 1} of {questions.length}</h2>
@@ -609,7 +609,7 @@ function StudentExam() {
                   currentQuestion.module
                 )}
                 disabled={locked || submitting}
-                height="400px"
+                height="550px"
               />
             </Suspense>
           </div>
