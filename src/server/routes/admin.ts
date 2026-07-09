@@ -31,8 +31,21 @@ const loginRateLimit = rateLimit({
 // AUTH ROUTES (không require JWT)
 // =============================================
 
+// GET /api/admin/is-initialized — Kiểm tra xem admin đã được tạo chưa
+router.get('/is-initialized', async (req: Request, res: Response) => {
+  try {
+    const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
+    const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
+    return res.json({ initialized: count > 0 });
+  } catch (err: any) {
+    console.error('[Auth] is-initialized error:', err);
+    return res.status(500).json({ error: 'Failed to check initialization status' });
+  }
+});
+
 // POST /api/admin/setup — Tạo admin lần đầu (chỉ hoạt động khi bảng trống)
 router.post('/setup', async (req: Request, res: Response) => {
+
   try {
     const { username, password } = req.body;
 

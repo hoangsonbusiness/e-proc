@@ -11,15 +11,19 @@ function AdminSetup() {
   const [alreadyInit, setAlreadyInit] = useState(false);
   const navigate = useNavigate();
 
-  // Kiểm tra xem admin đã được tạo chưa bằng cách thử gọi setup với body rỗng
-  // Nếu server trả 403 → đã init rồi
+  // Kiểm tra xem admin đã được tạo chưa qua endpoint chuyên dụng
   useEffect(() => {
-    adminApi.setup('', '').catch((err) => {
-      if (err.response?.status === 403) {
-        setAlreadyInit(true);
-      }
-    });
+    adminApi.isInitialized()
+      .then((res) => {
+        if (res.data.initialized) {
+          setAlreadyInit(true);
+        }
+      })
+      .catch(() => {
+        // Nếu endpoint lỗi → giữ nguyên form setup (safe default)
+      });
   }, []);
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

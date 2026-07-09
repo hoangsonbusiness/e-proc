@@ -42,6 +42,9 @@ api.interceptors.response.use(
 
 export const adminApi = {
   // --- Auth endpoints ---
+  isInitialized: () =>
+    api.get('/admin/is-initialized'),
+
   login: (username: string, password: string) =>
     api.post('/admin/login', { username, password }),
 
