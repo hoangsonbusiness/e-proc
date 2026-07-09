@@ -23,14 +23,10 @@ function QuestionBank() {
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      window.location.href = '/admin';
-      return;
-    }
     loadQuestions();
     loadModules();
   }, []);
+
 
   const loadQuestions = async () => {
     try {

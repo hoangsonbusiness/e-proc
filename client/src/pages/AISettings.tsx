@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 
 interface AISettings {
@@ -23,7 +23,6 @@ const PROVIDERS = [
 ];
 
 function AISettings() {
-  const navigate = useNavigate();
   const [settings, setSettings] = useState<AISettings>({
     provider: 'gemini',
     apiKey: '',
@@ -37,13 +36,9 @@ function AISettings() {
   const [showApiKey, setShowApiKey] = useState(false);
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      navigate('/admin');
-      return;
-    }
     loadSettings();
   }, []);
+
 
   const loadSettings = async () => {
     try {

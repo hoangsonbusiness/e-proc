@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 function StudentConfirm() {
-  const [loading, setLoading] = useState(false);
+  const [loading] = useState(false);
+
   const navigate = useNavigate();
   const location = useLocation();
   

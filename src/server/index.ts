@@ -10,7 +10,15 @@ import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
+// Validate JWT_SECRET tại startup — không cho phép chạy nếu thiếu
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL ERROR: JWT_SECRET is not set in environment variables.');
+  console.error('Please add JWT_SECRET to your .env file and restart the server.');
+  process.exit(1);
+}
+
 console.log('Starting server...');
+
 console.log('DB:', process.env.DATABASE_URL ? 'configured' : 'NOT configured');
 console.log('USE_SQLITE:', process.env.USE_SQLITE || 'false (PostgreSQL)');
 

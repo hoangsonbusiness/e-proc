@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
@@ -67,7 +67,6 @@ interface ModuleTypeStats {
 }
 
 function BatchManagement() {
-  const navigate = useNavigate();
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
@@ -147,17 +146,13 @@ function BatchManagement() {
   // ─── Effects ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      navigate('/admin');
-      return;
-    }
     loadBatches();
     loadModules();
     loadModuleStats();
     loadTypeStats();
     loadModuleTypeStats();
   }, []);
+
 
   useEffect(() => {
     if (modules.length > 0 && formData.blueprint.length === 0) {

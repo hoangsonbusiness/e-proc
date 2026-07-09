@@ -1,19 +1,17 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
+  const { logout } = useAuth();
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      window.location.href = '/admin';
-      return;
-    }
     loadBatches();
   }, []);
+
 
   const loadBatches = async () => {
     try {
@@ -30,7 +28,7 @@ function AdminDashboard() {
     <div className="container">
       <div className="header">
         <h1>Admin Dashboard</h1>
-        <button className="btn btn-secondary" onClick={() => { localStorage.removeItem('adminAuth'); window.location.href = '/admin'; }}>
+        <button className="btn btn-secondary" onClick={logout}>
           Logout
         </button>
       </div>

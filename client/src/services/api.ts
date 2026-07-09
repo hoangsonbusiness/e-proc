@@ -7,7 +7,54 @@ const api = axios.create({
   withCredentials: true
 });
 
+// =============================================
+// REQUEST INTERCEPTOR — Tự động gắn JWT token
+// =============================================
+api.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('adminToken');
+    if (token && config.url?.includes('/admin/')) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// =============================================
+// RESPONSE INTERCEPTOR — Auto logout khi 401
+// =============================================
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (
+      error.response?.status === 401 &&
+      window.location.pathname.startsWith('/admin') &&
+      !window.location.pathname.includes('/admin/login') &&
+      !window.location.pathname.includes('/admin/setup')
+    ) {
+      localStorage.removeItem('adminToken');
+      window.location.href = '/admin';
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const adminApi = {
+  // --- Auth endpoints ---
+  login: (username: string, password: string) =>
+    api.post('/admin/login', { username, password }),
+
+  logout: () =>
+    api.post('/admin/logout').finally(() => localStorage.removeItem('adminToken')),
+
+  setup: (username: string, password: string) =>
+    api.post('/admin/setup', { username, password }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.put('/admin/change-password', { currentPassword, newPassword }),
+
+  // --- Question endpoints ---
   importQuestions: (formData: FormData) =>
     api.post('/admin/questions/import', formData),
   
@@ -32,6 +79,7 @@ export const adminApi = {
   deleteQuestions: (ids: string[]) =>
     api.post('/admin/questions/bulk-delete', { ids }),
   
+  // --- Batch endpoints ---
   createBatch: (data: any) =>
     api.post('/admin/batches', data),
   
@@ -50,10 +98,11 @@ export const adminApi = {
   checkFeasibility: (id: number, blueprint: any[]) =>
     api.post(`/admin/batches/${id}/check-feasibility`, { blueprint }),
   
+  // --- Student endpoints ---
   importStudents: (batchId: number, emails: string[]) =>
     api.post(`/admin/batches/${batchId}/students/import`, { emails }),
   
-getStudents: (batchId: number) =>
+  getStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students`),
   
   deleteStudent: (studentId: number) =>
@@ -62,6 +111,7 @@ getStudents: (batchId: number) =>
   exportStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students/export`, { responseType: 'blob' }),
   
+  // --- Results endpoints ---
   getResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results`),
   
@@ -71,6 +121,7 @@ getStudents: (batchId: number) =>
   exportResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results/export`, { responseType: 'blob' }),
 
+  // --- AI Settings endpoints ---
   getAISettings: () =>
     api.get('/admin/settings/ai'),
   
