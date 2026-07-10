@@ -46,7 +46,9 @@ async function initPostgres() {
       type TEXT NOT NULL CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug')),
       level TEXT NOT NULL CHECK(level IN ('Easy', 'Medium', 'Hard')),
       module TEXT NOT NULL,
+      question_group TEXT,
       question_sample TEXT NOT NULL,
+      question_plain TEXT,
       rubric_must_have TEXT NOT NULL,
       rubric_nice_to_have TEXT NOT NULL,
       rubric_optional TEXT NOT NULL,
@@ -54,6 +56,16 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: thêm cột question_group cho DB cũ chưa có
+  try {
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_group TEXT`);
+  } catch (_) { /* already exists */ }
+
+  // Migration: thêm cột question_plain (nội dung câu hỏi không có HTML) cho DB cũ chưa có
+  try {
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_plain TEXT`);
+  } catch (_) { /* already exists */ }
 
   // Migration: cập nhật CHECK constraint type cho DB cũ
   // Dùng transaction atomic: check exists → chỉ drop+add nếu constraint chưa đúng
@@ -219,7 +231,9 @@ function initSqlite() {
         type TEXT NOT NULL,
         level TEXT NOT NULL,
         module TEXT NOT NULL,
+        question_group TEXT,
         question_sample TEXT NOT NULL,
+        question_plain TEXT,
         rubric_must_have TEXT NOT NULL,
         rubric_nice_to_have TEXT NOT NULL,
         rubric_optional TEXT NOT NULL,
@@ -227,7 +241,17 @@ function initSqlite() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+
+    // Migration: thêm cột mới nếu chưa tồn tại (cho SQLite DB cũ)
+    const qbCols = sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[];
+    const qbColNames = qbCols.map((c) => c.name);
+    if (!qbColNames.includes('question_group')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_group TEXT');
+    }
+    if (!qbColNames.includes('question_plain')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_plain TEXT');
+    }
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS batches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -343,7 +367,8 @@ export async function query(text: string, params?: any[]): Promise<DbResult> {
   if (USE_SQLITE && sqliteDb) {
     try {
       const stmt = sqliteDb.prepare(text);
-      if (text.trim().toUpperCase().startsWith('SELECT')) {
+      const upperText = text.trim().toUpperCase();
+      if (upperText.startsWith('SELECT') || upperText.includes('RETURNING')) {
         return { rows: stmt.all(...(params || [])), rowCount: 0 };
       } else {
         const result = stmt.run(...(params || []));
