@@ -4,11 +4,142 @@ import * as XLSX from 'xlsx';
 import db from '../db/postgres.js';
 import { normalizeUnicode, stripHtml, sanitizeFilename, buildContentDisposition } from '../../utils/string.js';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import rateLimit from 'express-rate-limit';
+import { authMiddleware } from '../middleware/auth.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
+// Rate limit riêng cho login: 10 request/phút
+const loginRateLimit = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    message: { error: 'Too many login attempts. Please try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// [C-5] Rate limit cho setup: 5 lần/giờ — chỉ dùng một lần trong vòng đời app
+const setupRateLimit = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 giờ
+    max: 5,
+    message: { error: 'Too many setup attempts. Please try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+// =============================================
+// AUTH ROUTES (không require JWT)
+// =============================================
+// GET /api/admin/is-initialized — Kiểm tra xem admin đã được tạo chưa
+router.get('/is-initialized', async (req, res) => {
+    try {
+        const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
+        const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
+        return res.json({ initialized: count > 0 });
+    }
+    catch (err) {
+        console.error('[Auth] is-initialized error:', err);
+        return res.status(500).json({ error: 'Failed to check initialization status' });
+    }
+});
+// POST /api/admin/setup — Tạo admin lần đầu (chỉ hoạt động khi bảng trống)
+router.post('/setup', setupRateLimit, async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+        if (password.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters' });
+        }
+        // Kiểm tra xem đã có admin chưa
+        const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
+        const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
+        if (count > 0) {
+            return res.status(403).json({ error: 'Admin already initialized. Use change-password to update credentials.' });
+        }
+        const passwordHash = await bcrypt.hash(password, 10);
+        await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', [username.trim(), passwordHash]);
+        console.log('[Auth] Admin user created:', username);
+        return res.status(201).json({ success: true, message: 'Admin account created successfully' });
+    }
+    catch (err) {
+        console.error('[Auth] Setup error:', err);
+        return res.status(500).json({ error: 'Failed to create admin account' });
+    }
+});
+// POST /api/admin/login — Đăng nhập, nhận JWT
+router.post('/login', loginRateLimit, async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+        const result = await db.query('SELECT * FROM admin_users WHERE username = ?', [username.trim()]);
+        const user = result.rows[0];
+        if (!user) {
+            // Trả về cùng message để tránh user enumeration
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        const isValid = await bcrypt.compare(password, user.password_hash);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid username or password' });
+        }
+        const secret = process.env.JWT_SECRET;
+        if (!secret) {
+            return res.status(500).json({ error: 'Server configuration error' });
+        }
+        const expiresIn = '24h';
+        const token = jwt.sign({ id: user.id, username: user.username, role: 'admin' }, secret, { expiresIn });
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        console.log('[Auth] Login success:', username);
+        return res.json({ token, expiresAt });
+    }
+    catch (err) {
+        console.error('[Auth] Login error:', err);
+        return res.status(500).json({ error: 'Login failed' });
+    }
+});
+// POST /api/admin/logout — Client xóa token (stateless)
+router.post('/logout', (req, res) => {
+    return res.json({ success: true });
+});
+// =============================================
+// PROTECTED ROUTES — Require JWT từ đây trở xuống
+// =============================================
+router.use(authMiddleware);
+// PUT /api/admin/change-password — Đổi password (require JWT)
+router.put('/change-password', async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        const adminUser = req.adminUser;
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+        }
+        if (newPassword.length < 8) {
+            return res.status(400).json({ error: 'New password must be at least 8 characters' });
+        }
+        const result = await db.query('SELECT * FROM admin_users WHERE id = ?', [adminUser.id]);
+        const user = result.rows[0];
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        const isValid = await bcrypt.compare(currentPassword, user.password_hash);
+        if (!isValid) {
+            return res.status(401).json({ error: 'Current password is incorrect' });
+        }
+        const newHash = await bcrypt.hash(newPassword, 10);
+        await db.query('UPDATE admin_users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [newHash, adminUser.id]);
+        console.log('[Auth] Password changed for user:', adminUser.username);
+        return res.json({ success: true, message: 'Password changed successfully' });
+    }
+    catch (err) {
+        console.error('[Auth] Change password error:', err);
+        return res.status(500).json({ error: 'Failed to change password' });
+    }
+});
 // Client gửi UTC ISO string, server chỉ cần validate và normalize
 const toStorageTime = (isoStr) => {
     if (!isoStr)

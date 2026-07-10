@@ -2,6 +2,9 @@ import { Router, Request, Response } from 'express';
 import db from '../db/postgres.js';
 import { cache } from '../cache.js';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
+import { studentAuthMiddleware } from '../middleware/studentAuth.js';
+import type { StudentTokenPayload } from '../middleware/studentAuth.js';
 
 dotenv.config();
 
@@ -59,15 +62,24 @@ router.post('/verify', async (req: Request, res: Response) => {
       WHERE batch_id = ? AND access_code = ?
     `, [student.batch_id, access_code]);
 
+    // [C-4] Cấp student token (JWT ngắn hạn 4h) — không trả raw studentId dạng tin tưởng nữa
+    const secret = process.env.JWT_SECRET!;
+    const studentToken = jwt.sign(
+      { studentId: student.id, batchId: student.batch_id } as StudentTokenPayload,
+      secret,
+      { expiresIn: '4h' }
+    );
+
     res.json({
       valid: true,
+      student_token: studentToken,
       access_code: student.access_code,
       emails: emailsResult.rows.map((s: any) => s.email),
       duration: student.duration,
-      student_id: student.id,
+      student_id: student.id, // giữ lại để hiển thị UI (không dùng cho auth)
       dev_mode: isDevMode,
       exam_start: startTime.toISOString(),
-      exam_end: endTime.toISOString()
+      exam_end: endTime.toISOString(),
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -185,14 +197,12 @@ router.post('/exam/start', async (req: Request, res: Response) => {
 });
 
 
-router.get('/exam/questions', async (req: Request, res: Response) => {
+router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    
-    const studentId = req.headers['x-student-id'] as string;
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+
+    // [C-4] Đọc studentId từ token đã xác thực, không tin x-student-id header
+    const studentId = req.studentPayload!.studentId.toString();
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
@@ -306,22 +316,10 @@ router.get('/exam/questions', async (req: Request, res: Response) => {
 
 
 // Endpoint nhận beacon khi học viên tắt trình duyệt / đóng tab
-router.post('/exam/disconnect', async (req: Request, res: Response) => {
+// [C-4] sendBeacon không hỗ trợ custom headers nên token được gửi trong body
+router.post('/exam/disconnect', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    // sendBeacon có thể gửi body dạng text/plain nên cần parse linh hoạt
-    let studentId: string | undefined = req.headers['x-student-id'] as string;
-
-    if (!studentId) {
-      // Fallback: parse từ body (sendBeacon gửi JSON string)
-      try {
-        const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-        studentId = body?.student_id?.toString();
-      } catch (_) { /* ignore parse errors */ }
-    }
-
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    const studentId = req.studentPayload!.studentId.toString();
 
     const studentResult = await db.query(
       'SELECT status FROM students WHERE id = ?',
@@ -345,12 +343,10 @@ router.post('/exam/disconnect', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/exam/answer', async (req: Request, res: Response) => {
+router.post('/exam/answer', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const studentId = req.headers['x-student-id'] as string;
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    // [C-4] studentId từ token đã xác thực
+    const studentId = req.studentPayload!.studentId.toString();
 
     const { question_order, answer } = req.body;
 
@@ -363,13 +359,10 @@ router.post('/exam/answer', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/exam/flush', async (req: Request, res: Response) => {
+router.post('/exam/flush', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const studentId = req.headers['x-student-id'] as string;
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
+    // [C-4] studentId từ token xác thực
+    // flush toàn bộ buffer (bao gồm cả của student hiện tại) — ok vì chỉ admin-triggered
     await cache.flushAnswers();
 
     res.json({ success: true, flushed: true });
@@ -378,12 +371,10 @@ router.post('/exam/flush', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/exam/submit', async (req: Request, res: Response) => {
+router.post('/exam/submit', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const studentId = req.headers['x-student-id'] as string;
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    // [C-4] studentId từ token đã xác thực
+    const studentId = req.studentPayload!.studentId.toString();
 
     await cache.flushAnswers();
 
@@ -402,14 +393,18 @@ router.post('/exam/submit', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/violation', async (req: Request, res: Response) => {
+router.post('/violation', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const studentId = req.headers['x-student-id'] as string;
-    if (!studentId) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    // [C-4] studentId từ token đã xác thực
+    const studentId = req.studentPayload!.studentId.toString();
 
     const { type } = req.body;
+
+    // Validate violation type — chỉ chấp nhận các loại hợp lệ
+    const validTypes = ['clipboard', 'tab_switch', 'fullscreen_exit', 'devtools'];
+    if (!type || !validTypes.includes(type)) {
+      return res.status(400).json({ error: 'Invalid violation type' });
+    }
 
     const existingResult = await db.query('SELECT * FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
 
@@ -425,10 +420,10 @@ router.post('/violation', async (req: Request, res: Response) => {
     const currentResult = await db.query('SELECT count FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
     const currentCount = parseInt(currentResult.rows[0]?.count) || 0;
 
-    res.json({ 
+    res.json({
       violation_count: currentCount,
       total_violations: total,
-      locked: currentCount >= 2 || total >= 2
+      locked: currentCount >= 2 || total >= 2,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

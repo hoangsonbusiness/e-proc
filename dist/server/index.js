@@ -7,13 +7,36 @@ import adminRoutes from './routes/admin.js';
 import studentRoutes from './routes/student.js';
 import { cache } from './cache.js';
 import rateLimit from 'express-rate-limit';
+import { authMiddleware } from './middleware/auth.js';
 dotenv.config();
+// Validate JWT_SECRET tại startup — không cho phép chạy nếu thiếu
+if (!process.env.JWT_SECRET) {
+    console.error('FATAL ERROR: JWT_SECRET is not set in environment variables.');
+    console.error('Please add JWT_SECRET to your .env file and restart the server.');
+    process.exit(1);
+}
 console.log('Starting server...');
 console.log('DB:', process.env.DATABASE_URL ? 'configured' : 'NOT configured');
 console.log('USE_SQLITE:', process.env.USE_SQLITE || 'false (PostgreSQL)');
 const app = express();
 app.set('trust proxy', 1);
-app.use(cors({ origin: true, credentials: true }));
+// [C-1] CORS: Chỉ cho phép các origin được cấu hình trong ALLOWED_ORIGINS
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+app.use(cors({
+    origin: (origin, callback) => {
+        // Cho phép request không có origin (server-to-server, curl, v.v.)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        }
+        else {
+            callback(new Error(`CORS: Origin "${origin}" is not allowed`));
+        }
+    },
+    credentials: true,
+}));
 app.use((req, res, next) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     next();
@@ -37,7 +60,9 @@ app.get('/api/health', (req, res) => {
         queue: cache.getQueueStats()
     });
 });
-app.get('/api/test-db', async (req, res) => {
+// [C-2] Internal diagnostic/operational endpoints — require admin JWT
+// [C-3] POST /api/init-tables đã bị xóa (DB init tự động khi server start)
+app.get('/api/test-db', authMiddleware, async (req, res) => {
     try {
         const { query } = await import('./db/postgres.js');
         const result = await query('SELECT NOW() as time, version() as pg_version');
@@ -45,29 +70,16 @@ app.get('/api/test-db', async (req, res) => {
             success: true,
             time: result.rows[0]?.time,
             pg_version: result.rows[0]?.pg_version,
-            mode: process.env.USE_SQLITE === 'false' ? 'PostgreSQL' : 'SQLite'
+            mode: process.env.DATABASE_URL ? 'PostgreSQL' : 'SQLite',
         });
     }
     catch (e) {
-        res.status(500).json({
-            error: e.message,
-            code: e.code,
-            syscall: e.syscall,
-            hostname: e.hostname
-        });
+        // [M-1] Không lộ chi tiết lỗi DB ra ngoài
+        console.error('[test-db] Error:', e.message);
+        res.status(500).json({ error: 'Database connection test failed' });
     }
 });
-app.post('/api/init-tables', async (req, res) => {
-    try {
-        const { initDatabase } = await import('./db/postgres.js');
-        await initDatabase();
-        res.json({ success: true, message: 'Tables initialized' });
-    }
-    catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-app.get('/api/queue/process', async (req, res) => {
+app.get('/api/queue/process', authMiddleware, async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 5;
         const processed = await cache.processQueue(limit);
@@ -77,7 +89,7 @@ app.get('/api/queue/process', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-app.get('/api/queue/stats', async (req, res) => {
+app.get('/api/queue/stats', authMiddleware, async (req, res) => {
     try {
         const stats = cache.getQueueStats();
         res.json(stats);
@@ -86,7 +98,7 @@ app.get('/api/queue/stats', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-app.post('/api/cache/flush', async (req, res) => {
+app.post('/api/cache/flush', authMiddleware, async (req, res) => {
     try {
         await cache.flushAnswers();
         res.json({ success: true, timestamp: new Date().toISOString() });
@@ -95,10 +107,10 @@ app.post('/api/cache/flush', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', authMiddleware, (req, res) => {
     res.json({
         queue: cache.getQueueStats(),
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
     });
 });
 process.on('SIGINT', () => {

@@ -11,14 +11,10 @@ function StudentManagement() {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      window.location.href = '/admin';
-      return;
-    }
     loadBatch();
     loadStudents();
   }, [id]);
+
 
   const loadBatch = async () => {
     try {
