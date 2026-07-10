@@ -89,7 +89,7 @@ function BatchManagement() {
   const [editingBatch, setEditingBatch] = useState<any>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   const [emails, setEmails] = useState('');
-  const [inviteResult, setInviteResult] = useState<{success: number; emails: {email: string; code: string}[]} | null>(null);
+  const [inviteResult, setInviteResult] = useState<{ success: number; emails: { email: string; code: string }[] } | null>(null);
   const [feasibilityErrors, setFeasibilityErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -102,7 +102,7 @@ function BatchManagement() {
   /** Return stats for a given (module, type) combination (zeros if not found) */
   const getStatsForModuleType = (moduleName: string, typeName: string): ModuleTypeStats =>
     moduleTypeStats.find(s => s.module === moduleName && s.type === typeName)
-      ?? { module: moduleName, type: typeName, easy: 0, medium: 0, hard: 0 };
+    ?? { module: moduleName, type: typeName, easy: 0, medium: 0, hard: 0 };
 
   /** Validate blueprint (by module) against available question counts */
   const validateBlueprintAgainstStats = (blueprint: BlueprintItem[]): string[] => {
@@ -433,11 +433,11 @@ function BatchManagement() {
 
   const handleInviteStudents = async () => {
     if (!selectedBatchId || !emails.trim()) return;
-    
+
     setLoading(true);
     try {
       const emailList = emails.split('\n').map(e => e.trim()).filter(e => e && e.includes('@'));
-      
+
       if (emailList.length === 0) {
         alert('Please enter valid email addresses');
         setLoading(false);
@@ -445,17 +445,17 @@ function BatchManagement() {
       }
 
       const res = await adminApi.importStudents(selectedBatchId, emailList);
-      
+
       const skipped = res.data.skippedEmails;
       if (skipped && skipped.length > 0) {
         alert(`Đã skip ${skipped.length} email trùng:\n${skipped.join('\n')}`);
       }
-      
+
       setInviteResult({
         success: res.data.count,
         emails: res.data.students
       });
-      
+
       setEmails('');
     } catch (error: any) {
       alert(error.response?.data?.error || 'Error inviting students');
@@ -701,39 +701,39 @@ function BatchManagement() {
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
               <div className="form-group">
                 <label>Batch Name</label>
-                <input 
-                  type="text" 
-                  value={formData.name} 
+                <input
+                  type="text"
+                  value={formData.name}
                   onChange={e => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  required 
+                  required
                 />
               </div>
               <div className="form-group">
                 <label>Duration (minutes)</label>
-                <input 
-                  type="number" 
-                  value={formData.duration} 
+                <input
+                  type="number"
+                  value={formData.duration}
                   onChange={e => setFormData(prev => ({ ...prev, duration: parseInt(e.target.value) }))}
                   min={10}
-                  required 
+                  required
                 />
               </div>
               <div className="form-group">
                 <label>Start Time</label>
-                <input 
-                  type="datetime-local" 
-                  value={formData.start_time} 
+                <input
+                  type="datetime-local"
+                  value={formData.start_time}
                   onChange={e => setFormData(prev => ({ ...prev, start_time: e.target.value }))}
-                  required 
+                  required
                 />
               </div>
               <div className="form-group">
                 <label>End Time</label>
-                <input 
-                  type="datetime-local" 
-                  value={formData.end_time} 
+                <input
+                  type="datetime-local"
+                  value={formData.end_time}
                   onChange={e => setFormData(prev => ({ ...prev, end_time: e.target.value }))}
-                  required 
+                  required
                 />
               </div>
             </div>
@@ -944,21 +944,21 @@ function BatchManagement() {
             style={{ width: '100%', padding: 10, marginTop: 10, fontFamily: 'monospace' }}
           />
           <div style={{ marginTop: 10, display: 'flex', gap: 10 }}>
-            <button 
+            <button
               onClick={handleInviteStudents}
               disabled={loading || !emails.trim()}
               className="btn btn-primary"
             >
               {loading ? 'Inviting...' : 'Invite Students'}
             </button>
-            <button 
+            <button
               onClick={() => { setShowInviteForm(false); setInviteResult(null); }}
               className="btn btn-secondary"
             >
               Close
             </button>
           </div>
-          
+
           {inviteResult && (
             <div style={{ marginTop: 20 }}>
               <h4 style={{ color: '#166534' }}>Invited {inviteResult.success} students:</h4>
@@ -978,7 +978,7 @@ function BatchManagement() {
                   ))}
                 </tbody>
               </table>
-              <button 
+              <button
                 onClick={() => exportStudents(selectedBatchId)}
                 className="btn btn-secondary"
                 style={{ marginTop: 10 }}
@@ -1012,9 +1012,9 @@ function BatchManagement() {
                 <td>{formatGMT7(batch.end_time)}</td>
                 <td>{batch.duration} min</td>
                 <td>
-                  <button 
+                  <button
                     onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
-                    className="btn btn-primary" 
+                    className="btn btn-primary"
                     style={{ marginRight: 5, fontSize: 12 }}
                   >
                     Invite
@@ -1025,14 +1025,14 @@ function BatchManagement() {
                   <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
                     Results
                   </Link>
-                  <button 
+                  <button
                     onClick={() => handleEditBatch(batch)}
                     className="btn btn-secondary"
                     style={{ marginRight: 5, fontSize: 12 }}
                   >
                     Edit
                   </button>
-                  <button 
+                  <button
                     onClick={() => {
                       if (confirm('Delete this batch? All students and exam data will be lost.')) {
                         adminApi.deleteBatch(batch.id).then(() => {
@@ -1059,46 +1059,46 @@ function BatchManagement() {
       {editingBatch && (
         <div className="card" style={{ marginTop: 20, borderColor: '#3b82f6', background: '#eff6ff' }}>
           <h3 style={{ color: '#1d4ed8' }}>Edit Batch #{editingBatch.id}</h3>
-          
+
           <div className="form-group">
             <label>Batch Name</label>
-            <input 
-              type="text" 
-              value={editingBatch.name} 
-              onChange={e => setEditingBatch({...editingBatch, name: e.target.value})}
-              required 
+            <input
+              type="text"
+              value={editingBatch.name}
+              onChange={e => setEditingBatch({ ...editingBatch, name: e.target.value })}
+              required
             />
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <div className="form-group">
               <label>Start Time</label>
-              <input 
-                type="datetime-local" 
-                value={editingBatch.start_time || ''} 
-                onChange={e => setEditingBatch({...editingBatch, start_time: e.target.value})}
-                required 
+              <input
+                type="datetime-local"
+                value={editingBatch.start_time || ''}
+                onChange={e => setEditingBatch({ ...editingBatch, start_time: e.target.value })}
+                required
               />
             </div>
             <div className="form-group">
               <label>End Time</label>
-              <input 
-                type="datetime-local" 
-                value={editingBatch.end_time || ''} 
-                onChange={e => setEditingBatch({...editingBatch, end_time: e.target.value})}
-                required 
+              <input
+                type="datetime-local"
+                value={editingBatch.end_time || ''}
+                onChange={e => setEditingBatch({ ...editingBatch, end_time: e.target.value })}
+                required
               />
             </div>
           </div>
 
           <div className="form-group">
             <label>Duration (minutes)</label>
-            <input 
-              type="number" 
-              value={editingBatch.duration} 
-              onChange={e => setEditingBatch({...editingBatch, duration: parseInt(e.target.value)})}
+            <input
+              type="number"
+              value={editingBatch.duration}
+              onChange={e => setEditingBatch({ ...editingBatch, duration: parseInt(e.target.value) })}
               min={1}
-              required 
+              required
             />
           </div>
 
@@ -1117,9 +1117,9 @@ function BatchManagement() {
                   <thead>
                     <tr>
                       <th>Module</th>
-                      <th>🟢 Easy</th>
-                      <th>🟡 Medium</th>
-                      <th>🔴 Hard</th>
+                      <th style={{ textAlign: 'center' }}>🟢 Easy</th>
+                      <th style={{ textAlign: 'center' }}>🟡 Medium</th>
+                      <th style={{ textAlign: 'center' }}>🔴 Hard</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -1319,15 +1319,15 @@ function BatchManagement() {
               </button>
             )}
 
-            <button 
+            <button
               onClick={handleUpdateBatch}
               disabled={loading || editBlueprintErrors.length > 0}
               className="btn btn-primary"
             >
               {loading ? 'Saving...' : 'Save Changes'}
             </button>
-            
-            <button 
+
+            <button
               onClick={() => setEditingBatch(null)}
               className="btn btn-secondary"
             >
