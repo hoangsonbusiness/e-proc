@@ -21,6 +21,14 @@ const loginRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
 });
+// [C-5] Rate limit cho setup: 5 lần/giờ — chỉ dùng một lần trong vòng đời app
+const setupRateLimit = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 giờ
+    max: 5,
+    message: { error: 'Too many setup attempts. Please try again later.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 // =============================================
 // AUTH ROUTES (không require JWT)
 // =============================================
@@ -37,7 +45,7 @@ router.get('/is-initialized', async (req, res) => {
     }
 });
 // POST /api/admin/setup — Tạo admin lần đầu (chỉ hoạt động khi bảng trống)
-router.post('/setup', async (req, res) => {
+router.post('/setup', setupRateLimit, async (req, res) => {
     try {
         const { username, password } = req.body;
         if (!username || !password) {

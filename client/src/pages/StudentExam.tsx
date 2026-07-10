@@ -54,9 +54,11 @@ function StudentExam() {
   const navigate = useNavigate();
 
   const studentId = localStorage.getItem('studentId');
+  // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
+  const studentToken = localStorage.getItem('studentToken');
 
   useEffect(() => {
-    if (!studentId) {
+    if (!studentId || !studentToken) {
       navigate('/');
       return;
     }
@@ -70,7 +72,7 @@ function StudentExam() {
       console.log('[Exam] initExam called, studentId:', studentId);
       try {
         console.log('[Exam] Step 1 - Getting existing questions...');
-        const existingRes = await studentApi.getQuestions(parseInt(studentId));
+        const existingRes = await studentApi.getQuestions();
         const data = existingRes.data;
         const existingQuestions = data.questions ?? data; // compat với format cũ
         console.log('[Exam] Step 1 done, questions:', existingQuestions.length);
@@ -90,7 +92,7 @@ function StudentExam() {
         if (res.data.success) {
           setStarted(true);
           // Sau khi start, gọi getQuestions để lấy time_remaining
-          const qRes = await studentApi.getQuestions(parseInt(studentId));
+          const qRes = await studentApi.getQuestions();
           loadQuestions(qRes.data);
         }
       } catch (error: any) {
@@ -127,13 +129,14 @@ function StudentExam() {
   // Gửi beacon khi học viên tắt trình duyệt / đóng tab
   useEffect(() => {
     const handleBeforeUnload = () => {
-      if (startedRef.current && !submittingRef.current && !lockedRef.current && studentId) {
-        studentApi.disconnect(parseInt(studentId));
+      // [C-4] disconnect gửi student_token trong body (không cần studentId nữa)
+      if (startedRef.current && !submittingRef.current && !lockedRef.current) {
+        studentApi.disconnect();
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [studentId]);
+  }, []);
 
   const clearFullscreenExitTimeout = useCallback(() => {
     if (fullscreenExitTimeoutRef.current) {
@@ -148,7 +151,7 @@ function StudentExam() {
 
     setSubmitting(true);
     try {
-      await studentApi.submit(parseInt(studentId!));
+      await studentApi.submit(); // [C-4] token tự động qua interceptor
       document.exitFullscreen().catch(() => { });
       navigate('/submit');
     } catch (error) {
@@ -156,7 +159,7 @@ function StudentExam() {
       alert('Error submitting exam. Please contact support.');
       setSubmitting(false);
     }
-  }, [navigate, studentId]);
+  }, [navigate]);
 
   const handleViolation = useCallback(async (type: string): Promise<boolean> => {
     const now = Date.now();
@@ -168,7 +171,7 @@ function StudentExam() {
     lastViolationTimeRef.current = now;
 
     try {
-      const res = await studentApi.reportViolation(parseInt(studentId!), type);
+      const res = await studentApi.reportViolation(type); // [C-4] token tự động
       setViolationCount(res.data.total_violations);
       if (res.data.locked) {
         setLocked(true);
@@ -205,7 +208,7 @@ function StudentExam() {
       console.error(error);
       return false;
     }
-  }, [clearFullscreenExitTimeout, handleSubmit, studentId]);
+  }, [clearFullscreenExitTimeout, handleSubmit]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -372,7 +375,7 @@ function StudentExam() {
     try {
       let data = prefetchedData;
       if (!data) {
-        const res = await studentApi.getQuestions(parseInt(studentId!));
+        const res = await studentApi.getQuestions(); // [C-4] token tự động
         data = res.data;
       }
 
@@ -460,9 +463,9 @@ function StudentExam() {
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      studentApi.saveAnswer(parseInt(studentId!), order, text).catch(console.error);
+      studentApi.saveAnswer(order, text).catch(console.error); // [C-4] token tự động
     }, 2000);
-  }, [studentId]);
+  }, []);
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);

@@ -12,9 +12,15 @@ const api = axios.create({
 // =============================================
 api.interceptors.request.use(
   (config) => {
-    const token = localStorage.getItem('adminToken');
-    if (token && config.url?.includes('/admin/')) {
-      config.headers.Authorization = `Bearer ${token}`;
+    // Admin JWT
+    const adminToken = localStorage.getItem('adminToken');
+    if (adminToken && config.url?.includes('/admin/')) {
+      config.headers.Authorization = `Bearer ${adminToken}`;
+    }
+    // [C-4] Student token — gắn vào tất cả /student/ request
+    const studentToken = localStorage.getItem('studentToken');
+    if (studentToken && config.url?.includes('/student/')) {
+      config.headers.Authorization = `Bearer ${studentToken}`;
     }
     return config;
   },
@@ -138,40 +144,40 @@ export const adminApi = {
 export const studentApi = {
   verify: (accessCode: string) =>
     api.post('/student/verify', { access_code: accessCode }),
-  
+
   selectEmail: (studentId: number, email: string) =>
     api.post('/student/select-email', { student_id: studentId, email }),
-  
+
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
-  
-  getQuestions: (studentId: number) =>
-    api.get('/student/exam/questions', { headers: { 'x-student-id': studentId } }),
-  
-  saveAnswer: (studentId: number, questionOrder: number, answer: string) =>
-    api.post('/student/exam/answer', { question_order: questionOrder, answer }, 
-      { headers: { 'x-student-id': studentId } }),
-  
-  submit: (studentId: number) =>
-    api.post('/student/exam/submit', {}, { headers: { 'x-student-id': studentId } }),
-  
-  reportViolation: (studentId: number, type: string) =>
-    api.post('/student/violation', { type }, { headers: { 'x-student-id': studentId } }),
 
-  disconnect: (studentId: number) => {
-    // Dùng sendBeacon để đảm bảo request được gửi ngay cả khi tab đóng
+  // [C-4] Không còn truyền studentId - token tự động gắn qua interceptor
+  getQuestions: () =>
+    api.get('/student/exam/questions'),
+
+  saveAnswer: (questionOrder: number, answer: string) =>
+    api.post('/student/exam/answer', { question_order: questionOrder, answer }),
+
+  submit: () =>
+    api.post('/student/exam/submit', {}),
+
+  reportViolation: (type: string) =>
+    api.post('/student/violation', { type }),
+
+  // [C-4] sendBeacon không hỗ trợ custom headers:
+  // gửi student_token trong body để studentAuthMiddleware xử lý
+  disconnect: () => {
+    const studentToken = localStorage.getItem('studentToken');
     const sent = navigator.sendBeacon(
       '/api/student/exam/disconnect',
-      new Blob([JSON.stringify({ student_id: studentId })], { type: 'application/json' })
+      new Blob([JSON.stringify({ student_token: studentToken })], { type: 'application/json' })
     );
     // Fallback bằng axios nếu sendBeacon thất bại
     if (!sent) {
-      return api.post('/student/exam/disconnect', { student_id: studentId },
-        { headers: { 'x-student-id': studentId } }
-      );
+      return api.post('/student/exam/disconnect', { student_token: studentToken });
     }
     return Promise.resolve();
-  }
+  },
 };
 
 export default api;
