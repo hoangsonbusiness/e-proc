@@ -13,14 +13,10 @@ function Results() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      window.location.href = '/admin';
-      return;
-    }
     loadBatch();
     loadResults();
   }, [id]);
+
 
   const loadBatch = async () => {
     try {

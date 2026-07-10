@@ -2,20 +2,22 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 function StudentConfirm() {
-  const [loading, setLoading] = useState(false);
+  const [loading] = useState(false);
+
   const navigate = useNavigate();
   const location = useLocation();
   
   const studentId = location.state?.studentId;
+  const studentToken = location.state?.studentToken; // [C-4]
   const email = location.state?.email;
   const duration = location.state?.duration;
 
   useEffect(() => {
-    // Redirect to login if no state
-    if (!studentId || !email) {
+    // Redirect to login if no state or missing token
+    if (!studentId || !email || !studentToken) {
       navigate('/');
     }
-  }, [studentId, email, navigate]);
+  }, [studentId, email, studentToken, navigate]);
 
   const handleStartExam = async () => {
     try {
@@ -24,6 +26,7 @@ function StudentConfirm() {
       console.log('Fullscreen not supported or denied');
     }
     localStorage.setItem('studentId', studentId.toString());
+    localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
     navigate('/exam');
   };

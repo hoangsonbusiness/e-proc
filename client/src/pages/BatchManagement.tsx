@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
@@ -89,7 +89,6 @@ const decodeComboKey = (key: string): { module: string; question_group: string }
 const comboLabel = (module: string, group: string) => (group ? `${module} (${group})` : module);
 
 function BatchManagement() {
-  const navigate = useNavigate();
   const [batches, setBatches] = useState<any[]>([]);
   const [moduleGroups, setModuleGroups] = useState<ModuleGroupOption[]>([]);
   const [moduleGroupStats, setModuleGroupStats] = useState<ModuleGroupStats[]>([]);
@@ -172,17 +171,13 @@ function BatchManagement() {
   // ─── Effects ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    const auth = localStorage.getItem('adminAuth');
-    if (!auth) {
-      navigate('/admin');
-      return;
-    }
     loadBatches();
     loadModuleGroups();
     loadModuleGroupStats();
     loadTypeStats();
     loadModuleGroupTypeStats();
   }, []);
+
 
   useEffect(() => {
     if (moduleGroups.length > 0 && formData.blueprint.length === 0) {

@@ -30,6 +30,7 @@ function StudentLogin() {
         navigate('/confirm', {
           state: {
             studentId: res.data.student_id,
+            studentToken: res.data.student_token, // [C-4] JWT xác thực học viên
             email: res.data.emails[0],
             duration: res.data.duration
           }

@@ -1,11 +1,32 @@
 #!/bin/bash
 # =============================================================================
 # Redeploy Script — Pull latest code, rebuild, and restart
-# Usage: bash deploy.sh
+# Usage: bash deploy.sh  OR  sudo /opt/eaudit/deploy.sh
+#
+# PM2 keeps a separate daemon per OS user. The app's pm2 process is normally
+# started under a non-root deploy user, not root. If this script runs as root
+# (e.g. via sudo) without dropping privileges, `pm2 stop/delete eaudit` below
+# silently no-ops against root's own (empty) pm2 daemon instead of the real
+# running process, and `pm2 start` then creates a second, root-owned "eaudit"
+# — so the live app never actually gets the new code. To make `sudo
+# /opt/eaudit/deploy.sh` behave the same as running it directly, we re-exec
+# ourselves as the real app-owning user before doing anything else whenever
+# we detect we're running as root.
 # =============================================================================
 set -euo pipefail
 
 APP_DIR="/opt/eaudit/app"
+
+if [ "$(id -u)" -eq 0 ]; then
+  APP_USER="${SUDO_USER:-$(stat -c '%U' "$APP_DIR")}"
+  if [ "$APP_USER" = "root" ]; then
+    echo "!!! Refusing to deploy as root: $APP_DIR is root-owned and no non-root" >&2
+    echo "!!! SUDO_USER is set. Fix ownership first: chown -R <user>:<user> $APP_DIR" >&2
+    exit 1
+  fi
+  echo ">>> Running as root; re-executing as '$APP_USER' so PM2/git/npm stay consistent..."
+  exec sudo -u "$APP_USER" -H bash "$0" "$@"
+fi
 
 echo "============================================"
 echo "  E-Audit Platform — Redeploy"

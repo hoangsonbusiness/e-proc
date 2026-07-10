@@ -195,6 +195,17 @@ await client.query(`
   `);
   console.log('[DB] ai_queue ready');
   
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(100) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] admin_users ready');
+
   client.release();
   console.log('[DB] All PostgreSQL tables initialized');
 }
@@ -321,6 +332,16 @@ function initSqlite() {
       )
     `);
     
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS admin_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     console.log('[DB] All SQLite tables initialized');
   } catch (err) {
     console.error('[DB] SQLite init error:', err);

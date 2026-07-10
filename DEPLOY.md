@@ -49,7 +49,7 @@ vercel --prod
 - Environment variables cần thêm:
   - `DATABASE_URL`: (từ bước 1.2)
   - `GEMINI_API_KEY`: (từ bước 1.3)
-  - `SESSION_SECRET`: (任意 chuỗi bảo mật)
+  - `SESSION_SECRET`: (chuỗi bảo mật)
 
 ---
 

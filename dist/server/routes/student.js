@@ -2,6 +2,8 @@ import { Router } from 'express';
 import db from '../db/postgres.js';
 import { cache } from '../cache.js';
 import dotenv from 'dotenv';
+import jwt from 'jsonwebtoken';
+import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 dotenv.config();
 const USE_SQLITE = process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production';
 const router = Router();
@@ -43,15 +45,19 @@ router.post('/verify', async (req, res) => {
       SELECT email FROM students 
       WHERE batch_id = ? AND access_code = ?
     `, [student.batch_id, access_code]);
+        // [C-4] Cấp student token (JWT ngắn hạn 4h) — không trả raw studentId dạng tin tưởng nữa
+        const secret = process.env.JWT_SECRET;
+        const studentToken = jwt.sign({ studentId: student.id, batchId: student.batch_id }, secret, { expiresIn: '4h' });
         res.json({
             valid: true,
+            student_token: studentToken,
             access_code: student.access_code,
             emails: emailsResult.rows.map((s) => s.email),
             duration: student.duration,
-            student_id: student.id,
+            student_id: student.id, // giữ lại để hiển thị UI (không dùng cho auth)
             dev_mode: isDevMode,
             exam_start: startTime.toISOString(),
-            exam_end: endTime.toISOString()
+            exam_end: endTime.toISOString(),
         });
     }
     catch (error) {
@@ -145,13 +151,11 @@ router.post('/exam/start', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.get('/exam/questions', async (req, res) => {
+router.get('/exam/questions', studentAuthMiddleware, async (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        const studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        // [C-4] Đọc studentId từ token đã xác thực, không tin x-student-id header
+        const studentId = req.studentPayload.studentId.toString();
         // === SERVER-SIDE TIMER GUARD ===
         const studentResult = await db.query(`
       SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
@@ -241,21 +245,10 @@ router.get('/exam/questions', async (req, res) => {
     }
 });
 // Endpoint nhận beacon khi học viên tắt trình duyệt / đóng tab
-router.post('/exam/disconnect', async (req, res) => {
+// [C-4] sendBeacon không hỗ trợ custom headers nên token được gửi trong body
+router.post('/exam/disconnect', studentAuthMiddleware, async (req, res) => {
     try {
-        // sendBeacon có thể gửi body dạng text/plain nên cần parse linh hoạt
-        let studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            // Fallback: parse từ body (sendBeacon gửi JSON string)
-            try {
-                const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-                studentId = body?.student_id?.toString();
-            }
-            catch (_) { /* ignore parse errors */ }
-        }
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        const studentId = req.studentPayload.studentId.toString();
         const studentResult = await db.query('SELECT status FROM students WHERE id = ?', [parseInt(studentId)]);
         const student = studentResult.rows[0];
         // Chỉ ghi disconnected_at nếu đang in_progress
@@ -270,12 +263,10 @@ router.post('/exam/disconnect', async (req, res) => {
         res.status(204).send();
     }
 });
-router.post('/exam/answer', async (req, res) => {
+router.post('/exam/answer', studentAuthMiddleware, async (req, res) => {
     try {
-        const studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        // [C-4] studentId từ token đã xác thực
+        const studentId = req.studentPayload.studentId.toString();
         const { question_order, answer } = req.body;
         // Lưu vào buffer trước
         cache.bufferAnswer(parseInt(studentId), question_order, answer);
@@ -285,12 +276,10 @@ router.post('/exam/answer', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.post('/exam/flush', async (req, res) => {
+router.post('/exam/flush', studentAuthMiddleware, async (req, res) => {
     try {
-        const studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        // [C-4] studentId từ token xác thực
+        // flush toàn bộ buffer (bao gồm cả của student hiện tại) — ok vì chỉ admin-triggered
         await cache.flushAnswers();
         res.json({ success: true, flushed: true });
     }
@@ -298,12 +287,10 @@ router.post('/exam/flush', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.post('/exam/submit', async (req, res) => {
+router.post('/exam/submit', studentAuthMiddleware, async (req, res) => {
     try {
-        const studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        // [C-4] studentId từ token đã xác thực
+        const studentId = req.studentPayload.studentId.toString();
         await cache.flushAnswers();
         await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
         const examQuestionsResult = await db.query('SELECT id FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
@@ -317,13 +304,16 @@ router.post('/exam/submit', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.post('/violation', async (req, res) => {
+router.post('/violation', studentAuthMiddleware, async (req, res) => {
     try {
-        const studentId = req.headers['x-student-id'];
-        if (!studentId) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
+        // [C-4] studentId từ token đã xác thực
+        const studentId = req.studentPayload.studentId.toString();
         const { type } = req.body;
+        // Validate violation type — chỉ chấp nhận các loại hợp lệ
+        const validTypes = ['clipboard', 'tab_switch', 'fullscreen_exit', 'devtools'];
+        if (!type || !validTypes.includes(type)) {
+            return res.status(400).json({ error: 'Invalid violation type' });
+        }
         const existingResult = await db.query('SELECT * FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
         if (existingResult.rows.length === 0) {
             await db.query('INSERT INTO violations (student_id, type, count) VALUES (?, ?, 1)', [parseInt(studentId), type]);
@@ -338,7 +328,7 @@ router.post('/violation', async (req, res) => {
         res.json({
             violation_count: currentCount,
             total_violations: total,
-            locked: currentCount >= 2 || total >= 2
+            locked: currentCount >= 2 || total >= 2,
         });
     }
     catch (error) {

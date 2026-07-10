@@ -7,7 +7,63 @@ const api = axios.create({
   withCredentials: true
 });
 
+// =============================================
+// REQUEST INTERCEPTOR — Tự động gắn JWT token
+// =============================================
+api.interceptors.request.use(
+  (config) => {
+    // Admin JWT
+    const adminToken = localStorage.getItem('adminToken');
+    if (adminToken && config.url?.includes('/admin/')) {
+      config.headers.Authorization = `Bearer ${adminToken}`;
+    }
+    // [C-4] Student token — gắn vào tất cả /student/ request
+    const studentToken = localStorage.getItem('studentToken');
+    if (studentToken && config.url?.includes('/student/')) {
+      config.headers.Authorization = `Bearer ${studentToken}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
+
+// =============================================
+// RESPONSE INTERCEPTOR — Auto logout khi 401
+// =============================================
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (
+      error.response?.status === 401 &&
+      window.location.pathname.startsWith('/admin') &&
+      !window.location.pathname.includes('/admin/login') &&
+      !window.location.pathname.includes('/admin/setup')
+    ) {
+      localStorage.removeItem('adminToken');
+      window.location.href = '/admin';
+    }
+    return Promise.reject(error);
+  }
+);
+
 export const adminApi = {
+  // --- Auth endpoints ---
+  isInitialized: () =>
+    api.get('/admin/is-initialized'),
+
+  login: (username: string, password: string) =>
+    api.post('/admin/login', { username, password }),
+
+  logout: () =>
+    api.post('/admin/logout').finally(() => localStorage.removeItem('adminToken')),
+
+  setup: (username: string, password: string) =>
+    api.post('/admin/setup', { username, password }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.put('/admin/change-password', { currentPassword, newPassword }),
+
+  // --- Question endpoints ---
   importQuestions: (formData: FormData) =>
     api.post('/admin/questions/import', formData),
   
@@ -44,6 +100,7 @@ export const adminApi = {
   deleteQuestions: (ids: string[]) =>
     api.post('/admin/questions/bulk-delete', { ids }),
   
+  // --- Batch endpoints ---
   createBatch: (data: any) =>
     api.post('/admin/batches', data),
   
@@ -62,10 +119,11 @@ export const adminApi = {
   checkFeasibility: (id: number, blueprint: any[]) =>
     api.post(`/admin/batches/${id}/check-feasibility`, { blueprint }),
   
+  // --- Student endpoints ---
   importStudents: (batchId: number, emails: string[]) =>
     api.post(`/admin/batches/${batchId}/students/import`, { emails }),
   
-getStudents: (batchId: number) =>
+  getStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students`),
   
   deleteStudent: (studentId: number) =>
@@ -74,6 +132,7 @@ getStudents: (batchId: number) =>
   exportStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students/export`, { responseType: 'blob' }),
   
+  // --- Results endpoints ---
   getResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results`),
   
@@ -83,6 +142,7 @@ getStudents: (batchId: number) =>
   exportResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results/export`, { responseType: 'blob' }),
 
+  // --- AI Settings endpoints ---
   getAISettings: () =>
     api.get('/admin/settings/ai'),
   
@@ -96,40 +156,40 @@ getStudents: (batchId: number) =>
 export const studentApi = {
   verify: (accessCode: string) =>
     api.post('/student/verify', { access_code: accessCode }),
-  
+
   selectEmail: (studentId: number, email: string) =>
     api.post('/student/select-email', { student_id: studentId, email }),
-  
+
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
-  
-  getQuestions: (studentId: number) =>
-    api.get('/student/exam/questions', { headers: { 'x-student-id': studentId } }),
-  
-  saveAnswer: (studentId: number, questionOrder: number, answer: string) =>
-    api.post('/student/exam/answer', { question_order: questionOrder, answer }, 
-      { headers: { 'x-student-id': studentId } }),
-  
-  submit: (studentId: number) =>
-    api.post('/student/exam/submit', {}, { headers: { 'x-student-id': studentId } }),
-  
-  reportViolation: (studentId: number, type: string) =>
-    api.post('/student/violation', { type }, { headers: { 'x-student-id': studentId } }),
 
-  disconnect: (studentId: number) => {
-    // Dùng sendBeacon để đảm bảo request được gửi ngay cả khi tab đóng
+  // [C-4] Không còn truyền studentId - token tự động gắn qua interceptor
+  getQuestions: () =>
+    api.get('/student/exam/questions'),
+
+  saveAnswer: (questionOrder: number, answer: string) =>
+    api.post('/student/exam/answer', { question_order: questionOrder, answer }),
+
+  submit: () =>
+    api.post('/student/exam/submit', {}),
+
+  reportViolation: (type: string) =>
+    api.post('/student/violation', { type }),
+
+  // [C-4] sendBeacon không hỗ trợ custom headers:
+  // gửi student_token trong body để studentAuthMiddleware xử lý
+  disconnect: () => {
+    const studentToken = localStorage.getItem('studentToken');
     const sent = navigator.sendBeacon(
       '/api/student/exam/disconnect',
-      new Blob([JSON.stringify({ student_id: studentId })], { type: 'application/json' })
+      new Blob([JSON.stringify({ student_token: studentToken })], { type: 'application/json' })
     );
     // Fallback bằng axios nếu sendBeacon thất bại
     if (!sent) {
-      return api.post('/student/exam/disconnect', { student_id: studentId },
-        { headers: { 'x-student-id': studentId } }
-      );
+      return api.post('/student/exam/disconnect', { student_token: studentToken });
     }
     return Promise.resolve();
-  }
+  },
 };
 
 export default api;
