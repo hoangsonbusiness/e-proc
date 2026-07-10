@@ -36,7 +36,7 @@ api.interceptors.response.use(
     if (
       error.response?.status === 401 &&
       window.location.pathname.startsWith('/admin') &&
-      !window.location.pathname.includes('/admin/login') &&
+      window.location.pathname !== '/admin' &&
       !window.location.pathname.includes('/admin/setup')
     ) {
       localStorage.removeItem('adminToken');
