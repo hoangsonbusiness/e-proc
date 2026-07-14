@@ -42,3 +42,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 }
+
+// Chỉ cho phép role 'superadmin' — dùng sau authMiddleware, cho các route quản lý user
+export function requireSuperAdmin(req: Request, res: Response, next: NextFunction) {
+  if (req.adminUser?.role !== 'superadmin') {
+    return res.status(403).json({ error: 'Forbidden: Superadmin access required' });
+  }
+  next();
+}

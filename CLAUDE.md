@@ -51,7 +51,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `/exam` → active exam page
   - `/submit` → submission complete page
 - Admin flow routes:
-  - `/admin`, `/admin/dashboard`, `/admin/questions`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`
+  - `/admin`, `/admin/dashboard`, `/admin/questions`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`, `/admin/users` (superadmin-only, see **Admin authentication** below)
 - API wrapper: `client/src/services/api.ts`
   - `adminApi` contains admin CRUD/reporting endpoints; attaches admin JWT via request interceptor
   - `studentApi` contains exam lifecycle endpoints and violation reporting; attaches student JWT via request interceptor (see **Student auth** section below)
@@ -90,10 +90,14 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 ### Security model
 
 #### Admin authentication
-- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`)
-- Stored in `localStorage.adminToken`; sent as `Authorization: Bearer <token>` header
-- All `/api/admin/*` routes after `/login` and `/setup` require `authMiddleware`
+- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`) **and** the account's `role` (`'admin'` | `'superadmin'`), both in the response body and inside the JWT payload
+- Stored in `localStorage.adminToken` (+ `localStorage.adminRole`); sent as `Authorization: Bearer <token>` header
+- All `/api/admin/*` routes after `/login` require `authMiddleware`
 - Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) also require admin JWT
+- **Self-service admin registration has been removed** (2026-07 security hardening): `GET /is-initialized` and `POST /setup` no longer exist. Instead:
+  - The first `admin_users` row is seeded automatically at DB startup by `seedSuperAdmin()` in `src/server/db/postgres.ts`, **only when the table is empty** — username/password default to `supperadmin` / `superadmin123#2nf` (role `superadmin`), overridable via the `SUPERADMIN_USERNAME` / `SUPERADMIN_PASSWORD` env vars. **Change this password immediately after first login** (`PUT /api/admin/change-password`) — the default lives in git history.
+  - All other admin accounts can only be created/edited/deleted by an existing `superadmin`, via `GET/POST/PUT/DELETE /api/admin/users` (`src/server/routes/admin.ts`), gated by the `requireSuperAdmin` middleware (`src/server/middleware/auth.ts`) which checks `req.adminUser.role === 'superadmin'`. Guards in place: an account cannot demote or delete itself, and the last remaining `superadmin` cannot be deleted.
+  - Frontend: `client/src/pages/UserManagement.tsx` (route `/admin/users`) is the only UI for this — gated both by `PrivateRoute`'s `requireSuperAdmin` prop (`client/src/components/PrivateRoute.tsx`) and by conditionally rendering the "User Management" nav link (`isSuperAdmin` from `AuthContext`) across all admin pages. Non-superadmin accounts never see the link and are bounced to `/admin/dashboard` if they navigate to the URL directly — though the real enforcement is server-side (`requireSuperAdmin`), since client-side gating alone is not a security boundary.
 
 #### Student authentication
 After the security hardening (2026-07), student auth works via a signed JWT rather than an unverified header:
@@ -219,6 +223,8 @@ Batches support two blueprint formats for question assignment:
 | `QUEUE_PROCESS_INTERVAL` | No | `10000` | Milliseconds between AI queue processing ticks |
 | `DB_POOL_MAX` | No | `10` | PostgreSQL connection pool max size |
 | `DB_POOL_MIN` | No | `2` | PostgreSQL connection pool min size |
+| `SUPERADMIN_USERNAME` | No | `supperadmin` | Username seeded as the first `admin_users` row (role `superadmin`) when the table is empty. See **Admin authentication**. |
+| `SUPERADMIN_PASSWORD` | No | `superadmin123#2nf` | Password for the seeded superadmin account above. Set this explicitly in production instead of relying on the hardcoded default. |
 
 ## Important project-specific notes
 

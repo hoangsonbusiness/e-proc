@@ -6,7 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
-  const { logout } = useAuth();
+  const { logout, isSuperAdmin } = useAuth();
 
   useEffect(() => {
     loadBatches();
@@ -49,6 +49,7 @@ function AdminDashboard() {
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
         <Link to="/admin/settings">AI Settings</Link>
+        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
 
       <div className="card">

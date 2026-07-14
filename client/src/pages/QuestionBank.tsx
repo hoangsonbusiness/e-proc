@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
 function QuestionBank() {
+  const { isSuperAdmin } = useAuth();
   const [questions, setQuestions] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [questionGroups, setQuestionGroups] = useState<string[]>([]);
@@ -201,6 +203,7 @@ function QuestionBank() {
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
         <Link to="/admin/settings">AI Settings</Link>
+        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
 
       {/* ── Import card ── */}

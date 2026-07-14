@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
-import { authMiddleware } from '../middleware/auth.js';
+import { authMiddleware, requireSuperAdmin } from '../middleware/auth.js';
 
 dotenv.config();
 
@@ -27,64 +27,13 @@ const loginRateLimit = rateLimit({
   legacyHeaders: false,
 });
 
-// [C-5] Rate limit cho setup: 5 lần/giờ — chỉ dùng một lần trong vòng đời app
-const setupRateLimit = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 giờ
-  max: 5,
-  message: { error: 'Too many setup attempts. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // =============================================
 // AUTH ROUTES (không require JWT)
 // =============================================
-
-// GET /api/admin/is-initialized — Kiểm tra xem admin đã được tạo chưa
-router.get('/is-initialized', async (req: Request, res: Response) => {
-  try {
-    const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
-    const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
-    return res.json({ initialized: count > 0 });
-  } catch (err: any) {
-    console.error('[Auth] is-initialized error:', err);
-    return res.status(500).json({ error: 'Failed to check initialization status' });
-  }
-});
-
-// POST /api/admin/setup — Tạo admin lần đầu (chỉ hoạt động khi bảng trống)
-router.post('/setup', setupRateLimit, async (req: Request, res: Response) => {
-
-  try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
-    }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
-
-    // Kiểm tra xem đã có admin chưa
-    const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
-    const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
-    if (count > 0) {
-      return res.status(403).json({ error: 'Admin already initialized. Use change-password to update credentials.' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    await db.query(
-      'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
-      [username.trim(), passwordHash]
-    );
-
-    console.log('[Auth] Admin user created:', username);
-    return res.status(201).json({ success: true, message: 'Admin account created successfully' });
-  } catch (err: any) {
-    console.error('[Auth] Setup error:', err);
-    return res.status(500).json({ error: 'Failed to create admin account' });
-  }
-});
+// Lưu ý: chức năng tự đăng ký admin (/is-initialized, /setup) đã bị gỡ bỏ vì lý
+// do bảo mật. Tài khoản superadmin đầu tiên được seed tự động khi admin_users
+// còn trống (xem seedSuperAdmin() trong src/server/db/postgres.ts); các tài
+// khoản admin khác chỉ được tạo bởi superadmin qua /api/admin/users.
 
 // POST /api/admin/login — Đăng nhập, nhận JWT
 router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
@@ -117,15 +66,16 @@ router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
     }
 
     const expiresIn = '24h';
+    const role = user.role || 'admin';
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: 'admin' },
+      { id: user.id, username: user.username, role },
       secret,
       { expiresIn }
     );
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     console.log('[Auth] Login success:', username);
-    return res.json({ token, expiresAt });
+    return res.json({ token, expiresAt, role });
   } catch (err: any) {
     console.error('[Auth] Login error:', err);
     return res.status(500).json({ error: 'Login failed' });
@@ -180,6 +130,129 @@ router.put('/change-password', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Auth] Change password error:', err);
     return res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
+// =============================================
+// USER MANAGEMENT — Chỉ superadmin (require JWT + role superadmin)
+// =============================================
+
+// GET /api/admin/users — Danh sách tài khoản admin (không trả password_hash)
+router.get('/users', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT id, username, role, created_at, updated_at FROM admin_users ORDER BY created_at ASC'
+    );
+    return res.json(result.rows);
+  } catch (err: any) {
+    console.error('[Users] List error:', err);
+    return res.status(500).json({ error: 'Failed to list admin users' });
+  }
+});
+
+// POST /api/admin/users — Tạo tài khoản admin mới
+router.post('/users', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { username, password, role } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    if (role !== 'admin' && role !== 'superadmin') {
+      return res.status(400).json({ error: "role must be 'admin' or 'superadmin'" });
+    }
+
+    const existing = await db.query('SELECT id FROM admin_users WHERE username = ?', [username.trim()]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await db.query(
+      'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
+      [username.trim(), passwordHash, role]
+    );
+
+    console.log('[Users] Created admin user:', username, 'role:', role, 'by:', req.adminUser!.username);
+    return res.status(201).json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Create error:', err);
+    return res.status(500).json({ error: 'Failed to create admin user' });
+  }
+});
+
+// PUT /api/admin/users/:id — Đổi role và/hoặc reset password của một tài khoản admin
+router.put('/users/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { role, password } = req.body;
+
+    const existing = await db.query('SELECT * FROM admin_users WHERE id = ?', [id]);
+    const target = existing.rows[0];
+    if (!target) {
+      return res.status(404).json({ error: 'Admin user not found' });
+    }
+
+    if (role !== undefined) {
+      if (role !== 'admin' && role !== 'superadmin') {
+        return res.status(400).json({ error: "role must be 'admin' or 'superadmin'" });
+      }
+      // Không cho phép tự hạ quyền chính mình xuống 'admin' — tránh tự khoá bản thân
+      if (Number(id) === req.adminUser!.id && role !== 'superadmin') {
+        return res.status(400).json({ error: 'You cannot demote your own account' });
+      }
+      await db.query('UPDATE admin_users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [role, id]);
+    }
+
+    if (password !== undefined) {
+      if (password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters' });
+      }
+      const passwordHash = await bcrypt.hash(password, 10);
+      await db.query('UPDATE admin_users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [passwordHash, id]);
+    }
+
+    console.log('[Users] Updated admin user:', target.username, 'by:', req.adminUser!.username);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Update error:', err);
+    return res.status(500).json({ error: 'Failed to update admin user' });
+  }
+});
+
+// DELETE /api/admin/users/:id — Xoá tài khoản admin
+router.delete('/users/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (Number(id) === req.adminUser!.id) {
+      return res.status(400).json({ error: 'You cannot delete your own account' });
+    }
+
+    const existing = await db.query('SELECT * FROM admin_users WHERE id = ?', [id]);
+    const target = existing.rows[0];
+    if (!target) {
+      return res.status(404).json({ error: 'Admin user not found' });
+    }
+
+    // Không cho xoá superadmin cuối cùng — tránh khoá toàn bộ hệ thống quản trị
+    if (target.role === 'superadmin') {
+      const superAdmins = await db.query("SELECT COUNT(*) as count FROM admin_users WHERE role = 'superadmin'");
+      const count = Number(superAdmins.rows[0]?.count ?? superAdmins.rows[0]?.COUNT ?? 0);
+      if (count <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last remaining superadmin' });
+      }
+    }
+
+    await db.query('DELETE FROM admin_users WHERE id = ?', [id]);
+    console.log('[Users] Deleted admin user:', target.username, 'by:', req.adminUser!.username);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Delete error:', err);
+    return res.status(500).json({ error: 'Failed to delete admin user' });
   }
 });
 

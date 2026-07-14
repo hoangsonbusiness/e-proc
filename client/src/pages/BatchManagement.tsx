@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -89,6 +90,7 @@ const decodeComboKey = (key: string): { module: string; question_group: string }
 const comboLabel = (module: string, group: string) => (group ? `${module} (${group})` : module);
 
 function BatchManagement() {
+  const { isSuperAdmin } = useAuth();
   const [batches, setBatches] = useState<any[]>([]);
   const [moduleGroups, setModuleGroups] = useState<ModuleGroupOption[]>([]);
   const [moduleGroupStats, setModuleGroupStats] = useState<ModuleGroupStats[]>([]);
@@ -766,6 +768,7 @@ function BatchManagement() {
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
         <Link to="/admin/settings">AI Settings</Link>
+        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>

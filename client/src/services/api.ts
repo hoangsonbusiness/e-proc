@@ -36,8 +36,7 @@ api.interceptors.response.use(
     if (
       error.response?.status === 401 &&
       window.location.pathname.startsWith('/admin') &&
-      window.location.pathname !== '/admin' &&
-      !window.location.pathname.includes('/admin/setup')
+      window.location.pathname !== '/admin'
     ) {
       localStorage.removeItem('adminToken');
       window.location.href = '/admin';
@@ -48,20 +47,27 @@ api.interceptors.response.use(
 
 export const adminApi = {
   // --- Auth endpoints ---
-  isInitialized: () =>
-    api.get('/admin/is-initialized'),
-
   login: (username: string, password: string) =>
     api.post('/admin/login', { username, password }),
 
   logout: () =>
     api.post('/admin/logout').finally(() => localStorage.removeItem('adminToken')),
 
-  setup: (username: string, password: string) =>
-    api.post('/admin/setup', { username, password }),
-
   changePassword: (currentPassword: string, newPassword: string) =>
     api.put('/admin/change-password', { currentPassword, newPassword }),
+
+  // --- User management endpoints (superadmin only) ---
+  listUsers: () =>
+    api.get('/admin/users'),
+
+  createUser: (username: string, password: string, role: 'admin' | 'superadmin') =>
+    api.post('/admin/users', { username, password, role }),
+
+  updateUser: (id: number, data: { role?: 'admin' | 'superadmin'; password?: string }) =>
+    api.put(`/admin/users/${id}`, data),
+
+  deleteUser: (id: number) =>
+    api.delete(`/admin/users/${id}`),
 
   // --- Question endpoints ---
   importQuestions: (formData: FormData) =>

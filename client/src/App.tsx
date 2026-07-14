@@ -2,13 +2,13 @@ import { Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import PrivateRoute from './components/PrivateRoute';
 import AdminLogin from './pages/AdminLogin';
-import AdminSetup from './pages/AdminSetup';
 import AdminDashboard from './pages/AdminDashboard';
 import QuestionBank from './pages/QuestionBank';
 import BatchManagement from './pages/BatchManagement';
 import StudentManagement from './pages/StudentManagement';
 import Results from './pages/Results';
 import AISettings from './pages/AISettings';
+import UserManagement from './pages/UserManagement';
 import StudentLogin from './pages/StudentLogin';
 import StudentExam from './pages/StudentExam';
 import StudentConfirm from './pages/StudentConfirm';
@@ -26,7 +26,6 @@ function App() {
 
         {/* Admin public routes */}
         <Route path="/admin" element={<AdminLogin />} />
-        <Route path="/admin/setup" element={<AdminSetup />} />
 
         {/* Admin protected routes */}
         <Route path="/admin/dashboard" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
@@ -35,6 +34,7 @@ function App() {
         <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/results" element={<PrivateRoute><Results /></PrivateRoute>} />
         <Route path="/admin/settings" element={<PrivateRoute><AISettings /></PrivateRoute>} />
+        <Route path="/admin/users" element={<PrivateRoute requireSuperAdmin><UserManagement /></PrivateRoute>} />
       </Routes>
     </AuthProvider>
   );

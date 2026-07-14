@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -200,10 +201,14 @@ await client.query(`
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'admin',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  try {
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`);
+  } catch (_) { /* already exists */ }
   console.log('[DB] admin_users ready');
 
   client.release();
@@ -337,10 +342,15 @@ function initSqlite() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'admin',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[];
+    if (!adminCols.map((c) => c.name).includes('role')) {
+      sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+    }
 
     console.log('[DB] All SQLite tables initialized');
   } catch (err) {
@@ -349,12 +359,31 @@ function initSqlite() {
   }
 }
 
+// Seed tài khoản superadmin đầu tiên — chỉ chạy khi bảng admin_users đang trống,
+// thay cho form đăng ký admin tự phục vụ (đã bị gỡ bỏ vì lý do bảo mật).
+async function seedSuperAdmin() {
+  const existing = await query('SELECT COUNT(*) as count FROM admin_users');
+  const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
+  if (count > 0) return;
+
+  const username = process.env.SUPERADMIN_USERNAME || 'supperadmin';
+  const password = process.env.SUPERADMIN_PASSWORD || 'superadmin123#2nf';
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  await query(
+    'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
+    [username, passwordHash, 'superadmin']
+  );
+  console.log('[DB] Seeded initial superadmin account:', username);
+}
+
 export async function initDatabase() {
   if (USE_SQLITE) {
     initSqlite();
   } else {
     await initPostgres();
   }
+  await seedSuperAdmin();
 }
 
 interface DbResult {

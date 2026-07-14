@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 function Results() {
+  const { isSuperAdmin } = useAuth();
   const { id } = useParams<{ id: string }>();
   const [results, setResults] = useState<any[]>([]);
   const [batch, setBatch] = useState<any>(null);
@@ -86,6 +88,7 @@ function Results() {
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
         <Link to="/admin/settings">AI Settings</Link>
+        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
