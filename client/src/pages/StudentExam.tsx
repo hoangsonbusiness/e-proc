@@ -56,6 +56,7 @@ function StudentExam() {
   const studentId = localStorage.getItem('studentId');
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
   const studentToken = localStorage.getItem('studentToken');
+  const studentEmail = localStorage.getItem('studentEmail');
 
   useEffect(() => {
     if (!studentId || !studentToken) {
@@ -801,7 +802,7 @@ function StudentExam() {
                 userSelect: 'none',
               }}
             >
-              ID:{studentId} {new Date().toLocaleTimeString('vi-VN')}
+              Email:{studentEmail || studentId} {new Date().toLocaleTimeString('vi-VN')}
             </span>
           ))}
         </div>
