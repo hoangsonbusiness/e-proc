@@ -74,6 +74,14 @@ function StudentExam() {
         console.log('[Exam] Step 1 - Getting existing questions...');
         const existingRes = await studentApi.getQuestions();
         const data = existingRes.data;
+
+        // Học viên thuộc batch Practice vào nhầm /exam (bookmark/cache cũ) —
+        // server báo chuyển hướng sang trang thi practice
+        if (data.redirect === 'practice') {
+          navigate('/practice');
+          return;
+        }
+
         const existingQuestions = data.questions ?? data; // compat với format cũ
         console.log('[Exam] Step 1 done, questions:', existingQuestions.length);
 

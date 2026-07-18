@@ -112,7 +112,7 @@ router.post('/exam/start', async (req: Request, res: Response) => {
     console.log('[startExam] student_id:', student_id);
 
     const studentResult = await db.query(
-      'SELECT s.*, b.duration FROM students s JOIN batches b ON s.batch_id = b.id WHERE s.id = ?',
+      'SELECT s.*, b.duration, b.practice_exam_id FROM students s JOIN batches b ON s.batch_id = b.id WHERE s.id = ?',
       [student_id]
     );
     const student = studentResult.rows[0];
@@ -122,8 +122,13 @@ router.post('/exam/start', async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    // Học viên thuộc batch Practice không start exam thường được — chuyển hướng /practice
+    if (student.practice_exam_id) {
+      return res.json({ success: false, redirect: 'practice' });
+    }
+
     console.log('[startExam] student.status:', student.status);
-    
+
     if (student.status === 'submitted') {
       return res.status(400).json({ error: 'Exam already submitted' });
     }
@@ -208,7 +213,7 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
-      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
+      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration, b.practice_exam_id
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.id = ?
@@ -219,8 +224,14 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    // Học viên thuộc batch Practice vào nhầm /exam (bookmark/cache JS cũ):
+    // báo client chuyển hướng sang /practice thay vì gán 0 câu hỏi rồi treo loading
+    if (student.practice_exam_id) {
+      return res.json({ redirect: 'practice', questions: [], time_remaining: null });
+    }
+
     if (student.status === 'submitted') {
-      return res.status(410).json({ 
+      return res.status(410).json({
         error: 'Exam already submitted',
         reason: 'submitted'
       });
