@@ -252,6 +252,41 @@ th {
   font-weight: 600;
 }
 
+/* ─── Practice exam (đề .docx bên trái, editor bên phải) ─────────────────── */
+
+.practice-layout {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.practice-content-panel {
+  flex: 1 1 45%;
+  min-width: 0;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+}
+
+.practice-editor-panel {
+  flex: 1 1 55%;
+  min-width: 0;
+}
+
+/* Ảnh nhúng trong file .docx (mammoth xuất base64) không tràn panel */
+.practice-content-panel img {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 1000px) {
+  .practice-layout {
+    flex-direction: column;
+  }
+  .practice-content-panel {
+    max-height: 45vh;
+  }
+}
+
 /* ─── Monaco Code Editor ──────────────────────────────────────────────────── */
 
 .code-editor-wrapper {

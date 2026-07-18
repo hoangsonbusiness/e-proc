@@ -32,7 +32,8 @@ function StudentLogin() {
             studentId: res.data.student_id,
             studentToken: res.data.student_token, // [C-4] JWT xác thực học viên
             email: res.data.emails[0],
-            duration: res.data.duration
+            duration: res.data.duration,
+            examKind: res.data.exam_kind // 'practice' → làm bài tại /practice
           }
         });
       }

@@ -148,13 +148,32 @@ export const adminApi = {
   exportResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results/export`, { responseType: 'blob' }),
 
+  // --- Practice exam endpoints (quản lý riêng, import từ .docx) ---
+  importPractice: (formData: FormData) =>
+    api.post('/admin/practice/import', formData),
+
+  getPracticeExams: () =>
+    api.get('/admin/practice'),
+
+  getPracticeExam: (id: number) =>
+    api.get(`/admin/practice/${id}`),
+
+  deletePracticeExam: (id: number) =>
+    api.delete(`/admin/practice/${id}`),
+
+  getPracticeResults: (batchId: number) =>
+    api.get(`/admin/batches/${batchId}/practice-results`),
+
+  updatePracticeResult: (studentId: number, data: any) =>
+    api.put(`/admin/practice-results/${studentId}`, data),
+
   // --- AI Settings endpoints ---
   getAISettings: () =>
     api.get('/admin/settings/ai'),
-  
+
   saveAISettings: (settings: any) =>
     api.post('/admin/settings/ai', settings),
-  
+
   testAI: (settings: any) =>
     api.post('/admin/settings/ai/test', settings)
 };
@@ -181,6 +200,16 @@ export const studentApi = {
 
   reportViolation: (type: string) =>
     api.post('/student/violation', { type }),
+
+  // --- Practice exam (bài thi practice import từ .docx) ---
+  getPractice: () =>
+    api.get('/student/practice'),
+
+  savePracticeAnswer: (answer: string) =>
+    api.post('/student/practice/answer', { answer }),
+
+  submitPractice: () =>
+    api.post('/student/practice/submit', {}),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

@@ -7,37 +7,70 @@ function Results() {
   const { isSuperAdmin } = useAuth();
   const { id } = useParams<{ id: string }>();
   const [results, setResults] = useState<any[]>([]);
+  // Batch dạng Practice: kết quả là danh sách practice_submissions (1 bài làm/học viên)
+  const [practiceResults, setPracticeResults] = useState<any[]>([]);
   const [batch, setBatch] = useState<any>(null);
   const [selectedStudent, setSelectedStudent] = useState<any>(null);
+  const [selectedPracticeRow, setSelectedPracticeRow] = useState<any>(null);
   const [editScore, setEditScore] = useState<number | null>(null);
   const [editFeedback, setEditFeedback] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const isPractice = !!batch?.practice_exam_id;
+
   useEffect(() => {
-    loadBatch();
-    loadResults();
+    init();
   }, [id]);
 
-
-  const loadBatch = async () => {
+  // Load batch trước để biết là batch thường hay practice, rồi load đúng loại kết quả
+  const init = async () => {
+    setLoading(true);
     try {
-      const res = await adminApi.getBatch(parseInt(id!));
-      setBatch(res.data);
+      const bRes = await adminApi.getBatch(parseInt(id!));
+      setBatch(bRes.data);
+      if (bRes.data.practice_exam_id) {
+        const r = await adminApi.getPracticeResults(parseInt(id!));
+        setPracticeResults(r.data);
+      } else {
+        const r = await adminApi.getResults(parseInt(id!));
+        setResults(r.data);
+      }
     } catch (error) {
       console.error(error);
     }
+    setLoading(false);
   };
 
   const loadResults = async () => {
     setLoading(true);
     try {
-      const res = await adminApi.getResults(parseInt(id!));
-      setResults(res.data);
+      if (isPractice) {
+        const res = await adminApi.getPracticeResults(parseInt(id!));
+        setPracticeResults(res.data);
+      } else {
+        const res = await adminApi.getResults(parseInt(id!));
+        setResults(res.data);
+      }
     } catch (error) {
       console.error(error);
     }
     setLoading(false);
+  };
+
+  const handleSavePracticeScore = async (studentId: number) => {
+    setSaving(true);
+    try {
+      await adminApi.updatePracticeResult(studentId, {
+        trainer_score: editScore,
+        trainer_feedback: editFeedback
+      });
+      setSelectedPracticeRow(null);
+      loadResults();
+    } catch (error) {
+      console.error(error);
+    }
+    setSaving(false);
   };
 
   const handleExport = async () => {
@@ -87,19 +120,154 @@ function Results() {
         <Link to="/admin/dashboard">Dashboard</Link>
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
+        <Link to="/admin/practice">Practice</Link>
         <Link to="/admin/settings">AI Settings</Link>
         {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2>Student Results ({results.length})</h2>
-        <button onClick={handleExport} disabled={results.length === 0} className="btn btn-primary">
-          Export Excel
-        </button>
+        <h2>Student Results ({isPractice ? practiceResults.length : results.length})</h2>
+        {!isPractice && (
+          <button onClick={handleExport} disabled={results.length === 0} className="btn btn-primary">
+            Export Excel
+          </button>
+        )}
       </div>
 
       {loading ? (
         <p className="loading">Loading results...</p>
+      ) : isPractice ? (
+        <>
+          <div className="card">
+            <table>
+              <thead>
+                <tr>
+                  <th>Student</th>
+                  <th>Status</th>
+                  <th>Violations</th>
+                  <th>AI Score</th>
+                  <th>Trainer Score</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {practiceResults.map(r => (
+                  <tr key={r.student_id}>
+                    <td>{r.email}</td>
+                    <td>
+                      <span style={{
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        background: r.status === 'submitted' ? '#dcfce7' : '#fef3c7',
+                        color: r.status === 'submitted' ? '#166534' : '#92400e'
+                      }}>
+                        {r.status}
+                      </span>
+                    </td>
+                    <td>
+                      {r.violations > 0 && (
+                        <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
+                          {r.violations}
+                        </span>
+                      )}
+                    </td>
+                    <td>{r.ai_score ?? '-'}</td>
+                    <td>{r.trainer_score ?? '-'}</td>
+                    <td>
+                      <button
+                        onClick={() => {
+                          setSelectedPracticeRow(r);
+                          setEditScore(r.trainer_score ?? r.ai_score ?? 0);
+                          setEditFeedback(r.trainer_feedback ?? '');
+                        }}
+                        className="btn btn-primary"
+                        style={{ fontSize: 12 }}
+                      >
+                        Review
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {practiceResults.length === 0 && (
+                  <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-light)' }}>No results yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {selectedPracticeRow && (
+            <div className="card" style={{ marginTop: 20 }}>
+              <h3>Review: {selectedPracticeRow.email}</h3>
+
+              <div style={{ marginBottom: 20, padding: 15, background: 'var(--background)', borderRadius: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <strong>Practice Submission</strong>
+                  <span style={{
+                    background: selectedPracticeRow.ai_score >= 7 ? '#dcfce7' : selectedPracticeRow.ai_score >= 5 ? '#fef3c7' : '#fee2e2',
+                    padding: '4px 8px',
+                    borderRadius: 4
+                  }}>
+                    AI Score: {selectedPracticeRow.ai_score ?? '-'}
+                  </span>
+                </div>
+                <p style={{ marginBottom: 6 }}><strong>Answer:</strong></p>
+                <pre style={{
+                  background: '#f1f5f9', border: '1px solid var(--border)', borderRadius: 4,
+                  padding: '12px 16px', fontSize: 13, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  maxHeight: 420, overflowY: 'auto'
+                }}>{selectedPracticeRow.answer || 'No answer'}</pre>
+                {selectedPracticeRow.ai_feedback && (
+                  <p style={{ marginTop: 10, padding: 10, background: '#f0f9ff', borderRadius: 4, fontSize: 14 }}>
+                    <strong>AI Feedback:</strong> {selectedPracticeRow.ai_feedback}
+                  </p>
+                )}
+              </div>
+
+              <div style={{ marginTop: 20, padding: 20, background: '#f0fdf4', borderRadius: 8, border: '2px solid #22c55e' }}>
+                <h4 style={{ marginBottom: 15, color: '#166534' }}>Trainer Score Override</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 15 }}>
+                  <div className="form-group">
+                    <label style={{ fontWeight: 600 }}>Final Score (0-10)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10"
+                      step="0.1"
+                      value={editScore ?? ''}
+                      onChange={e => setEditScore(parseFloat(e.target.value))}
+                      style={{ fontSize: 18, textAlign: 'center', padding: 10 }}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label style={{ fontWeight: 600 }}>Trainer Feedback</label>
+                    <textarea
+                      rows={3}
+                      value={editFeedback}
+                      onChange={e => setEditFeedback(e.target.value)}
+                      placeholder="Enter your feedback for the student..."
+                    />
+                  </div>
+                </div>
+                <div style={{ marginTop: 15, display: 'flex', gap: 10 }}>
+                  <button
+                    onClick={() => handleSavePracticeScore(selectedPracticeRow.student_id)}
+                    disabled={saving}
+                    className="btn btn-primary"
+                  >
+                    {saving ? 'Saving...' : 'Save Score'}
+                  </button>
+                  <button
+                    onClick={() => setSelectedPracticeRow(null)}
+                    className="btn btn-secondary"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       ) : (
         <>
           <div className="card">

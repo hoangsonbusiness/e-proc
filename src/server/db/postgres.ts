@@ -126,7 +126,42 @@ await client.query(`
   
   const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
   await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
+
+  // Migration: batch dạng Practice trỏ tới 1 bài practice đã import (NULL = batch thi thường theo blueprint)
+  try {
+    await client.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS practice_exam_id INTEGER`);
+  } catch (_) { /* already exists */ }
   console.log('[DB] batches ready');
+
+  // Bài thi Practice: import từ file .docx, quản lý độc lập với question_bank
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS practice_exams (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      content_html TEXT NOT NULL,
+      content_plain TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] practice_exams ready');
+
+  // Bài làm practice: 1 học viên = 1 bài làm duy nhất cho batch practice của mình
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS practice_submissions (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      practice_exam_id INTEGER NOT NULL,
+      answer TEXT,
+      ai_score FLOAT,
+      ai_feedback TEXT,
+      trainer_score FLOAT,
+      trainer_feedback TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] practice_submissions ready');
   
   await client.query(`
     CREATE TABLE IF NOT EXISTS students (
@@ -194,6 +229,11 @@ await client.query(`
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: phân biệt job chấm exam_questions vs practice_submissions
+  // (kind='practice' thì exam_question_id thực chất là practice_submissions.id)
+  try {
+    await client.query(`ALTER TABLE ai_queue ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'exam'`);
+  } catch (_) { /* already exists */ }
   console.log('[DB] ai_queue ready');
   
   await client.query(`
@@ -265,10 +305,47 @@ function initSqlite() {
         end_time DATETIME NOT NULL,
         duration INTEGER NOT NULL,
         blueprint TEXT,
+        practice_exam_id INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+
+    // Migration: batch dạng Practice (NULL = batch thi thường theo blueprint)
+    const batchCols = sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[];
+    if (!batchCols.map((c) => c.name).includes('practice_exam_id')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN practice_exam_id INTEGER');
+    }
+
+    // Bài thi Practice: import từ file .docx, quản lý độc lập với question_bank
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS practice_exams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        content_html TEXT NOT NULL,
+        content_plain TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Bài làm practice: 1 học viên = 1 bài làm duy nhất cho batch practice của mình
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS practice_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        practice_exam_id INTEGER NOT NULL,
+        answer TEXT,
+        ai_score REAL,
+        ai_feedback TEXT,
+        trainer_score REAL,
+        trainer_feedback TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -332,11 +409,17 @@ function initSqlite() {
         status TEXT DEFAULT 'pending',
         attempts INTEGER DEFAULT 0,
         error_message TEXT,
+        kind TEXT DEFAULT 'exam',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+    // Migration: phân biệt job chấm exam_questions vs practice_submissions
+    const aiQueueCols = sqliteDb.prepare("PRAGMA table_info(ai_queue)").all() as { name: string }[];
+    if (!aiQueueCols.map((c) => c.name).includes('kind')) {
+      sqliteDb.exec("ALTER TABLE ai_queue ADD COLUMN kind TEXT DEFAULT 'exam'");
+    }
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS admin_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

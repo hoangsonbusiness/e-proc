@@ -98,6 +98,10 @@ function BatchManagement() {
   const [moduleGroupTypeStats, setModuleGroupTypeStats] = useState<ModuleGroupTypeStats[]>([]);
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
+  // Batch dạng Question Bank (blueprint) hay Practice (1 bài thi import từ .docx)
+  const [examMode, setExamMode] = useState<'question_bank' | 'practice'>('question_bank');
+  const [practiceExams, setPracticeExams] = useState<{ id: number; name: string }[]>([]);
+  const [selectedPracticeId, setSelectedPracticeId] = useState<string>('');
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
@@ -178,6 +182,7 @@ function BatchManagement() {
     loadModuleGroupStats();
     loadTypeStats();
     loadModuleGroupTypeStats();
+    loadPracticeExams();
   }, []);
 
 
@@ -197,6 +202,15 @@ function BatchManagement() {
     try {
       const res = await adminApi.getBatches();
       setBatches(res.data);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const loadPracticeExams = async () => {
+    try {
+      const res = await adminApi.getPracticeExams();
+      setPracticeExams(res.data);
     } catch (error) {
       console.error(error);
     }
@@ -393,6 +407,26 @@ function BatchManagement() {
   const handleUpdateBatch = async () => {
     if (!editingBatch) return;
 
+    // Batch dạng Practice: không có blueprint để validate
+    if (editingBatch.practice_exam_id) {
+      setLoading(true);
+      try {
+        await adminApi.updateBatch(editingBatch.id, {
+          name: editingBatch.name,
+          start_time: localToUTC(editingBatch.start_time),
+          end_time: localToUTC(editingBatch.end_time),
+          duration: editingBatch.duration,
+          practice_exam_id: editingBatch.practice_exam_id,
+        });
+        loadBatches();
+        setEditingBatch(null);
+      } catch (err: any) {
+        alert(err.response?.data?.error || err.message);
+      }
+      setLoading(false);
+      return;
+    }
+
     // Validate against question bank availability based on edit mode
     let statsErrors: string[] = [];
     if (editBlueprintMode === 'type') {
@@ -430,49 +464,62 @@ function BatchManagement() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[BatchManagement] handleSubmit called, blueprintMode:', blueprintMode, 'formData:', formData);
+    console.log('[BatchManagement] handleSubmit called, examMode:', examMode, 'blueprintMode:', blueprintMode, 'formData:', formData);
     setLoading(true);
     setFeasibilityErrors([]);
 
-    // Compute total based on active mode
-    const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
-    const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
-    console.log('[BatchManagement] Total questions:', total);
-    if (total < 1 || total > 20) {
-      setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
-      setLoading(false);
-      return;
-    }
+    let payload: any = {
+      name: formData.name,
+      start_time: localToUTC(formData.start_time),
+      end_time: localToUTC(formData.end_time),
+      duration: formData.duration,
+    };
 
-    // Validate against question bank availability
-    let statsErrors: string[] = [];
-    if (blueprintMode === 'type') {
-      statsErrors = validateTypesBlueprintAgainstStats(formData.blueprintByType);
+    if (examMode === 'practice') {
+      // Batch dạng Practice: chỉ cần chọn 1 bài practice đã import
+      if (!selectedPracticeId) {
+        setFeasibilityErrors(['Please select a practice exam.']);
+        setLoading(false);
+        return;
+      }
+      payload.practice_exam_id = parseInt(selectedPracticeId);
     } else {
-      statsErrors = validateBlueprintAgainstStats(formData.blueprint);
-    }
-    if (statsErrors.length > 0) {
-      setFeasibilityErrors(statsErrors);
-      setLoading(false);
-      return;
-    }
+      // Compute total based on active mode
+      const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
+      const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
+      console.log('[BatchManagement] Total questions:', total);
+      if (total < 1 || total > 20) {
+        setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
+        setLoading(false);
+        return;
+      }
 
-    const blueprintPayload = buildBlueprintPayload(blueprintMode, formData.blueprint, formData.blueprintByType);
+      // Validate against question bank availability
+      let statsErrors: string[] = [];
+      if (blueprintMode === 'type') {
+        statsErrors = validateTypesBlueprintAgainstStats(formData.blueprintByType);
+      } else {
+        statsErrors = validateBlueprintAgainstStats(formData.blueprint);
+      }
+      if (statsErrors.length > 0) {
+        setFeasibilityErrors(statsErrors);
+        setLoading(false);
+        return;
+      }
+
+      payload.blueprint = buildBlueprintPayload(blueprintMode, formData.blueprint, formData.blueprintByType);
+    }
 
     try {
-      console.log('[BatchManagement] Submitting blueprintPayload:', JSON.stringify(blueprintPayload));
-      const res = await adminApi.createBatch({
-        name: formData.name,
-        start_time: localToUTC(formData.start_time),
-        end_time: localToUTC(formData.end_time),
-        duration: formData.duration,
-        blueprint: blueprintPayload,
-      });
+      console.log('[BatchManagement] Submitting payload:', JSON.stringify(payload));
+      const res = await adminApi.createBatch(payload);
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
       setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [] });
       setBlueprintMode('module');
+      setExamMode('question_bank');
+      setSelectedPracticeId('');
       loadBatches();
       setSelectedBatchId(batchId);
       setShowInviteForm(true);
@@ -767,6 +814,7 @@ function BatchManagement() {
         <Link to="/admin/dashboard">Dashboard</Link>
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
+        <Link to="/admin/practice">Practice</Link>
         <Link to="/admin/settings">AI Settings</Link>
         {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
@@ -823,6 +871,54 @@ function BatchManagement() {
               </div>
             </div>
 
+            {/* Exam Mode Tabs: Question Bank (blueprint) vs Practice (bài import từ .docx) */}
+            <div style={{ display: 'flex', gap: 0, marginTop: 20, marginBottom: 16, border: '1.5px solid #0ea5e9', borderRadius: 8, overflow: 'hidden', width: 'fit-content' }}>
+              {(['question_bank', 'practice'] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setExamMode(mode)}
+                  style={{
+                    padding: '7px 22px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: examMode === mode ? '#0ea5e9' : '#f0f9ff',
+                    color: examMode === mode ? '#fff' : '#0ea5e9',
+                    transition: 'background 0.18s, color 0.18s',
+                  }}
+                >
+                  {mode === 'question_bank' ? '🧩 Question Bank' : '📄 Practice'}
+                </button>
+              ))}
+            </div>
+
+            {examMode === 'practice' ? (
+              <div className="form-group" style={{ maxWidth: 500 }}>
+                <label>Practice Exam</label>
+                {practiceExams.length === 0 ? (
+                  <p className="error">
+                    No practice exams imported yet. Import one at the <Link to="/admin/practice">Practice</Link> page first.
+                  </p>
+                ) : (
+                  <select
+                    value={selectedPracticeId}
+                    onChange={e => setSelectedPracticeId(e.target.value)}
+                    style={{ width: '100%', padding: 8 }}
+                  >
+                    <option value="">— Select a practice exam —</option>
+                    {practiceExams.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                )}
+                <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 6 }}>
+                  Học viên của batch này sẽ làm bài practice tại trang /practice (một bài làm duy nhất).
+                </p>
+              </div>
+            ) : (
+            <>
             <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/20)</h4>
 
             {/* Blueprint Mode Toggle */}
@@ -974,6 +1070,8 @@ function BatchManagement() {
                 </button>
               </>
             )}
+            </>
+            )}
 
             {/* Validation errors */}
             {(feasibilityErrors.length > 0 || createBlueprintErrors.length > 0) && (
@@ -989,11 +1087,15 @@ function BatchManagement() {
               type="submit"
               disabled={
                 loading ||
-                totalQuestions < 1 ||
-                totalQuestions > 20 ||
-                (blueprintMode === 'module' && moduleGroups.length === 0) ||
-                (blueprintMode === 'type' && moduleGroupTypeStats.length === 0) ||
-                createBlueprintErrors.length > 0
+                (examMode === 'practice'
+                  ? !selectedPracticeId
+                  : (
+                    totalQuestions < 1 ||
+                    totalQuestions > 20 ||
+                    (blueprintMode === 'module' && moduleGroups.length === 0) ||
+                    (blueprintMode === 'type' && moduleGroupTypeStats.length === 0) ||
+                    createBlueprintErrors.length > 0
+                  ))
               }
               className="btn btn-primary"
               style={{ marginTop: 20 }}
@@ -1080,7 +1182,14 @@ function BatchManagement() {
             {batches.map(batch => (
               <tr key={batch.id}>
                 <td>{batch.id}</td>
-                <td>{batch.name}</td>
+                <td>
+                  {batch.name}
+                  {batch.practice_exam_id && (
+                    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#0369a1', background: '#e0f2fe', padding: '2px 8px', borderRadius: 10 }}>
+                      Practice
+                    </span>
+                  )}
+                </td>
                 <td>{formatGMT7(batch.start_time)}</td>
                 <td>{formatGMT7(batch.end_time)}</td>
                 <td>{batch.duration} min</td>
@@ -1175,6 +1284,21 @@ function BatchManagement() {
             />
           </div>
 
+          {editingBatch.practice_exam_id ? (
+            <div className="form-group" style={{ maxWidth: 500 }}>
+              <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Practice Exam</h4>
+              <select
+                value={String(editingBatch.practice_exam_id)}
+                onChange={e => setEditingBatch({ ...editingBatch, practice_exam_id: parseInt(e.target.value) })}
+                style={{ width: '100%', padding: 8 }}
+              >
+                {practiceExams.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+          <>
           <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>
 
           {/* Blueprint Mode Toggle for Edit form */}
@@ -1354,9 +1478,11 @@ function BatchManagement() {
               ))}
             </div>
           )}
+          </>
+          )}
 
           <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            {editBlueprintMode === 'module' ? (
+            {!editingBatch.practice_exam_id && (editBlueprintMode === 'module' ? (
               <button
                 onClick={() => setEditingBatch({
                   ...editingBatch,
@@ -1393,11 +1519,11 @@ function BatchManagement() {
               >
                 + Add Module / Type
               </button>
-            )}
+            ))}
 
             <button
               onClick={handleUpdateBatch}
-              disabled={loading || editBlueprintErrors.length > 0}
+              disabled={loading || (!editingBatch.practice_exam_id && editBlueprintErrors.length > 0)}
               className="btn btn-primary"
             >
               {loading ? 'Saving...' : 'Save Changes'}

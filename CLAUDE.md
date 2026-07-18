@@ -74,12 +74,13 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - if `DATABASE_URL` is present, production-style PostgreSQL path is used
 - Core tables are created in the DB layer on startup:
   - `question_bank`
-  - `batches`
+  - `batches` (has nullable `practice_exam_id` — set = the batch is a Practice batch, see **Practice exams** below)
   - `students`
   - `exam_questions`
   - `violations`
-  - `ai_queue`
+  - `ai_queue` (has `kind` column: `'exam'` grades an `exam_questions` row, `'practice'` grades a `practice_submissions` row — for practice jobs, `exam_question_id` actually holds the `practice_submissions.id`)
   - `ai_settings`
+  - `practice_exams` / `practice_submissions` (see **Practice exams** below)
 - `question_bank` columns relevant to import/grading/export (see "Question bank: groups and HTML-safe plain text" below):
   - `module` — topic/category (e.g. "Pointers", "OOP")
   - `question_group` — nullable, names the question set a question belongs to (e.g. `CPP_PRINT_IOT`, `CPP_EMB_AUTOSAR`), used to disambiguate question sets that otherwise share the same `module`/`level`/`type` framework
@@ -138,6 +139,17 @@ When debugging student exam state, inspect:
 - The student runtime relies on `localStorage` for `studentId` (display) and `duration`, and `studentToken` for authentication. When debugging exam state, inspect both localStorage and network `Authorization` headers.
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
+
+### Practice exams (long-form .docx exams, separate from question_bank)
+A second exam mode, fully independent of the question-bank/blueprint pipeline:
+
+- **Data model**: `practice_exams` (id, name, `content_html` from mammoth docx→HTML conversion, `content_plain` via `stripHtml()` for the AI grading prompt) and `practice_submissions` (one row per student: answer + ai/trainer score/feedback). A batch becomes a Practice batch by having `batches.practice_exam_id` set (blueprint is stored NULL for those); one batch is either blueprint-based or practice-based, never both.
+- **Admin import**: `POST /api/admin/practice/import` (`src/server/routes/admin.ts`) accepts a `.docx` upload (multer memory storage) + optional name, converts with `mammoth.convertToHtml`, stores both HTML and stripped plain text. Managed in `client/src/pages/PracticeManagement.tsx` at `/admin/practice` (list/preview/delete; delete is blocked while any batch references the exam). Batch creation (`BatchManagement.tsx`) has a "Question Bank | Practice" tab — Practice mode swaps the blueprint UI for a practice-exam `<select>` and sends `practice_exam_id` instead of `blueprint`.
+- **Student flow**: same access-code login. `POST /student/verify` returns `exam_kind: 'practice' | 'exam'` (derived from `batches.practice_exam_id`); `StudentConfirm.tsx` routes to `/practice` instead of `/exam` accordingly. `client/src/pages/StudentPractice.tsx` renders the docx HTML (DOMPurify-sanitized) in a left panel and a single Monaco CodeEditor (one answer for the whole exam) on the right. It intentionally duplicates the anti-cheat/timer/violation logic of `StudentExam.tsx` — changes to anti-cheat behavior must be applied to BOTH files.
+- **Student API** (`src/server/routes/student.ts`): `GET /student/practice` (auto-starts on first call: sets deadline + creates the `practice_submissions` row; enforces the same 410 timeout/absent guards as `/exam/questions`), `POST /student/practice/answer` (direct DB update — no buffer, since it's a single answer, client debounces 2s), `POST /student/practice/submit`. Violations and the disconnect beacon reuse the shared `/student/violation` and `/exam/disconnect` endpoints.
+- **AI grading**: `cache.addToQueue(id, studentId, 'practice')` — queue jobs carry `kind`; practice jobs JOIN `practice_submissions`+`practice_exams` and grade the whole answer against `content_plain` holistically (no rubric columns). Results written back to `practice_submissions`.
+- **Trainer review**: `GET /api/admin/batches/:id/practice-results` + `PUT /api/admin/practice-results/:studentId`; `Results.tsx` detects `batch.practice_exam_id` and renders the practice results table/review panel instead of the per-question view (Excel export is hidden for practice batches — the exam export queries `exam_questions`).
+- **Students import**: `POST /batches/:id/students/import` skips blueprint validation and question assignment entirely for practice batches (students are created with access codes only). Student reset/delete and batch delete also clean up `practice_submissions`.
 
 ### Code editor language support (student answer editor)
 - The Monaco-based answer editor is `client/src/components/CodeEditor.tsx`. `LANGUAGE_OPTIONS`/`SupportedLanguage` there is the single source of truth for which languages appear in the student-facing "Language:" dropdown; add new languages there.

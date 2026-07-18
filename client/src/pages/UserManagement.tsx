@@ -117,6 +117,7 @@ function UserManagement() {
         <Link to="/admin/dashboard">Dashboard</Link>
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
+        <Link to="/admin/practice">Practice</Link>
         <Link to="/admin/settings">AI Settings</Link>
         <Link to="/admin/users" className="active">User Management</Link>
       </div>

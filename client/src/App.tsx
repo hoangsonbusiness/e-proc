@@ -9,8 +9,10 @@ import StudentManagement from './pages/StudentManagement';
 import Results from './pages/Results';
 import AISettings from './pages/AISettings';
 import UserManagement from './pages/UserManagement';
+import PracticeManagement from './pages/PracticeManagement';
 import StudentLogin from './pages/StudentLogin';
 import StudentExam from './pages/StudentExam';
+import StudentPractice from './pages/StudentPractice';
 import StudentConfirm from './pages/StudentConfirm';
 import StudentSubmit from './pages/StudentSubmit';
 
@@ -22,6 +24,7 @@ function App() {
         <Route path="/" element={<StudentLogin />} />
         <Route path="/confirm" element={<StudentConfirm />} />
         <Route path="/exam" element={<StudentExam />} />
+        <Route path="/practice" element={<StudentPractice />} />
         <Route path="/submit" element={<StudentSubmit />} />
 
         {/* Admin public routes */}
@@ -34,6 +37,7 @@ function App() {
         <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/results" element={<PrivateRoute><Results /></PrivateRoute>} />
         <Route path="/admin/settings" element={<PrivateRoute><AISettings /></PrivateRoute>} />
+        <Route path="/admin/practice" element={<PrivateRoute><PracticeManagement /></PrivateRoute>} />
         <Route path="/admin/users" element={<PrivateRoute requireSuperAdmin><UserManagement /></PrivateRoute>} />
       </Routes>
     </AuthProvider>

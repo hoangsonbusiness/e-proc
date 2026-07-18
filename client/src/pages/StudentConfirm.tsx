@@ -11,6 +11,7 @@ function StudentConfirm() {
   const studentToken = location.state?.studentToken; // [C-4]
   const email = location.state?.email;
   const duration = location.state?.duration;
+  const examKind = location.state?.examKind; // 'practice' → làm bài tại /practice
 
   useEffect(() => {
     // Redirect to login if no state or missing token
@@ -28,7 +29,7 @@ function StudentConfirm() {
     localStorage.setItem('studentId', studentId.toString());
     localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
-    navigate('/exam');
+    navigate(examKind === 'practice' ? '/practice' : '/exam');
   };
 
   return (

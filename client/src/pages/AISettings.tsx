@@ -97,6 +97,7 @@ function AISettings() {
         <Link to="/admin/dashboard">Dashboard</Link>
         <Link to="/admin/questions">Question Bank</Link>
         <Link to="/admin/batches">Batches</Link>
+        <Link to="/admin/practice">Practice</Link>
         <Link to="/admin/settings">AI Settings</Link>
         {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
       </div>
