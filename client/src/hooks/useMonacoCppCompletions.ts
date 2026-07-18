@@ -25,20 +25,26 @@ function makeSnippet(
 
 function getCppKeywords(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
   const keywords = [
-    'alignas', 'alignof', 'and', 'and_eq', 'asm', 'auto', 'bitand', 'bitor',
+    // Note: deliberately excludes the alternative operator keywords
+    // (and, or, not, xor, bitand, bitor, compl, and_eq, or_eq, xor_eq, not_eq).
+    // They are valid C++ but function identically to &&, ||, !, ^, &, |, ~ and
+    // are almost never used in idiomatic/embedded C++ — suggesting them by name
+    // risks a student accepting one by accident (e.g. typing "an" toward a
+    // variable like "angle") and ending up with confusing, non-standard code.
+    'alignas', 'alignof', 'asm', 'auto',
     'bool', 'break', 'case', 'catch', 'char', 'char8_t', 'char16_t', 'char32_t',
-    'class', 'compl', 'concept', 'const', 'consteval', 'constexpr', 'constinit',
+    'class', 'concept', 'const', 'consteval', 'constexpr', 'constinit',
     'const_cast', 'continue', 'co_await', 'co_return', 'co_yield', 'decltype',
     'default', 'delete', 'do', 'double', 'dynamic_cast', 'else', 'enum',
     'explicit', 'export', 'extern', 'false', 'final', 'float', 'for', 'friend',
     'goto', 'if', 'inline', 'int', 'long', 'mutable', 'namespace', 'new',
-    'noexcept', 'not', 'not_eq', 'nullptr', 'operator', 'or', 'or_eq',
+    'noexcept', 'nullptr', 'operator',
     'override', 'private', 'protected', 'public', 'register',
     'reinterpret_cast', 'requires', 'return', 'short', 'signed', 'sizeof',
     'static', 'static_assert', 'static_cast', 'struct', 'switch', 'template',
     'this', 'thread_local', 'throw', 'true', 'try', 'typedef', 'typeid',
     'typename', 'union', 'unsigned', 'using', 'virtual', 'void', 'volatile',
-    'wchar_t', 'while', 'xor', 'xor_eq',
+    'wchar_t', 'while',
     // Common std types
     'std', 'string', 'vector', 'map', 'unordered_map', 'set', 'unordered_set',
     'pair', 'tuple', 'array', 'list', 'deque', 'stack', 'queue',
