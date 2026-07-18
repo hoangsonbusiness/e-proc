@@ -45,11 +45,15 @@ function getCppKeywords(monaco: typeof Monaco): Monaco.languages.CompletionItem[
     'this', 'thread_local', 'throw', 'true', 'try', 'typedef', 'typeid',
     'typename', 'union', 'unsigned', 'using', 'virtual', 'void', 'volatile',
     'wchar_t', 'while',
+    // C++20 modules
+    'module', 'import',
     // Common std types
-    'std', 'string', 'vector', 'map', 'unordered_map', 'set', 'unordered_set',
-    'pair', 'tuple', 'array', 'list', 'deque', 'stack', 'queue',
+    'std', 'string', 'string_view', 'vector', 'map', 'unordered_map',
+    'multimap', 'unordered_multimap', 'set', 'unordered_set', 'multiset',
+    'unordered_multiset', 'bitset', 'pair', 'tuple', 'array', 'list',
+    'forward_list', 'deque', 'stack', 'queue',
     'priority_queue', 'shared_ptr', 'unique_ptr', 'weak_ptr', 'optional',
-    'variant', 'function', 'size_t', 'nullptr_t',
+    'variant', 'any', 'function', 'initializer_list', 'size_t', 'nullptr_t',
   ];
 
   return keywords.map(kw => ({

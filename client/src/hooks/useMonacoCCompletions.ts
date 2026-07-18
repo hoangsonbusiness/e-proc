@@ -25,18 +25,27 @@ function makeSnippet(
 
 function getCKeywords(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
   const keywords = [
+    // C89/C90
     'auto', 'break', 'case', 'char', 'const', 'continue', 'default', 'do',
     'double', 'else', 'enum', 'extern', 'float', 'for', 'goto', 'if',
-    'inline', 'int', 'long', 'register', 'restrict', 'return', 'short',
+    'int', 'long', 'register', 'return', 'short',
     'signed', 'sizeof', 'static', 'struct', 'switch', 'typedef', 'union',
-    'unsigned', 'void', 'volatile', 'while', '_Bool', '_Complex', '_Imaginary',
-    // C11 keywords
+    'unsigned', 'void', 'volatile', 'while',
+    // C99
+    'inline', 'restrict', '_Bool', '_Complex', '_Imaginary',
+    // C11
     '_Alignas', '_Alignof', '_Atomic', '_Generic', '_Noreturn',
     '_Static_assert', '_Thread_local',
+    // C23 — newer keywords (spelled-out aliases for the C11/C99 ones above,
+    // plus a few genuinely new ones); harmless to suggest even on older
+    // toolchains since these only appear when a student actually types them
+    'alignas', 'alignof', 'bool', 'constexpr', 'nullptr', 'static_assert',
+    'thread_local', 'typeof', 'typeof_unqual', 'true', 'false',
+    // Common standard-library types / macros
     'NULL', 'size_t', 'ssize_t', 'ptrdiff_t', 'wchar_t',
     'int8_t', 'int16_t', 'int32_t', 'int64_t',
     'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t',
-    'FILE', 'true', 'false',
+    'FILE',
   ];
 
   return keywords.map(kw => ({
