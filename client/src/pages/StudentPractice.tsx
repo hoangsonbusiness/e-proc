@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react'
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
+import { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
 // Lazy-load Monaco Editor to avoid bloating the initial bundle
@@ -396,6 +397,16 @@ function StudentPractice() {
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  // Đoán ngôn ngữ mặc định của editor từ tên đề + phần đầu nội dung đề
+  // (ví dụ "Practice_Cobol_M3" → cobol; đề chứa "C/C++" → cpp). Học viên vẫn
+  // đổi được qua dropdown. Thay _/- bằng khoảng trắng vì detectLanguage dùng
+  // \b (word boundary) mà dấu gạch dưới là word character — "practice_cobol"
+  // sẽ không match \bcobol\b nếu giữ nguyên.
+  const practiceLanguage = detectLanguage(
+    practice?.name.replace(/[_-]+/g, ' '),
+    practice?.content_html.replace(/<[^>]*>/g, ' ').replace(/[_-]+/g, ' ').slice(0, 1000)
+  );
+
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
@@ -512,7 +523,7 @@ function StudentPractice() {
                   onCopyAttempt={handleCopyAttempt}
                   onCutAttempt={handleCutAttempt}
                   onPasteAttempt={handlePasteAttempt}
-                  defaultLanguage="cpp"
+                  defaultLanguage={practiceLanguage}
                   disabled={locked || submitting}
                   height="calc(100vh - 220px)"
                 />
