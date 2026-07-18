@@ -296,7 +296,8 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
     // === END GUARD ===
 
     const result = await db.query(`
-      SELECT eq.question_order, eq.answer, q.id, q.type, q.level, q.module, q.question_sample
+      SELECT eq.question_order, eq.answer, q.id, q.type, q.level, q.module, q.question_sample,
+             q.question_code_sample, q.question_console_output
       FROM exam_questions eq
       JOIN question_bank q ON eq.question_id = q.id
       WHERE eq.student_id = ?

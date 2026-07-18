@@ -385,6 +385,14 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       const questionGroupRaw = colIndex['QuestionGroup'] ?? colIndex['Question Set'] ?? colIndex['Bộ đề'];
       const questionGroup = (questionGroupRaw !== undefined ? row[questionGroupRaw]?.toString().trim() : '') || '';
 
+      // Practice-style exam questions (bối cảnh/yêu cầu bên cạnh code) — cả hai
+      // đều tuỳ chọn; câu hỏi loại thông thường không set 2 cột này sẽ hiển thị
+      // như trước (không có panel code riêng).
+      const codeSampleRaw = colIndex['CodeSample'] ?? colIndex['Code Mẫu'] ?? colIndex['Starter Code'];
+      const codeSample = (codeSampleRaw !== undefined ? row[codeSampleRaw]?.toString() : '') || '';
+      const consoleOutputRaw = colIndex['ConsoleOutput'] ?? colIndex['Console Output'] ?? colIndex['Kết quả Console'];
+      const consoleOutput = (consoleOutputRaw !== undefined ? row[consoleOutputRaw]?.toString() : '') || '';
+
       const rubricMustHave = row[rubricMustHaveCol]?.toString() || '';
       const rubricNice = row[rubricNiceCol]?.toString() || '';
       const rubricOpt = row[rubricOptCol]?.toString() || '';
@@ -420,14 +428,14 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       if (USE_SQLITE) {
         await db.query(`
           INSERT OR REPLACE INTO question_bank
-          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
+          (id, type, level, module, question_group, question_sample, question_plain, question_code_sample, question_console_output, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, questionGroup, question, questionPlain, codeSample, consoleOutput, rubricMustHave, rubricNice, rubricOpt]);
       } else {
         const pgQuery = `
           INSERT INTO question_bank
-          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+          (id, type, level, module, question_group, question_sample, question_plain, question_code_sample, question_console_output, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
@@ -435,13 +443,15 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
             question_group = EXCLUDED.question_group,
             question_sample = EXCLUDED.question_sample,
             question_plain = EXCLUDED.question_plain,
+            question_code_sample = EXCLUDED.question_code_sample,
+            question_console_output = EXCLUDED.question_console_output,
             rubric_must_have = EXCLUDED.rubric_must_have,
             rubric_nice_to_have = EXCLUDED.rubric_nice_to_have,
             rubric_optional = EXCLUDED.rubric_optional,
             updated_at = CURRENT_TIMESTAMP
         `;
         console.log('[Import] PG Query:', pgQuery);
-        await db.query(pgQuery, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
+        await db.query(pgQuery, [id, type, level, normalizedModule, questionGroup, question, questionPlain, codeSample, consoleOutput, rubricMustHave, rubricNice, rubricOpt]);
       }
     }
 

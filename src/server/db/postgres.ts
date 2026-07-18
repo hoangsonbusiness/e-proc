@@ -50,6 +50,8 @@ async function initPostgres() {
       question_group TEXT,
       question_sample TEXT NOT NULL,
       question_plain TEXT,
+      question_code_sample TEXT,
+      question_console_output TEXT,
       rubric_must_have TEXT NOT NULL,
       rubric_nice_to_have TEXT NOT NULL,
       rubric_optional TEXT NOT NULL,
@@ -66,6 +68,13 @@ async function initPostgres() {
   // Migration: thêm cột question_plain (nội dung câu hỏi không có HTML) cho DB cũ chưa có
   try {
     await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_plain TEXT`);
+  } catch (_) { /* already exists */ }
+
+  // Migration: thêm cột code mẫu / console output mong muốn cho đề dạng Practice
+  // (2 phần: đề bài + code) cho DB cũ chưa có
+  try {
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_code_sample TEXT`);
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_console_output TEXT`);
   } catch (_) { /* already exists */ }
 
   // Migration: cập nhật CHECK constraint type cho DB cũ
@@ -239,6 +248,8 @@ function initSqlite() {
         question_group TEXT,
         question_sample TEXT NOT NULL,
         question_plain TEXT,
+        question_code_sample TEXT,
+        question_console_output TEXT,
         rubric_must_have TEXT NOT NULL,
         rubric_nice_to_have TEXT NOT NULL,
         rubric_optional TEXT NOT NULL,
@@ -255,6 +266,12 @@ function initSqlite() {
     }
     if (!qbColNames.includes('question_plain')) {
       sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_plain TEXT');
+    }
+    if (!qbColNames.includes('question_code_sample')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_code_sample TEXT');
+    }
+    if (!qbColNames.includes('question_console_output')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_console_output TEXT');
     }
 
     sqliteDb.exec(`
