@@ -252,50 +252,6 @@ th {
   font-weight: 600;
 }
 
-/* Practice-style questions: task description (left) + starter code /
-   expected console output (right), side-by-side; stacks on narrow screens */
-.question-two-col {
-  display: flex;
-  gap: 24px;
-  flex-wrap: wrap;
-  align-items: flex-start;
-}
-
-.question-two-col .question-content {
-  flex: 1 1 380px;
-  min-width: 0;
-}
-
-.question-code-panel {
-  flex: 1 1 380px;
-  min-width: 0;
-}
-
-.question-code-block {
-  margin-bottom: 16px;
-}
-
-.question-code-block h4 {
-  font-size: 13px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--text-light);
-  margin-bottom: 6px;
-}
-
-.question-code-block pre {
-  background: #f1f5f9;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 14px;
-  padding: 12px 16px;
-  margin: 0;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
 /* ─── Monaco Code Editor ──────────────────────────────────────────────────── */
 
 .code-editor-wrapper {

@@ -15,8 +15,6 @@ interface Question {
   id: string;
   question_order: number;
   question_sample: string;
-  question_code_sample?: string;
-  question_console_output?: string;
   module: string;
   level: string;
   type: string;
@@ -587,37 +585,12 @@ function StudentExam() {
         )}
 
         <div className="card">
-          {(currentQuestion.question_code_sample || currentQuestion.question_console_output) ? (
-            <div className="question-two-col">
-              <div
-                className="question-content"
-                dangerouslySetInnerHTML={{
-                  __html: sanitizeQuestion(currentQuestion.question_sample)
-                }}
-              />
-              <div className="question-code-panel">
-                {currentQuestion.question_code_sample && (
-                  <div className="question-code-block">
-                    <h4>Starter Code</h4>
-                    <pre><code>{currentQuestion.question_code_sample}</code></pre>
-                  </div>
-                )}
-                {currentQuestion.question_console_output && (
-                  <div className="question-code-block">
-                    <h4>Expected Console Output</h4>
-                    <pre><code>{currentQuestion.question_console_output}</code></pre>
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div
-              className="question-content"
-              dangerouslySetInnerHTML={{
-                __html: sanitizeQuestion(currentQuestion.question_sample)
-              }}
-            />
-          )}
+          <div
+            className="question-content"
+            dangerouslySetInnerHTML={{
+              __html: sanitizeQuestion(currentQuestion.question_sample)
+            }}
+          />
           <div className="form-group">
             <label>Your Answer:</label>
             <Suspense

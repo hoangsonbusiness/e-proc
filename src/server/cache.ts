@@ -391,8 +391,7 @@ class FileCache {
         const { query } = await import('../server/db/postgres.js');
         
         const examResult = await query(`
-          SELECT eq.*, q.question_sample, q.question_plain, q.question_code_sample,
-                 q.question_console_output, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
+          SELECT eq.*, q.question_sample, q.question_plain, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
           FROM exam_questions eq
           JOIN question_bank q ON eq.question_id = q.id
           WHERE eq.id = ?
@@ -413,20 +412,10 @@ class FileCache {
         }
 
         const questionText = eq.question_plain || stripHtml(eq.question_sample);
-        // Practice-style questions ship starter code / expected console output
-        // alongside the task description — include both so the grader judges
-        // the answer against the actual given code, not just the prose task.
-        const codeSampleSection = eq.question_code_sample
-          ? `\nStarter code given to the student:\n${eq.question_code_sample}\n`
-          : '';
-        const consoleOutputSection = eq.question_console_output
-          ? `\nExpected console output:\n${eq.question_console_output}\n`
-          : '';
 
         const prompt = `You are an expert technical interviewer. Evaluate the following answer based on the rubric.
 
 Question: ${questionText}
-${codeSampleSection}${consoleOutputSection}
 Answer: ${eq.answer}
 
 Rubric Must-have (70%): ${eq.rubric_must_have}
