@@ -31,24 +31,70 @@ function makeSnippet(
 
 function getCobolKeywords(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
   const keywords = [
-    'IDENTIFICATION', 'DIVISION', 'PROGRAM-ID', 'AUTHOR', 'ENVIRONMENT',
-    'CONFIGURATION', 'SOURCE-COMPUTER', 'OBJECT-COMPUTER', 'INPUT-OUTPUT',
-    'FILE-CONTROL', 'DATA', 'FILE', 'WORKING-STORAGE', 'LINKAGE',
-    'PROCEDURE', 'SECTION', 'PARAGRAPH',
+    // ── Divisions / Sections / Headers ──────────────────────────────────
+    'IDENTIFICATION', 'DIVISION', 'PROGRAM-ID', 'AUTHOR', 'INSTALLATION',
+    'DATE-WRITTEN', 'DATE-COMPILED', 'SECURITY',
+    'ENVIRONMENT', 'CONFIGURATION', 'SOURCE-COMPUTER', 'OBJECT-COMPUTER',
+    'SPECIAL-NAMES', 'DECIMAL-POINT', 'CURRENCY', 'SIGN',
+    'INPUT-OUTPUT', 'FILE-CONTROL', 'I-O-CONTROL',
+    'DATA', 'FILE', 'WORKING-STORAGE', 'LOCAL-STORAGE', 'LINKAGE',
+    'REPORT', 'SCREEN', 'PROCEDURE', 'SECTION', 'PARAGRAPH',
+    'DECLARATIVES', 'END', 'PROGRAM', 'FUNCTION',
+
+    // ── SELECT / file-organization clauses ──────────────────────────────
+    'SELECT', 'ASSIGN', 'ORGANIZATION', 'SEQUENTIAL', 'LINE', 'RELATIVE',
+    'INDEXED', 'ACCESS', 'MODE', 'RANDOM', 'DYNAMIC', 'ALTERNATE',
+    'DUPLICATES', 'STATUS', 'RESERVE', 'AREA', 'AREAS', 'PADDING',
+    'OPTIONAL', 'COLLATING', 'SEQUENCE',
+
+    // ── FD/SD record & label clauses ────────────────────────────────────
+    'FD', 'SD', 'RD', 'CD', 'RECORD', 'RECORDS', 'LABEL', 'LABELS',
+    'STANDARD', 'OMITTED', 'BLOCK', 'RECORDING', 'LINAGE',
+    'LINAGE-COUNTER', 'FOOTING', 'LINES', 'TOP', 'BOTTOM', 'CODE-SET',
+
+    // ── Data description / PICTURE clause ───────────────────────────────
+    'PIC', 'PICTURE', 'VALUE', 'VALUES', 'USAGE', 'COMP', 'COMPUTATIONAL',
+    'COMP-1', 'COMP-2', 'COMP-3', 'COMP-4', 'COMP-5', 'PACKED-DECIMAL',
+    'BINARY', 'INDEX', 'POINTER', 'LEADING', 'TRAILING', 'SEPARATE',
+    'SYNCHRONIZED', 'SYNC', 'JUSTIFIED', 'JUST', 'BLANK', 'ZERO', 'ZEROS',
+    'ZEROES', 'SPACE', 'SPACES', 'HIGH-VALUE', 'HIGH-VALUES', 'LOW-VALUE',
+    'LOW-VALUES', 'QUOTE', 'QUOTES', 'ALL', 'FILLER', 'REDEFINES',
+    'RENAMES', 'OCCURS', 'DEPENDING', 'ASCENDING', 'DESCENDING',
+    'EXTERNAL', 'GLOBAL', 'CONSTANT',
+
+    // ── Verbs / statements ───────────────────────────────────────────────
     'MOVE', 'TO', 'FROM', 'INTO', 'GIVING', 'BY',
-    'PERFORM', 'UNTIL', 'VARYING', 'THRU', 'THROUGH', 'TIMES',
-    'IF', 'ELSE', 'END-IF', 'EVALUATE', 'WHEN', 'END-EVALUATE', 'OTHER',
-    'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'COMPUTE',
-    'DISPLAY', 'ACCEPT', 'STOP', 'RUN', 'GOBACK', 'EXIT',
-    'OPEN', 'CLOSE', 'READ', 'WRITE', 'REWRITE', 'DELETE',
-    'INPUT', 'OUTPUT', 'I-O', 'EXTEND',
-    'CALL', 'USING', 'RETURNING',
-    'PIC', 'PICTURE', 'VALUE', 'VALUES', 'REDEFINES', 'OCCURS',
-    'COPY', 'REPLACE',
-    'STRING', 'UNSTRING', 'INSPECT', 'TALLYING', 'REPLACING',
-    'INITIALIZE', 'SET', 'CONTINUE', 'NEXT', 'SENTENCE',
-    'AND', 'OR', 'NOT', 'EQUAL', 'GREATER', 'LESS', 'THAN',
-    'FD', 'SD', 'RECORD', 'CONTAINS', 'CHARACTERS',
+    'PERFORM', 'UNTIL', 'VARYING', 'THRU', 'THROUGH', 'TIMES', 'TEST',
+    'BEFORE', 'AFTER', 'WITH',
+    'IF', 'ELSE', 'EVALUATE', 'WHEN', 'OTHER', 'ALSO',
+    'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'COMPUTE', 'REMAINDER',
+    'ROUNDED', 'ON', 'SIZE', 'OVERFLOW', 'NOT',
+    'DISPLAY', 'ACCEPT', 'STOP', 'RUN', 'GOBACK', 'EXIT', 'ALTER', 'GO',
+    'OPEN', 'CLOSE', 'READ', 'WRITE', 'REWRITE', 'DELETE', 'START',
+    'RELEASE', 'RETURN', 'GENERATE', 'INITIATE', 'TERMINATE', 'SUPPRESS',
+    'INPUT', 'OUTPUT', 'I-O', 'EXTEND', 'REEL', 'UNIT', 'FOR', 'REMOVAL',
+    'NO', 'REWIND', 'LEAVE', 'LOCK', 'INVALID',
+    'CALL', 'CANCEL', 'USING', 'RETURNING', 'INVOKE',
+    'COPY', 'REPLACE', 'REPLACING',
+    'STRING', 'UNSTRING', 'DELIMITED', 'DELIMITER', 'COUNT', 'FIRST',
+    'INSPECT', 'TALLYING', 'CONVERTING',
+    'SORT', 'MERGE',
+    'INITIALIZE', 'SET', 'CONTINUE', 'NEXT', 'SENTENCE', 'SEARCH',
+
+    // ── Scope terminators ────────────────────────────────────────────────
+    'END-ADD', 'END-CALL', 'END-COMPUTE', 'END-DELETE', 'END-DIVIDE',
+    'END-EVALUATE', 'END-IF', 'END-MULTIPLY', 'END-PERFORM', 'END-READ',
+    'END-RETURN', 'END-REWRITE', 'END-SEARCH', 'END-START', 'END-STRING',
+    'END-SUBTRACT', 'END-UNSTRING', 'END-WRITE',
+
+    // ── Conditions / relational & class operators ───────────────────────
+    'AND', 'OR', 'EQUAL', 'EQUALS', 'GREATER', 'LESS', 'THAN', 'IS', 'ARE',
+    'GE', 'LE', 'LT', 'GT', 'EQ', 'NE', 'POSITIVE', 'NEGATIVE',
+    'ALPHABETIC', 'ALPHABETIC-LOWER', 'ALPHABETIC-UPPER', 'NUMERIC',
+    'CLASS', 'CONTAINS', 'CHARACTERS', 'CHARACTER', 'KEY',
+
+    // ── Special registers ────────────────────────────────────────────────
+    'WHEN-COMPILED', 'RETURN-CODE', 'TALLY',
   ];
 
   return keywords.map(kw => ({
