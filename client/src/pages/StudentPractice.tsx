@@ -17,6 +17,19 @@ interface PracticeInfo {
   content_html: string;
 }
 
+interface RunResult {
+  ok: boolean;
+  phase: 'setup' | 'compile' | 'run';
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+}
+
+// Các ngôn ngữ server hỗ trợ biên dịch/chạy (xem src/server/coderunner.ts)
+const RUNNABLE_LANGUAGES = ['c', 'cpp', 'python', 'cobol', 'java'];
+
 type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
 
 // Trang thi Practice: 1 đề dài import từ .docx (hiển thị bên trái) + 1 bài làm
@@ -35,6 +48,10 @@ function StudentPractice() {
   const [violationWarningModal, setViolationWarningModal] = useState('');
   const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
   const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
+  // Run code: học viên tự kiểm tra kết quả trước khi nộp
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState<RunResult | null>(null);
+  const [runError, setRunError] = useState('');
   const editorRef = useRef<CodeEditorHandle>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
@@ -391,6 +408,30 @@ function StudentPractice() {
     }, 2000);
   }, []);
 
+  // Chạy code hiện tại trên server để kiểm tra output
+  const handleRun = useCallback(async () => {
+    if (running || locked || submitting) return;
+
+    const language = editorRef.current?.getLanguage() ?? 'cpp';
+    if (!RUNNABLE_LANGUAGES.includes(language)) {
+      setRunError(`Ngôn ngữ "${language}" không hỗ trợ chạy thử. Hỗ trợ: C, C++, Python, COBOL, Java.`);
+      setRunResult(null);
+      return;
+    }
+
+    setRunning(true);
+    setRunError('');
+    setRunResult(null);
+    try {
+      const res = await studentApi.runCode(language, answer);
+      setRunResult(res.data);
+    } catch (err: any) {
+      setRunError(err.response?.data?.error || 'Run failed. Please try again.');
+    } finally {
+      setRunning(false);
+    }
+  }, [answer, locked, running, submitting]);
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -508,7 +549,18 @@ function StudentPractice() {
           {/* Bài làm — panel phải */}
           <div className="card practice-editor-panel">
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Your Answer:</label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <label style={{ marginBottom: 0 }}>Your Answer:</label>
+                <button
+                  type="button"
+                  onClick={handleRun}
+                  disabled={running || locked || submitting || !answer.trim()}
+                  className="btn btn-secondary"
+                  style={{ fontSize: 13, padding: '6px 16px' }}
+                >
+                  {running ? '⏳ Running...' : '▶ Run Code'}
+                </button>
+              </div>
               <Suspense
                 fallback={
                   <div className="code-editor-loading-fallback">
@@ -525,9 +577,43 @@ function StudentPractice() {
                   onPasteAttempt={handlePasteAttempt}
                   defaultLanguage={practiceLanguage}
                   disabled={locked || submitting}
-                  height="calc(100vh - 220px)"
+                  height={runResult || runError ? 'calc(100vh - 420px)' : 'calc(100vh - 250px)'}
                 />
               </Suspense>
+
+              {runError && (
+                <p className="error" style={{ marginTop: 10 }}>{runError}</p>
+              )}
+
+              {runResult && (
+                <div className="run-output-panel">
+                  <div className="run-output-header">
+                    <strong>
+                      {runResult.phase === 'compile'
+                        ? '❌ Compile Error'
+                        : runResult.timedOut
+                          ? '⏱ Time Limit Exceeded'
+                          : runResult.ok
+                            ? '✅ Output'
+                            : `⚠️ Exited with code ${runResult.exitCode}`}
+                    </strong>
+                    <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: 'var(--text-light)' }}>{runResult.durationMs}ms</span>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ fontSize: 11, padding: '2px 10px' }}
+                        onClick={() => setRunResult(null)}
+                      >
+                        Close
+                      </button>
+                    </span>
+                  </div>
+                  <pre className="run-output-body">
+                    {[runResult.stdout, runResult.stderr].filter(Boolean).join('\n') || '(no output)'}
+                  </pre>
+                </div>
+              )}
             </div>
           </div>
         </div>

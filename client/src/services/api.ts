@@ -201,6 +201,10 @@ export const studentApi = {
   reportViolation: (type: string) =>
     api.post('/student/violation', { type }),
 
+  // --- Run code (học viên tự kiểm tra tính đúng đắn) ---
+  runCode: (language: string, code: string, stdin?: string) =>
+    api.post('/student/run', { language, code, stdin }),
+
   // --- Practice exam (bài thi practice import từ .docx) ---
   getPractice: () =>
     api.get('/student/practice'),

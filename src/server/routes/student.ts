@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import type { StudentTokenPayload } from '../middleware/studentAuth.js';
+import { runCode } from '../coderunner.js';
 
 dotenv.config();
 
@@ -558,6 +559,28 @@ router.post('/practice/submit', studentAuthMiddleware, async (req: Request, res:
     res.json({ success: true, message: 'Practice exam submitted. Results will be available shortly.' });
   } catch (error: any) {
     console.error('Practice submit error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/student/run — Biên dịch & chạy code để học viên tự kiểm tra kết quả.
+// Giới hạn tài nguyên/concurrency nằm trong coderunner.ts (2 run đồng thời toàn
+// server, 1 run/học viên, timeout compile 10s + run 5s, env sạch không lộ secrets).
+router.post('/run', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const studentId = req.studentPayload!.studentId;
+    const { language, code, stdin } = req.body;
+
+    // Chỉ cho học viên đang trong giờ làm bài chạy code
+    const studentResult = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
+    const student = studentResult.rows[0];
+    if (!student || student.status !== 'in_progress') {
+      return res.status(403).json({ error: 'Code can only be run during an active exam session' });
+    }
+
+    const { status, body } = await runCode(studentId, String(language || ''), String(code || ''), stdin ? String(stdin) : undefined);
+    res.status(status).json(body);
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });

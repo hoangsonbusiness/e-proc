@@ -59,6 +59,8 @@ export function detectLanguage(
 
 export interface CodeEditorHandle {
   focus(): void;
+  /** Ngôn ngữ đang chọn trong dropdown — dùng cho nút Run code */
+  getLanguage(): SupportedLanguage;
 }
 
 // ─── Props ────────────────────────────────────────────────────────────────
@@ -1004,12 +1006,15 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
 
 
 
-    // Expose focus() to parent
+    // Expose focus() + getLanguage() to parent
     useImperativeHandle(ref, () => ({
       focus() {
         editorRef.current?.focus();
       },
-    }));
+      getLanguage() {
+        return language;
+      },
+    }), [language]);
 
     // ── Before mount: configure Monaco globally ─────────────────────────
     const handleBeforeMount: BeforeMount = useCallback((monaco) => {
