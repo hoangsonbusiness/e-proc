@@ -8,11 +8,14 @@ import crypto from 'crypto';
 // Code runner — biên dịch & chạy code học viên để tự kiểm tra tính đúng đắn.
 //
 // AN TOÀN TÀI NGUYÊN (server t3.micro chỉ có 1GB RAM, dùng chung với app thi):
-//   - Tối đa MAX_CONCURRENT lần chạy đồng thời trên toàn server (hàng đợi có giới hạn)
+//   - Hàng đợi FIFO TUẦN TỰ: chỉ 1 submit được compile/chạy tại một thời điểm;
+//     các submit khác xếp hàng chờ đến lượt (tối đa MAX_QUEUE), xử lý xong job
+//     nào trả kết quả + XOÁ SẠCH file sinh ra rồi mới lấy job kế tiếp
 //   - Mỗi học viên chỉ 1 lần chạy tại một thời điểm
 //   - Compile timeout 10s, run timeout 5s — kill cả process group
 //   - Linux: ulimit RAM 256MB / 64 process / file 10MB cho tiến trình học viên
 //   - Output cắt ở 64KB
+//   - Khởi động server: quét xoá các thư mục coderun-* còn sót từ lần crash trước
 //
 // AN TOÀN THÔNG TIN:
 //   - Tiến trình học viên chạy với ENV SẠCH (không có DATABASE_URL, JWT_SECRET...)
@@ -23,8 +26,12 @@ import crypto from 'crypto';
 //   Nếu nâng mức bảo mật: chuyển sang Docker/nsjail hoặc Judge0.
 // =============================================================================
 
-const MAX_CONCURRENT = 2;
-const MAX_QUEUE = 10;
+// Tuần tự tuyệt đối: 1 submit compile/chạy tại một thời điểm — job kế tiếp chỉ
+// bắt đầu sau khi job trước đã trả kết quả VÀ file sinh ra đã bị xoá
+const MAX_CONCURRENT = 1;
+// Đủ cho cả lớp 20 học viên bấm Run gần như cùng lúc (COBOL compile ~200ms/job;
+// trường hợp xấu nhất mỗi job 15s → học viên cuối chờ ~5 phút, thực tế hiếm khi)
+const MAX_QUEUE = 20;
 const COMPILE_TIMEOUT_MS = 10_000;
 const RUN_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
@@ -80,6 +87,21 @@ const LANGS: Record<string, LangConfig> = {
 };
 
 export const SUPPORTED_RUN_LANGUAGES = Object.keys(LANGS);
+
+// Quét xoá thư mục coderun-* còn sót lại (server crash/kill giữa chừng ở lần
+// chạy trước) ngay khi module được nạp — tránh rác tích tụ chiếm dung lượng
+(function sweepStaleRunDirs() {
+  try {
+    const tmp = os.tmpdir();
+    for (const name of fs.readdirSync(tmp)) {
+      if (name.startsWith('coderun-')) {
+        try {
+          fs.rmSync(path.join(tmp, name), { recursive: true, force: true });
+        } catch (_) { /* thư mục đang bị khoá — bỏ qua */ }
+      }
+    }
+  } catch (_) { /* không đọc được tmpdir — bỏ qua */ }
+})();
 
 // ─── Semaphore toàn server + khoá theo học viên ────────────────────────────
 
@@ -292,7 +314,11 @@ export async function runCode(
     };
   } finally {
     studentRunning.delete(studentId);
+    // Xoá ĐỒNG BỘ toàn bộ file sinh ra (source + binary) TRƯỚC khi nhả slot —
+    // đảm bảo disk đã được giải phóng rồi job kế tiếp trong queue mới chạy
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (_) { /* Windows đôi khi khoá file binary vừa chạy — sweep lần khởi động sau sẽ dọn */ }
     releaseSlot();
-    fs.rm(dir, { recursive: true, force: true }, () => { /* best-effort cleanup */ });
   }
 }
