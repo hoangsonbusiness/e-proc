@@ -75,11 +75,13 @@ function Results() {
 
   const handleExport = async () => {
     try {
-      const res = await adminApi.exportResults(parseInt(id!));
+      const res = isPractice
+        ? await adminApi.exportPracticeResults(parseInt(id!))
+        : await adminApi.exportResults(parseInt(id!));
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `results-${id}.xlsx`);
+      link.setAttribute('download', `${isPractice ? 'practice-' : ''}results-${id}.xlsx`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -127,11 +129,13 @@ function Results() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Student Results ({isPractice ? practiceResults.length : results.length})</h2>
-        {!isPractice && (
-          <button onClick={handleExport} disabled={results.length === 0} className="btn btn-primary">
-            Export Excel
-          </button>
-        )}
+        <button
+          onClick={handleExport}
+          disabled={isPractice ? practiceResults.length === 0 : results.length === 0}
+          className="btn btn-primary"
+        >
+          Export Excel
+        </button>
       </div>
 
       {loading ? (

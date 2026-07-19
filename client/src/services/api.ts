@@ -167,6 +167,9 @@ export const adminApi = {
   updatePracticeResult: (studentId: number, data: any) =>
     api.put(`/admin/practice-results/${studentId}`, data),
 
+  exportPracticeResults: (batchId: number) =>
+    api.get(`/admin/batches/${batchId}/practice-results/export`, { responseType: 'blob' }),
+
   // --- AI Settings endpoints ---
   getAISettings: () =>
     api.get('/admin/settings/ai'),

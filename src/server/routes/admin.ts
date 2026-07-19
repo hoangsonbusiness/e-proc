@@ -1271,6 +1271,49 @@ router.get('/batches/:id/practice-results', async (req: Request, res: Response) 
   }
 });
 
+// GET /api/admin/batches/:id/practice-results/export — Xuất Excel kết quả batch Practice
+router.get('/batches/:id/practice-results/export', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const batchId = parseInt(id);
+
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-practice-results`;
+
+    const result = await db.query(`
+      SELECT s.email, s.status,
+             ps.answer, ps.ai_score, ps.ai_feedback, ps.trainer_score, ps.trainer_feedback,
+             (SELECT SUM(v.count) FROM violations v WHERE v.student_id = s.id) as violations
+      FROM students s
+      LEFT JOIN practice_submissions ps ON ps.student_id = s.id
+      WHERE s.batch_id = ?
+      ORDER BY s.email
+    `, [batchId]);
+
+    const data = result.rows.map((r: any) => ({
+      Email: r.email,
+      Status: r.status,
+      'Violation Count': parseInt(r.violations) || 0,
+      Answer: r.answer || '',
+      'AI Score': r.ai_score ?? 0,
+      'AI Feedback': r.ai_feedback || '',
+      'Trainer Score': r.trainer_score ?? r.ai_score ?? 0,
+      'Trainer Feedback': r.trainer_feedback || '',
+    }));
+
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Practice Results');
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
+    res.send(XLSX.write(workbook, { type: 'buffer' }));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // PUT /api/admin/practice-results/:studentId — Trainer chấm/ghi đè điểm bài practice
 router.put('/practice-results/:studentId', async (req: Request, res: Response) => {
   try {
