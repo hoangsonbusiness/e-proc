@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
+import { canRunLocally, runLocally } from '../services/localRunner';
 
 // Lazy-load Monaco Editor to avoid bloating the initial bundle
 const CodeEditor = lazy(() => import('../components/CodeEditor'));
@@ -25,10 +26,13 @@ interface RunResult {
   exitCode: number | null;
   timedOut: boolean;
   durationMs: number;
+  ranLocally?: boolean;
 }
 
-// Các ngôn ngữ server hỗ trợ biên dịch/chạy (xem src/server/coderunner.ts)
-const RUNNABLE_LANGUAGES = ['c', 'cpp', 'python', 'cobol', 'java'];
+// Local-first: python/c/cpp chạy ngay trong trình duyệt học viên (localRunner.ts,
+// 0 request lên server); cobol/java không có runtime browser nên vẫn qua server
+// (POST /student/run — có thể tắt bằng env ENABLE_SERVER_CODE_RUN=false).
+const SERVER_RUN_LANGUAGES = ['cobol', 'java'];
 
 type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
 
@@ -408,23 +412,26 @@ function StudentPractice() {
     }, 2000);
   }, []);
 
-  // Chạy code hiện tại trên server để kiểm tra output
+  // Chạy code để kiểm tra output — ưu tiên chạy NGAY TRONG TRÌNH DUYỆT
+  // (python/c/cpp, không tốn tài nguyên server); cobol/java mới gọi server.
   const handleRun = useCallback(async () => {
     if (running || locked || submitting) return;
 
     const language = editorRef.current?.getLanguage() ?? 'cpp';
-    if (!RUNNABLE_LANGUAGES.includes(language)) {
-      setRunError(`Ngôn ngữ "${language}" không hỗ trợ chạy thử. Hỗ trợ: C, C++, Python, COBOL, Java.`);
-      setRunResult(null);
-      return;
-    }
 
     setRunning(true);
     setRunError('');
     setRunResult(null);
     try {
-      const res = await studentApi.runCode(language, answer);
-      setRunResult(res.data);
+      if (canRunLocally(language)) {
+        const result = await runLocally(language, answer);
+        setRunResult(result);
+      } else if (SERVER_RUN_LANGUAGES.includes(language)) {
+        const res = await studentApi.runCode(language, answer);
+        setRunResult(res.data);
+      } else {
+        setRunError(`Ngôn ngữ "${language}" không hỗ trợ chạy thử. Hỗ trợ: C, C++, Python (trên máy bạn), COBOL, Java (trên server).`);
+      }
     } catch (err: any) {
       setRunError(err.response?.data?.error || 'Run failed. Please try again.');
     } finally {
@@ -598,7 +605,9 @@ function StudentPractice() {
                             : `⚠️ Exited with code ${runResult.exitCode}`}
                     </strong>
                     <span style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                      <span style={{ fontSize: 12, color: 'var(--text-light)' }}>{runResult.durationMs}ms</span>
+                      <span style={{ fontSize: 12, color: 'var(--text-light)' }}>
+                        {runResult.durationMs}ms · {runResult.ranLocally ? 'chạy trên máy bạn' : 'chạy trên server'}
+                      </span>
                       <button
                         type="button"
                         className="btn btn-secondary"

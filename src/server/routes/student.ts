@@ -566,8 +566,15 @@ router.post('/practice/submit', studentAuthMiddleware, async (req: Request, res:
 // POST /api/student/run — Biên dịch & chạy code để học viên tự kiểm tra kết quả.
 // Giới hạn tài nguyên/concurrency nằm trong coderunner.ts (2 run đồng thời toàn
 // server, 1 run/học viên, timeout compile 10s + run 5s, env sạch không lộ secrets).
+// LƯU Ý: frontend chỉ gọi endpoint này cho cobol/java — python/c/cpp đã chạy
+// local trong trình duyệt học viên (client/src/services/localRunner.ts).
+// Đặt ENABLE_SERVER_CODE_RUN=false để tắt hẳn chạy code phía server.
 router.post('/run', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
+    if (process.env.ENABLE_SERVER_CODE_RUN === 'false') {
+      return res.status(503).json({ error: 'Server-side code execution is currently disabled by the administrator.' });
+    }
+
     const studentId = req.studentPayload!.studentId;
     const { language, code, stdin } = req.body;
 
