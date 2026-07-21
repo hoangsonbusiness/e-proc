@@ -317,6 +317,7 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
             'cut_attempt',
             'paste_attempt',
             'devtools_open',
+            'extension_panel',
             'screenshot_attempt', // phím PrintScreen / PrtSc
             'print_attempt', // Ctrl+P hoặc browser print dialog
         ];
