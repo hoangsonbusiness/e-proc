@@ -401,7 +401,7 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
     const { type } = req.body;
 
     // Validate violation type — chỉ chấp nhận các loại hợp lệ
-    const validTypes = ['clipboard', 'tab_switch', 'fullscreen_exit', 'devtools'];
+    const validTypes = ['tab_switch', 'fullscreen_exit', 'devtools_open', 'copy_attempt', 'cut_attempt', 'paste_attempt', 'extension_panel'];
     if (!type || !validTypes.includes(type)) {
       return res.status(400).json({ error: 'Invalid violation type' });
     }

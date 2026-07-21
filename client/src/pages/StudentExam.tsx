@@ -10,6 +10,9 @@ const CodeEditor = lazy(() => import('../components/CodeEditor'));
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
+const VIEWPORT_SHRINK_THRESHOLD_PX = 80;
+const VIEWPORT_CHECK_INTERVAL_MS = 1500;
+const VIEWPORT_SUSTAIN_POLLS = 2;
 
 interface Question {
   id: string;
@@ -46,6 +49,7 @@ function StudentExam() {
   const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
+  const viewportShrinkPollCountRef = useRef(0);
   const devtoolsViolationCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
@@ -187,7 +191,8 @@ function StudentExam() {
           copy_attempt: 'You attempted to copy text',
           cut_attempt: 'You attempted to cut text',
           paste_attempt: 'You attempted to paste text',
-          devtools_open: 'You attempted to open Developer Tools'
+          devtools_open: 'You attempted to open Developer Tools',
+          extension_panel: 'A browser extension panel was detected'
         };
         const warning = warningByType[type] || 'You violated the exam rules';
 
@@ -266,6 +271,37 @@ function StudentExam() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, [clearFullscreenExitTimeout, handleSubmit, handleViolation]);
+
+  // Phát hiện extension side-panel (vd: Monica AI) che một phần viewport
+  // mà không thoát Fullscreen API thực sự, nên fullscreenchange không bắn.
+  // Yêu cầu shrink kéo dài qua nhiều lần poll để tránh false positive
+  // trong lúc chuyển đổi fullscreen (giống lý do devtools window-size check cũ đã bị gỡ).
+  useEffect(() => {
+    if (!started || locked || submitting) {
+      viewportShrinkPollCountRef.current = 0;
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (!document.fullscreenElement) {
+        viewportShrinkPollCountRef.current = 0;
+        return;
+      }
+
+      const widthShrink = window.screen.width - window.innerWidth;
+      if (widthShrink > VIEWPORT_SHRINK_THRESHOLD_PX) {
+        viewportShrinkPollCountRef.current += 1;
+        if (viewportShrinkPollCountRef.current >= VIEWPORT_SUSTAIN_POLLS) {
+          viewportShrinkPollCountRef.current = 0;
+          void handleViolation('extension_panel');
+        }
+      } else {
+        viewportShrinkPollCountRef.current = 0;
+      }
+    }, VIEWPORT_CHECK_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [started, locked, submitting, handleViolation]);
 
   const triggerDevtoolsViolation = useCallback(() => {
     if (!startedRef.current || lockedRef.current || submittingRef.current) return;
