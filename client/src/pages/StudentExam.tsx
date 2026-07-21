@@ -50,6 +50,7 @@ function StudentExam() {
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
   const viewportShrinkPollCountRef = useRef(0);
+  const documentWidthBaselineRef = useRef<number | null>(null);
   const devtoolsViolationCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
@@ -228,6 +229,10 @@ function StudentExam() {
       if (document.fullscreenElement) {
         clearFullscreenExitTimeout();
         fullscreenAutoSubmitTriggeredRef.current = false;
+        // Ghi lại baseline width để so sánh sau này — Side Panel extension (Monica)
+        // co lại documentElement/body nhưng không đổi innerWidth/screen.width khi đang fullscreen.
+        documentWidthBaselineRef.current = document.documentElement.getBoundingClientRect().width;
+        viewportShrinkPollCountRef.current = 0;
         return;
       }
 
@@ -277,6 +282,9 @@ function StudentExam() {
 
   // Phát hiện extension side-panel (vd: Monica AI) che một phần viewport
   // mà không thoát Fullscreen API thực sự, nên fullscreenchange không bắn.
+  // Lưu ý: window.innerWidth/window.screen.width KHÔNG đổi khi Chrome Side Panel
+  // mở trong lúc đang fullscreen (đã đo thực nghiệm) — chỉ document.documentElement/
+  // body mới phản ánh đúng shrink thật, nên phải so với baseline ghi lúc vào fullscreen.
   // Yêu cầu shrink kéo dài qua nhiều lần poll để tránh false positive
   // trong lúc chuyển đổi fullscreen (giống lý do devtools window-size check cũ đã bị gỡ).
   useEffect(() => {
@@ -291,7 +299,17 @@ function StudentExam() {
         return;
       }
 
-      const widthShrink = window.screen.width - window.innerWidth;
+      const currentWidth = document.documentElement.getBoundingClientRect().width;
+
+      // Trường hợp effect mount sau khi fullscreen đã bật sẵn (vd: resume sau reload)
+      // thì fullscreenchange không bắn lại, nên baseline chưa được ghi — ghi ngay tại đây.
+      if (documentWidthBaselineRef.current === null) {
+        documentWidthBaselineRef.current = currentWidth;
+        viewportShrinkPollCountRef.current = 0;
+        return;
+      }
+
+      const widthShrink = documentWidthBaselineRef.current - currentWidth;
       if (widthShrink > VIEWPORT_SHRINK_THRESHOLD_PX) {
         viewportShrinkPollCountRef.current += 1;
         if (viewportShrinkPollCountRef.current >= VIEWPORT_SUSTAIN_POLLS) {
