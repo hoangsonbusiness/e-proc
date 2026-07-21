@@ -60,6 +60,7 @@ function StudentExam() {
   const studentId = localStorage.getItem('studentId');
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
   const studentToken = localStorage.getItem('studentToken');
+  const studentEmail = localStorage.getItem('studentEmail');
 
   useEffect(() => {
     if (!studentId || !studentToken) {
@@ -192,7 +193,9 @@ function StudentExam() {
           cut_attempt: 'You attempted to cut text',
           paste_attempt: 'You attempted to paste text',
           devtools_open: 'You attempted to open Developer Tools',
-          extension_panel: 'A browser extension panel was detected'
+          extension_panel: 'A browser extension panel was detected',
+          screenshot_attempt: 'You attempted to take a screenshot',
+          print_attempt: 'You attempted to print or capture the page',
         };
         const warning = warningByType[type] || 'You violated the exam rules';
 
@@ -322,6 +325,10 @@ function StudentExam() {
       const isCtrlShiftC = e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c');
       const isCtrlShiftK = e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k');
       const isCtrlU = e.ctrlKey && (e.key === 'u' || e.key === 'U');
+      // Phím chụp màn hình
+      const isPrintScreen = e.key === 'PrintScreen' || e.key === 'Snapshot';
+      // Ctrl+P (in trang) — một số extension dùng print API để capture
+      const isCtrlP = e.ctrlKey && (e.key === 'p' || e.key === 'P');
 
       // Intercept F11 to force HTML5 Fullscreen API
       if (e.key === 'F11') {
@@ -340,6 +347,18 @@ function StudentExam() {
         e.stopPropagation();
         triggerDevtoolsViolation();
       }
+
+      if (isPrintScreen) {
+        e.preventDefault();
+        e.stopPropagation();
+        void handleViolation('screenshot_attempt');
+      }
+
+      if (isCtrlP) {
+        e.preventDefault();
+        e.stopPropagation();
+        void handleViolation('print_attempt');
+      }
     };
 
     const handleContextMenu = (e: MouseEvent) => {
@@ -356,11 +375,21 @@ function StudentExam() {
       document.removeEventListener('keydown', handleKeyDown, true);
       document.removeEventListener('contextmenu', handleContextMenu);
     };
-  }, [triggerDevtoolsViolation]);
+  }, [triggerDevtoolsViolation, handleViolation]);
 
   // Đã gỡ bỏ tính năng phát hiện DevTools qua kích thước cửa sổ vì tính năng này 
   // không tương thích với quá trình chuyển đổi (transition) Fullscreen của trình duyệt,
   // gây ra các báo cáo vi phạm giả mạo (false positives).
+
+  // Chặn in trang (Ctrl+P qua menu browser) — kích hoạt beforeprint event
+  useEffect(() => {
+    const handleBeforePrint = () => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      void handleViolation('print_attempt');
+    };
+    window.addEventListener('beforeprint', handleBeforePrint);
+    return () => window.removeEventListener('beforeprint', handleBeforePrint);
+  }, [handleViolation]);
 
   useEffect(() => {
     if (locked || submitting) {
@@ -586,7 +615,7 @@ function StudentExam() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--background)' }}>
+    <div style={{ minHeight: '100vh', background: 'var(--background)', userSelect: 'none' }}>
       <div className="exam-timer" style={{ background: timeLeft < 300 ? 'var(--danger)' : 'var(--primary)' }}>
         {formatTime(timeLeft)}
       </div>
@@ -779,6 +808,39 @@ function StudentExam() {
               Continue Exam
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Forensic Watermark – hiển thị studentId + timestamp trong mọi ảnh chụp màn hình */}
+      {started && !locked && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            pointerEvents: 'none',
+            zIndex: 9997,
+            overflow: 'hidden',
+          }}
+        >
+          {Array.from({ length: 24 }).map((_, i) => (
+            <span
+              key={i}
+              style={{
+                position: 'absolute',
+                top: `${(i % 6) * 18}%`,
+                left: `${Math.floor(i / 6) * 26}%`,
+                transform: 'rotate(-25deg)',
+                opacity: 0.07,
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                color: '#000',
+                userSelect: 'none',
+              }}
+            >
+              Email:{studentEmail || studentId} {new Date().toLocaleTimeString('vi-VN')}
+            </span>
+          ))}
         </div>
       )}
     </div>

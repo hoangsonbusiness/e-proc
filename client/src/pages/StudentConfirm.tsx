@@ -28,6 +28,7 @@ function StudentConfirm() {
     localStorage.setItem('studentId', studentId.toString());
     localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
+    localStorage.setItem('studentEmail', email); // lưu email cho watermark forensic
     navigate('/exam');
   };
 

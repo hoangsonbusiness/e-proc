@@ -310,7 +310,16 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
         const studentId = req.studentPayload.studentId.toString();
         const { type } = req.body;
         // Validate violation type — chỉ chấp nhận các loại hợp lệ
-        const validTypes = ['tab_switch', 'fullscreen_exit', 'devtools_open', 'copy_attempt', 'cut_attempt', 'paste_attempt', 'extension_panel'];
+        const validTypes = [
+            'tab_switch',
+            'fullscreen_exit',
+            'copy_attempt',
+            'cut_attempt',
+            'paste_attempt',
+            'devtools_open',
+            'screenshot_attempt', // phím PrintScreen / PrtSc
+            'print_attempt', // Ctrl+P hoặc browser print dialog
+        ];
         if (!type || !validTypes.includes(type)) {
             return res.status(400).json({ error: 'Invalid violation type' });
         }
