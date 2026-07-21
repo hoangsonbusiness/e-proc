@@ -3,8 +3,14 @@
     "allow": [
       "Bash(grep:*)",
       "Bash(ls -la /home/ast/Workspace_OpenCode/*.md)",
-	  "Bash(npm run build:client)",
-      "Bash(npm run build:server)"
+      "Bash(npm run build:client)",
+      "Bash(npm run build:server)",
+      "Bash(python -m http.server 8971)",
+      "Bash(disown)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8971/fullscreen-viewport-test.html)",
+      "Bash(xargs ls -la)",
+      "Bash(git symbolic-ref *)",
+      "Bash(echo \"exit: $?\")"
     ]
   },
   "spinnerTipsEnabled": false
