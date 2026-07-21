@@ -10,7 +10,12 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8971/fullscreen-viewport-test.html)",
       "Bash(xargs ls -la)",
       "Bash(git symbolic-ref *)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(netstat -ano)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git push *)"
     ]
   },
   "spinnerTipsEnabled": false
