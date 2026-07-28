@@ -126,10 +126,44 @@ function Results() {
                       </span>
                     </td>
                     <td>
-                      {r.violations > 0 && (
-                        <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
-                          {r.violations}
-                        </span>
+                      {r.violations > 0 ? (
+                        <div>
+                          <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
+                            {r.violations} total
+                          </span>
+                          {/* [Anti-Cheat v2] Breakdown chi tiết theo type */}
+                          {r.violations_breakdown && Object.keys(r.violations_breakdown).length > 0 && (
+                            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.6 }}>
+                              {Object.entries(r.violations_breakdown as Record<string, number>)
+                                .sort(([,a], [,b]) => b - a)
+                                .map(([type, count]) => {
+                                  // Highlight đặc biệt các log-only types để admin chú ý
+                                  const isLogOnly = type === 'suspicious_paste' || type === 'focus_lost';
+                                  return (
+                                    <div key={type} style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 4,
+                                    }}>
+                                      <span style={{
+                                        display: 'inline-block',
+                                        background: isLogOnly ? '#fef3c7' : '#fee2e2',
+                                        color: isLogOnly ? '#92400e' : '#991b1b',
+                                        borderRadius: 3,
+                                        padding: '0 4px',
+                                        fontFamily: 'monospace',
+                                        whiteSpace: 'nowrap',
+                                      }}>
+                                        {isLogOnly ? '🔵' : '🟠'} {type}: <strong>{count}</strong>
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span style={{ color: 'var(--text-light)' }}>-</span>
                       )}
                     </td>
                     <td>{getAverageScore(r)}</td>

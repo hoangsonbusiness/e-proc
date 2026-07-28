@@ -52,11 +52,19 @@ function StudentExam() {
   const viewportShrinkPollCountRef = useRef(0);
   const documentWidthBaselineRef = useRef<number | null>(null);
   const devtoolsViolationCooldownRef = useRef<number>(0);
+  // [Anti-Cheat v2] focus heartbeat refs
+  const focusLostCountRef = useRef<number>(0);
+  const focusLostLastReportedRef = useRef<number>(0);
+  // [Anti-Cheat v2] suspicious paste cooldown ref
+  const suspiciousPasteCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
   const lastViolationTimeRef = useRef<number>(0);
   const navigate = useNavigate();
+
+  // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
+  const [watermarkTime, setWatermarkTime] = useState(() => new Date());
 
   const studentId = localStorage.getItem('studentId');
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
@@ -197,6 +205,9 @@ function StudentExam() {
           extension_panel: 'A browser extension panel was detected',
           screenshot_attempt: 'You attempted to take a screenshot',
           print_attempt: 'You attempted to print or capture the page',
+          // [Anti-Cheat v2] log-only types — hiển warning nhưng không lock
+          suspicious_paste: 'A large text insertion was detected (possible external paste)',
+          focus_lost: 'Browser window lost focus for an extended period',
         };
         const warning = warningByType[type] || 'You violated the exam rules';
 
@@ -323,6 +334,50 @@ function StudentExam() {
 
     return () => clearInterval(interval);
   }, [started, locked, submitting, handleViolation]);
+
+  // [Anti-Cheat v2] Focus heartbeat: phát hiện Split View / mở app khác không qua fullscreenchange
+  // Logic: nếu document.hasFocus() = false liên tục trong >= 15 giây (3 polls x 5s) thì report focus_lost.
+  // Threshold 15s bảo vệ khỏi: macOS Spotlight (~2s), Windows notification (~3s), fullscreen transition.
+  // Trên macOS: bắt được khi học viên mở Notes/TextEdit song song và giữ focus lâu.
+  const FOCUS_CHECK_INTERVAL_MS = 5000;
+  const FOCUS_LOST_THRESHOLD_POLLS = 3; // 3 polls x 5s = 15 giây
+  const FOCUS_LOST_REPORT_COOLDOWN_MS = 30000; // 30s giữa các lần report
+
+  useEffect(() => {
+    if (!started || locked || submitting) {
+      focusLostCountRef.current = 0;
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+
+      if (!document.hasFocus()) {
+        focusLostCountRef.current += 1;
+        if (focusLostCountRef.current >= FOCUS_LOST_THRESHOLD_POLLS) {
+          const now = Date.now();
+          if (now - focusLostLastReportedRef.current >= FOCUS_LOST_REPORT_COOLDOWN_MS) {
+            focusLostLastReportedRef.current = now;
+            focusLostCountRef.current = 0;
+            void handleViolation('focus_lost');
+          }
+        }
+      } else {
+        // Reset khi focus trở lại
+        focusLostCountRef.current = 0;
+      }
+    }, FOCUS_CHECK_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [started, locked, submitting, handleViolation]);
+
+  // [Anti-Cheat v2] Dynamic watermark interval
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setWatermarkTime(new Date());
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const triggerDevtoolsViolation = useCallback(() => {
     if (!startedRef.current || lockedRef.current || submittingRef.current) return;
@@ -541,6 +596,16 @@ function StudentExam() {
   const handleCutAttempt   = useCallback(() => handleClipboardAttempt('cut_attempt'),   [handleClipboardAttempt]);
   const handlePasteAttempt = useCallback(() => handleClipboardAttempt('paste_attempt'), [handleClipboardAttempt]);
 
+  // [Anti-Cheat v2] Suspicious paste handler: được gọi từ CodeEditor khi Monaco phát hiện
+  // có >= 1200 ký tự xuất hiện đột ngột trong 1 change event (vượt ngưỡng snippet lớn nhất).
+  const handleSuspiciousPaste = useCallback(() => {
+    if (!started || locked || submitting) return;
+    const now = Date.now();
+    if (now - suspiciousPasteCooldownRef.current < 10000) return; // 10s cooldown
+    suspiciousPasteCooldownRef.current = now;
+    void handleViolation('suspicious_paste');
+  }, [started, locked, submitting, handleViolation]);
+
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
 
@@ -690,6 +755,7 @@ function StudentExam() {
                 onCopyAttempt={handleCopyAttempt}
                 onCutAttempt={handleCutAttempt}
                 onPasteAttempt={handlePasteAttempt}
+                onSuspiciousPaste={handleSuspiciousPaste}
                 defaultLanguage={detectLanguage(
                   currentQuestion.type,
                   currentQuestion.module
@@ -856,7 +922,7 @@ function StudentExam() {
                 userSelect: 'none',
               }}
             >
-              Email:{studentEmail || studentId} {new Date().toLocaleTimeString('vi-VN')}
+              Email:{studentEmail || studentId} {watermarkTime.toLocaleTimeString('vi-VN')}
             </span>
           ))}
         </div>

@@ -119,7 +119,8 @@ When debugging student exam state, inspect:
   - backend buffers answers through `src/server/cache.ts`
   - buffered answers are flushed periodically or on submit
 - Violations are reported from the frontend through `studentApi.reportViolation(type)` and stored in the `violations` table
-  - Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `extension_panel`, `screenshot_attempt`, `print_attempt`
+- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `extension_panel`, `screenshot_attempt`, `print_attempt`; and two **log-only** types added 2026-07-28: `suspicious_paste`, `focus_lost` (see Anti-Cheat v2 section)
+- Locking occurs when `violation_count >= 2` for any single type or `total_violations >= 2` — **log-only types (`suspicious_paste`, `focus_lost`) are explicitly exempt from this lock logic** (backend sets `locked: false` regardless of their count)
 - Anti-cheat behavior is concentrated in `client/src/pages/StudentExam.tsx`:
   - clipboard attempts (`copy_attempt`, `cut_attempt`, `paste_attempt`) are intercepted inside the Monaco CodeEditor via `addCommand()` and reported as violations
   - fullscreen exit triggers a 5-second grace period timer; if the student stays out of fullscreen past the timer, `fullscreen_exit` is recorded and the exam is force-submitted
@@ -142,7 +143,45 @@ Current implementation in `StudentExam.tsx`:
 - No `resize`/`visualViewport.resize` event is relied on, since side-panel open/close doesn't reliably fire those in all browsers — polling is used instead.
 
 If this detection stops working again, verify in this order before touching the logic: (1) confirm the deployed bundle actually contains the fix (see Vercel deploy note below — this bit twice), (2) re-measure `documentElement`/`innerWidth`/`screen.width` live with a throwaway static HTML page served over `http://localhost` (not `file://` — extensions don't inject into `file://` pages) since browser/extension internals can change behavior across Chrome versions.
-- The student runtime relies on `localStorage` for `studentId` (display) and `duration`, and `studentToken` for authentication. When debugging exam state, inspect both localStorage and network `Authorization` headers.
+
+#### Anti-Cheat v2 (added 2026-07-28)
+
+Two new detection layers were added to handle vectors that bypass existing clipboard intercept:
+
+**1. `suspicious_paste` — Maccy (macOS) and `Win+V` (Windows clipboard history) detection**
+
+Maccy and Windows built-in clipboard history (`Win+V`) inject text via the OS Accessibility API, bypassing Monaco's `addCommand()` keyboard intercept entirely. The text appears in the editor as if typed, but Monaco still fires `onDidChangeModelContent` with a large `change.text.length`.
+
+Detection in `client/src/components/CodeEditor.tsx` (`handleEditorMount`):
+- Attaches `editor.onDidChangeModelContent` listener (only when prop `onSuspiciousPaste` is provided)
+- Skips `isFlush: true` events (fired when value prop is set externally, e.g. resume exam load)
+- **Threshold: 1200 characters per single change event**
+  - Measured all IntelliSense snippets; largest is `GlobalExceptionHandler` at 1093 chars → threshold leaves 107-char safety margin
+  - Snippets that fit safely below threshold: `psvm` (~30), `hashequals` (220), `SpringController` (366), `JpaEntity` (422), `MockMvcTest` (403), `HandlerInterceptor` (546), `WebMvcConfigurer` (869), `GlobalExceptionHandler` (1093)
+- 10-second cooldown to avoid duplicate reports from the same paste action
+- Calls `onSuspiciousPaste()` prop → `handleSuspiciousPaste()` in `StudentExam.tsx` → `handleViolation('suspicious_paste')`
+- Backend: **log-only** — recorded in `violations` table but `locked: false` always returned for this type
+
+**2. `focus_lost` — window focus heartbeat (macOS Split View / Notes alongside exam)**
+
+On macOS, when a student opens another app (Notes, TextEdit) alongside the browser (without entering Split View fullscreen), `document.hidden` stays `false` and `visibilitychange` does not fire. The exam appears uninterrupted from the system's perspective.
+
+Detection in `client/src/pages/StudentExam.tsx`:
+- `setInterval` runs every **5 seconds** while `started && !locked && !submitting`
+- Increments `focusLostCountRef` each tick where `document.hasFocus() === false`
+- Resets counter to 0 when focus returns
+- Reports `focus_lost` violation only when counter reaches **3 consecutive polls (= 15 seconds)**
+- 30-second cooldown between reports to avoid flooding while focus is still absent
+- Threshold rationale: macOS Spotlight dismisses in ~2s, Windows notifications ~3s, fullscreen transitions ~0.5s — all well below 15s threshold
+- Backend: **log-only** — same exempt logic as `suspicious_paste`
+
+**3. Dynamic watermark (same 2026-07-28 update)**
+
+Previously the forensic watermark timestamp was frozen at the time React rendered the watermark JSX (once on mount). It now uses a `watermarkTime` state that updates every 30 seconds, so screenshots taken later in the exam carry a more accurate timestamp for forensic tracing.
+
+**4. Admin Results page — violations breakdown (same 2026-07-28 update)**
+
+`GET /api/admin/batches/:id/results` now returns `violations_breakdown: { [type]: count }` alongside the existing `violations` (total). `client/src/pages/Results.tsx` displays each type as a colored badge: orange (🟠) for lockable types, yellow-blue (🔵) for log-only types (`suspicious_paste`, `focus_lost`), allowing admins to distinguish behavioral flags from technical violations at a glance.
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
 
@@ -224,6 +263,7 @@ Batches support two blueprint formats for question assignment:
 - `src/server/middleware/studentAuth.ts` (student JWT verification)
 - `src/server/routes/student.ts`
 - `src/server/cache.ts`
+- `client/src/hooks/useMonacoJavaCompletions.ts` (IntelliSense snippet sizes — relevant for suspicious_paste threshold calibration)
 - `public/index.html` (if testing static runtime)
 - `public/assets/*.js` (to confirm the runtime bundle really contains the expected change)
 
@@ -232,7 +272,9 @@ Batches support two blueprint formats for question assignment:
 - Clipboard attempts are counted as violations. Clipboard interception is handled inside the Monaco CodeEditor component (not via DOM events on the wrapper), because Monaco stops DOM event propagation internally.
 - Leaving fullscreen for more than 5 seconds records `fullscreen_exit`. A second fullscreen exit after the first violation triggers force-submit from the client.
 - Chrome side-panel extensions (e.g. Monica AI) opened during a fullscreen exam are detected as `extension_panel` via a `document.documentElement` width-shrink heuristic — see "Extension side-panel detection" above. Do not use `window.innerWidth`/`window.screen.width` for this; they don't change when a side panel is open.
-- Violation locking threshold: `violation_count >= 2` for any single type OR `total_violations >= 2`.
+- Violation locking threshold: `violation_count >= 2` for any single type OR `total_violations >= 2`. **Exception:** `suspicious_paste` and `focus_lost` are log-only — they never trigger the lock, regardless of count (enforced in `src/server/routes/student.ts` via `isLogOnly` check).
+- `suspicious_paste` is detected via Monaco `onDidChangeModelContent` with threshold ≥ 1200 chars per change event (see Anti-Cheat v2 section). **Do not lower this threshold** without re-measuring IntelliSense snippet sizes in `useMonacoJavaCompletions.ts` — the largest snippet (`GlobalExceptionHandler`) is 1093 chars.
+- `focus_lost` is detected via a 5-second polling heartbeat on `document.hasFocus()`, requiring 3 consecutive false-polls (15 seconds) before reporting. This catches macOS Notes/Split View usage without false-positives from Spotlight or Windows notification popups.
 - Server auto-submits the exam when the deadline passes (detected on `GET /exam/questions` → returns `410 Gone`, `reason: 'timeout'`).
 - Server auto-submits the exam when the student has been disconnected for more than 120 seconds (`reason: 'absent_too_long'`).
 - Runtime anti-cheat behavior depends heavily on `client/src/pages/StudentExam.tsx`; many server-side changes alone will not alter what candidates experience in the browser.

@@ -805,13 +805,23 @@ router.get('/batches/:id/results', async (req, res) => {
         WHERE eq.student_id = ?
         ORDER BY eq.question_order
       `, [student.id]);
+            // [Anti-Cheat v2] Trả về cả tổng lẫn breakdown theo type để admin review
             const violationsResult = await db.query(`
         SELECT SUM(count) as total FROM violations WHERE student_id = ?
       `, [student.id]);
+            const violationsBreakdownResult = await db.query(`
+        SELECT type, count FROM violations WHERE student_id = ? ORDER BY count DESC
+      `, [student.id]);
+            // Chuyển array [{type, count}, ...] thành object {tab_switch: 2, suspicious_paste: 1, ...}
+            const violationsBreakdown = {};
+            for (const row of violationsBreakdownResult.rows) {
+                violationsBreakdown[row.type] = parseInt(row.count) || 0;
+            }
             results.push({
                 student,
                 questions: questionsResult.rows,
-                violations: parseInt(violationsResult.rows[0]?.total) || 0
+                violations: parseInt(violationsResult.rows[0]?.total) || 0,
+                violations_breakdown: violationsBreakdown, // [Anti-Cheat v2]
             });
         }
         res.json(results);

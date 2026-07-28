@@ -54,6 +54,9 @@ interface CodeEditorProps {
   onCopyAttempt: () => void;
   onCutAttempt: () => void;
   onPasteAttempt: () => void;
+  // [Anti-Cheat v2] Optional: phát hiện paste lớn qua Maccy/Win+V Accessibility API.
+  // Threshold 1200 chars (snippet lớn nhất GlobalExceptionHandler = 1093) nên không false positive.
+  onSuspiciousPaste?: () => void;
   disabled?: boolean;
   defaultLanguage?: SupportedLanguage;
   height?: string;
@@ -69,6 +72,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       onCopyAttempt,
       onCutAttempt,
       onPasteAttempt,
+      onSuspiciousPaste,
       disabled = false,
       defaultLanguage = 'java',
       height = '400px',
@@ -1090,10 +1094,42 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           }
         });
 
+        // ── [Anti-Cheat v2] Suspicious paste detection ────────────────────
+        //
+        // Maccy (macOS) và Win+V (Windows clipboard history) inject text
+        // qua Accessibility API, bỏ qua keyboard intercept hoàn toàn.
+        // Monaco vẫn nhận event qua onDidChangeModelContent với text.length lớn.
+        //
+        // Threshold 1200 ký tự:
+        //   - Snippet lớn nhất (GlobalExceptionHandler) = 1093 ký tự → KHÔNG flag
+        //   - Paste code từ ChatGPT/Google thường > 1200 ký tự → BỊ PHÁT HIỆN
+        //
+        // isFlush: bỏ qua khi resume exam (setAnswers → value prop thay đổi)
+        if (onSuspiciousPaste) {
+          let suspiciousPasteLastFired = 0;
+
+          editor.onDidChangeModelContent((e) => {
+            // Bỏ qua flush: xảy ra khi value prop được set từ bên ngoài
+            if (e.isFlush) return;
+
+            const now = Date.now();
+            // Cooldown 10s: tránh report nhiều lần từ cùng 1 paste action
+            if (now - suspiciousPasteLastFired < 10000) return;
+
+            for (const change of e.changes) {
+              if (change.text.length >= 1200) {
+                suspiciousPasteLastFired = now;
+                onSuspiciousPaste();
+                break;
+              }
+            }
+          });
+        }
+
         // Auto-focus
         editor.focus();
       },
-      [onCopyAttempt, onCutAttempt, onPasteAttempt]
+      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste]
     );
 
     // ── Language change handler ────────────────────────────────────────────
