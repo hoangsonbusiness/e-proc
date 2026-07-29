@@ -31,16 +31,13 @@ function StudentConfirm() {
     }
 
     setLoading(true);
-    try {
-      await document.documentElement.requestFullscreen();
-    } catch (e) {
-      console.log('Fullscreen not supported or denied');
-    }
 
-    // Xin chọn thư mục lưu video + chia sẻ TOÀN màn hình. Không đạt → chặn vào thi.
+    // QUAN TRỌNG — thứ tự: chọn thư mục + chia sẻ màn hình TRƯỚC, fullscreen SAU.
+    // showDirectoryPicker/getDisplayMedia đòi "user activation" của cú click; nếu
+    // gọi requestFullscreen trước, gesture bị tiêu thụ → picker bị chặn (SecurityError)
+    // và dialog chọn thư mục không hiện ra.
     const setup = await examRecorder.requestSetup();
     if (!setup.ok) {
-      document.exitFullscreen().catch(() => {});
       const messages: Record<string, string> = {
         unsupported: 'Trình duyệt không hỗ trợ ghi màn hình. Vui lòng dùng Chrome hoặc Edge.',
         no_directory: 'Bạn cần chọn một thư mục để lưu video bài thi thì mới bắt đầu được.',
@@ -52,14 +49,20 @@ function StudentConfirm() {
       return;
     }
 
+    // Bắt đầu ghi ngay sau khi có stream.
+    examRecorder.start({ studentId: studentId.toString(), email });
+
     localStorage.setItem('studentId', studentId.toString());
     localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
     localStorage.setItem('studentEmail', email); // lưu email cho watermark forensic
 
-    // Bắt đầu ghi. Handler khi thí sinh tự dừng chia sẻ được StudentExam đăng ký
-    // qua setOnRecordingStopped() sau khi trang /exam mount.
-    examRecorder.start({ studentId: studentId.toString(), email });
+    // Fullscreen sau cùng (không còn cần user gesture cho picker nữa).
+    try {
+      await document.documentElement.requestFullscreen();
+    } catch (e) {
+      console.log('Fullscreen not supported or denied');
+    }
 
     navigate('/exam');
   };

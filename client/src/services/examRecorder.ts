@@ -92,10 +92,15 @@ export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> 
     return { ok: false, reason: 'unsupported' };
   }
 
-  // 1) Chọn thư mục lưu (một lần duy nhất)
+  // 1) Chọn thư mục lưu (một lần duy nhất).
+  // LƯU Ý: showDirectoryPicker() đòi "user activation" — phải được gọi trong cùng
+  // chuỗi user gesture của cú click. KHÔNG được await gì tiêu thụ gesture (vd
+  // requestFullscreen) trước nó, nếu không Chrome ném SecurityError và dialog không hiện.
   try {
     dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
-  } catch {
+  } catch (err: any) {
+    // AbortError = user tự bấm Cancel; còn lại (SecurityError…) = bị chặn do mất gesture
+    console.error('[examRecorder] showDirectoryPicker failed:', err?.name, err?.message);
     return { ok: false, reason: 'no_directory' };
   }
 
@@ -105,7 +110,8 @@ export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> 
       video: { frameRate: FPS, displaySurface: 'monitor' } as MediaTrackConstraints,
       audio: false,
     });
-  } catch {
+  } catch (err: any) {
+    console.error('[examRecorder] getDisplayMedia failed:', err?.name, err?.message);
     dirHandle = null;
     return { ok: false, reason: 'no_screen' };
   }
