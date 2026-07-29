@@ -42,3 +42,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     return res.status(401).json({ error: 'Unauthorized: Invalid token' });
   }
 }
+
+// Chặn các route chỉ dành cho role 'admin' (vd tạo user, bật S3). Đặt SAU authMiddleware.
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (req.adminUser?.role !== 'admin') {
+    return res.status(403).json({ error: 'Forbidden: Admin role required' });
+  }
+  next();
+}

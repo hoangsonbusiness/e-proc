@@ -27,7 +27,10 @@
       "Bash(cp /tmp/verify_fix.mjs ./verify_fix.mjs)",
       "Bash(node ./verify_fix.mjs)",
       "Bash(echo \"BE_EXIT:$?\")",
-      "Bash(echo \"FE_EXIT:$?\")"
+      "Bash(echo \"FE_EXIT:$?\")",
+      "Bash(npm install *)",
+      "Bash(echo \"BE:$?\")",
+      "Bash(echo \"FE:$?\")"
     ]
   },
   "spinnerTipsEnabled": false

@@ -73,6 +73,7 @@ function StudentExam() {
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
   const studentToken = localStorage.getItem('studentToken');
   const studentEmail = localStorage.getItem('studentEmail');
+  const recordEnabled = localStorage.getItem('recordEnabled') === '1';
 
   useEffect(() => {
     if (!studentId || !studentToken) {
@@ -410,18 +411,21 @@ function StudentExam() {
   // recording_stopped → backend khóa NGAY lần đầu → handleViolation auto-submit.
   // Nếu track đã ended trước khi effect này chạy, setOnRecordingStopped gọi lại ngay.
   useEffect(() => {
+    if (!recordEnabled) return; // batch không ghi màn hình → bỏ qua
     examRecorder.setOnRecordingStopped(() => {
       void handleViolation('recording_stopped');
     });
-  }, [handleViolation]);
+  }, [handleViolation, recordEnabled]);
 
   // Resume-after-reload guard: nếu vào /exam khi bài đang chạy nhưng recorder KHÔNG
   // còn active (thí sinh F5/reload làm mất singleton), yêu cầu bật lại ghi màn hình.
+  // Chỉ áp dụng khi batch bật record.
   useEffect(() => {
+    if (!recordEnabled) return;
     if (started && !locked && !submitting && !examRecorder.isActive()) {
       setRecordingLost(true);
     }
-  }, [started, locked, submitting]);
+  }, [started, locked, submitting, recordEnabled]);
 
   // [Anti-Cheat v2] Dynamic watermark interval
   useEffect(() => {
@@ -663,15 +667,15 @@ function StudentExam() {
     });
   }, [started, locked, submitting, handleViolation]);
 
-  // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chọn lại thư mục +
-  // chia sẻ toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
+  // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chia sẻ lại
+  // toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
   const handleResumeRecording = useCallback(async () => {
     const setup = await examRecorder.requestSetup();
     if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
-    examRecorder.start({ studentId: studentId || '', email: studentEmail || '' });
+    examRecorder.start();
     examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
     setRecordingLost(false);
-  }, [studentId, studentEmail, handleViolation]);
+  }, [handleViolation]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
@@ -896,8 +900,8 @@ function StudentExam() {
               🎥 Cần bật lại ghi màn hình
             </h3>
             <p style={{ fontSize: '16px', lineHeight: '1.5', color: '#333', marginBottom: 20 }}>
-              Việc ghi màn hình đã bị gián đoạn (có thể do tải lại trang). Bạn cần chọn lại
-              thư mục lưu và chia sẻ <b>toàn bộ màn hình</b> để tiếp tục làm bài.
+              Việc ghi màn hình đã bị gián đoạn (có thể do tải lại trang). Bạn cần chia sẻ
+              lại <b>toàn bộ màn hình</b> để tiếp tục làm bài.
             </p>
             <button onClick={handleResumeRecording} className="btn btn-primary" style={{ width: '100%' }}>
               Bật lại ghi màn hình

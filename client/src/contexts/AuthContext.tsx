@@ -3,6 +3,8 @@ import { adminApi } from '../services/api';
 
 interface AuthContextType {
   token: string | null;
+  role: string | null;
+  isAdmin: boolean;
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
@@ -13,6 +15,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
+  const [role, setRole] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Restore session từ localStorage khi app mount
@@ -24,10 +27,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Kiểm tra token có còn hạn không
       if (new Date(expiresAt) > new Date()) {
         setToken(stored);
+        setRole(localStorage.getItem('adminRole'));
       } else {
         // Token đã hết hạn — xóa đi
         localStorage.removeItem('adminToken');
         localStorage.removeItem('adminTokenExpiry');
+        localStorage.removeItem('adminRole');
       }
     }
     setIsLoading(false);
@@ -35,24 +40,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (username: string, password: string) => {
     const res = await adminApi.login(username, password);
-    const { token: newToken, expiresAt } = res.data;
+    const { token: newToken, expiresAt, role: newRole } = res.data;
 
     localStorage.setItem('adminToken', newToken);
     localStorage.setItem('adminTokenExpiry', expiresAt);
+    localStorage.setItem('adminRole', newRole || 'admin');
     setToken(newToken);
+    setRole(newRole || 'admin');
   };
 
   const logout = () => {
     adminApi.logout().catch(() => {}); // Fire and forget
     localStorage.removeItem('adminToken');
     localStorage.removeItem('adminTokenExpiry');
+    localStorage.removeItem('adminRole');
     setToken(null);
+    setRole(null);
   };
 
   return (
     <AuthContext.Provider
       value={{
         token,
+        role,
+        isAdmin: role === 'admin',
         isAuthenticated: !!token,
         isLoading,
         login,

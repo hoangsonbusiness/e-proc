@@ -91,9 +91,15 @@ async function initPostgres() {
       end_time TIMESTAMP NOT NULL,
       duration INTEGER NOT NULL,
       blueprint JSONB,
+      record_enabled BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+    // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
+    try {
+        await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
+    }
+    catch (_) { /* already exists */ }
     const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
     await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
     console.log('[DB] batches ready');
@@ -182,10 +188,16 @@ async function initPostgres() {
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
+      role TEXT DEFAULT 'admin',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+    // Migration: thêm cột role cho DB cũ (user cũ mặc định 'admin' để không mất quyền)
+    try {
+        await client.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'");
+    }
+    catch (_) { /* already exists */ }
     console.log('[DB] admin_users ready');
     client.release();
     console.log('[DB] All PostgreSQL tables initialized');
@@ -223,6 +235,7 @@ function initSqlite() {
         end_time DATETIME NOT NULL,
         duration INTEGER NOT NULL,
         blueprint TEXT,
+        record_enabled INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -307,10 +320,20 @@ function initSqlite() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'admin',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+        // Migration cho SQLite DB cũ: thêm cột nếu chưa có (SQLite không có IF NOT EXISTS cho ADD COLUMN)
+        const batchCols = sqliteDb.prepare("PRAGMA table_info(batches)").all().map(c => c.name);
+        if (!batchCols.includes('record_enabled')) {
+            sqliteDb.exec('ALTER TABLE batches ADD COLUMN record_enabled INTEGER DEFAULT 0');
+        }
+        const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all().map(c => c.name);
+        if (!adminCols.includes('role')) {
+            sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
+        }
         console.log('[DB] All SQLite tables initialized');
     }
     catch (err) {

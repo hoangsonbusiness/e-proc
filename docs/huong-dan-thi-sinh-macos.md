@@ -20,7 +20,7 @@ Bài thi **bắt buộc ghi lại màn hình** trong suốt quá trình làm bà
 
 - Trình duyệt: **Google Chrome** hoặc **Microsoft Edge** (phiên bản mới nhất). **Không** dùng Safari hay Firefox — hệ thống sẽ chặn.
 - macOS phiên bản 10.15 (Catalina) trở lên.
-- Chuẩn bị sẵn một **thư mục trống** để lưu video bài thi (ví dụ tạo thư mục tên `BaiThi` trên Desktop).
+- Kết nối mạng ổn định (video được tải tự động lên hệ thống trong lúc thi).
 
 ---
 
@@ -30,11 +30,7 @@ Bài thi **bắt buộc ghi lại màn hình** trong suốt quá trình làm bà
 
 Đăng nhập vào hệ thống bằng mã dự thi, xác nhận email, rồi bấm **Bắt đầu làm bài**.
 
-### Bước 2 — Chọn thư mục lưu video
-
-Trình duyệt sẽ hỏi chọn thư mục. Chọn thư mục trống bạn đã chuẩn bị (ví dụ `BaiThi` trên Desktop) rồi bấm **Chọn / Open**. Nếu có hỏi thêm quyền ghi vào thư mục, chọn **Cho phép / Save changes**.
-
-### Bước 3 — Chia sẻ TOÀN BỘ màn hình
+### Bước 2 — Chia sẻ TOÀN BỘ màn hình
 
 Trình duyệt hiện hộp thoại chia sẻ màn hình. **Bắt buộc chọn "Toàn bộ màn hình" (Entire Screen)** — chọn hình màn hình của bạn, **không** chọn một tab hay một cửa sổ.
 
@@ -42,7 +38,7 @@ Trình duyệt hiện hộp thoại chia sẻ màn hình. **Bắt buộc chọn 
 > *"Vui lòng chọn chia sẻ Toàn bộ màn hình (Entire Screen), không phải một tab hay cửa sổ."*
 > → Bấm bắt đầu lại và chọn đúng "Entire Screen".
 
-### Bước 4 — Cấp quyền Screen Recording trong System Settings (chỉ lần đầu)
+### Bước 3 — Cấp quyền Screen Recording trong System Settings (chỉ lần đầu)
 
 Ở lần đầu tiên, macOS sẽ hiện thông báo rằng trình duyệt **chưa được phép** ghi màn hình. Làm như sau:
 
@@ -51,7 +47,7 @@ Trình duyệt hiện hộp thoại chia sẻ màn hình. **Bắt buộc chọn 
 2. Tìm **Google Chrome** (hoặc **Microsoft Edge**) trong danh sách và **bật công tắc** bên cạnh.
 3. Nếu được hỏi mật khẩu máy để xác nhận, hãy nhập.
 
-### Bước 5 — Thoát và mở lại trình duyệt ⚠️ (bước hay bị bỏ sót)
+### Bước 4 — Thoát và mở lại trình duyệt ⚠️ (bước hay bị bỏ sót)
 
 Sau khi bật công tắc, macOS sẽ báo trình duyệt cần được khởi động lại. **Bắt buộc:**
 
@@ -59,9 +55,9 @@ Sau khi bật công tắc, macOS sẽ báo trình duyệt cần được khởi 
    **Hoặc** tự thoát hẳn: bấm `Cmd + Q` (không chỉ đóng cửa sổ — phải thoát hẳn ứng dụng), rồi mở lại trình duyệt.
 2. **Chỉ đóng cửa sổ (dấu X) là chưa đủ** — quyền sẽ vẫn chưa có hiệu lực.
 
-### Bước 6 — Làm lại từ Bước 1 để xác nhận
+### Bước 5 — Làm lại từ Bước 1 để xác nhận
 
-Mở lại trang thi thử, bấm **Bắt đầu làm bài**, chọn thư mục, chia sẻ **toàn bộ màn hình**. Lần này quyền đã có hiệu lực → bạn sẽ vào được bài thi và màn hình bắt đầu được ghi.
+Mở lại trang thi thử, bấm **Bắt đầu làm bài**, chia sẻ **toàn bộ màn hình**. Lần này quyền đã có hiệu lực → bạn sẽ vào được bài thi và màn hình bắt đầu được ghi.
 
 ---
 
@@ -73,9 +69,8 @@ Mở lại trang thi thử, bấm **Bắt đầu làm bài**, chọn thư mục,
 
 ## Video bài thi
 
-- Trong lúc thi, hệ thống tự lưu video thành nhiều file (mỗi ~10 phút một file) vào thư mục bạn đã chọn. Tên file dạng `exam_...partNN.webm`.
-- Sau khi nộp bài, **toàn bộ các file video** trong thư mục cần được **commit lên GitLab** theo hướng dẫn của giám thị để đối chiếu.
-- **Không xóa, không sửa** các file video này.
+- Trong lúc thi, hệ thống **tự động tải video lên máy chủ** theo từng đoạn (mỗi ~5 phút). Bạn **không cần** làm gì với file video — không cần chọn thư mục, không cần nộp file thủ công.
+- Hãy giữ **kết nối mạng ổn định** trong suốt bài thi để video được tải lên đầy đủ.
 
 ---
 
@@ -84,11 +79,11 @@ Mở lại trang thi thử, bấm **Bắt đầu làm bài**, chọn thư mục,
 | Hiện tượng | Cách xử lý |
 |---|---|
 | Báo "Trình duyệt không hỗ trợ ghi màn hình" | Bạn đang dùng Safari/Firefox → đổi sang **Chrome** hoặc **Edge**. |
-| Bật quyền rồi mà vẫn không ghi được | Chưa **thoát hẳn** trình duyệt. Bấm `Cmd + Q` thoát hoàn toàn rồi mở lại (Bước 5). |
+| Bật quyền rồi mà vẫn không ghi được | Chưa **thoát hẳn** trình duyệt. Bấm `Cmd + Q` thoát hoàn toàn rồi mở lại (Bước 4). |
 | Màn hình chia sẻ bị đen | Quyền chưa có hiệu lực → thoát và mở lại trình duyệt. |
 | Báo phải chọn "Toàn bộ màn hình" | Bạn đã chọn nhầm tab/cửa sổ → chọn lại **Entire Screen**. |
-| Không thấy Chrome/Edge trong danh sách Screen Recording | Gọi thử chia sẻ màn hình một lần (Bước 1–3) để macOS tự thêm trình duyệt vào danh sách, rồi quay lại bật công tắc. |
+| Không thấy Chrome/Edge trong danh sách Screen Recording | Gọi thử chia sẻ màn hình một lần (Bước 1–2) để macOS tự thêm trình duyệt vào danh sách, rồi quay lại bật công tắc. |
 
 ---
 
-> **Tóm tắt cho buổi thi thử:** Chrome/Edge → bắt đầu bài → chọn thư mục → chia sẻ **toàn bộ màn hình** → bật quyền **Screen Recording** trong System Settings → **thoát hẳn (`Cmd+Q`) và mở lại trình duyệt** → làm lại một lần để xác nhận. Xong bước này, buổi thi thật sẽ không gặp trục trặc nữa.
+> **Tóm tắt cho buổi thi thử:** Chrome/Edge → bắt đầu bài → chia sẻ **toàn bộ màn hình** → bật quyền **Screen Recording** trong System Settings → **thoát hẳn (`Cmd+Q`) và mở lại trình duyệt** → làm lại một lần để xác nhận. Xong bước này, buổi thi thật sẽ không gặp trục trặc nữa.

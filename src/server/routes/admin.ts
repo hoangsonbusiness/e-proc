@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
-import { authMiddleware } from '../middleware/auth.js';
+import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 
 dotenv.config();
 
@@ -117,15 +117,16 @@ router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
     }
 
     const expiresIn = '24h';
+    const role = user.role || 'admin';
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: 'admin' },
+      { id: user.id, username: user.username, role },
       secret,
       { expiresIn }
     );
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    console.log('[Auth] Login success:', username);
-    return res.json({ token, expiresAt });
+    console.log('[Auth] Login success:', username, 'role:', role);
+    return res.json({ token, expiresAt, role });
   } catch (err: any) {
     console.error('[Auth] Login error:', err);
     return res.status(500).json({ error: 'Login failed' });
@@ -141,6 +142,65 @@ router.post('/logout', (req: Request, res: Response) => {
 // PROTECTED ROUTES — Require JWT từ đây trở xuống
 // =============================================
 router.use(authMiddleware);
+
+// ── Quản lý user (chỉ admin) ─────────────────────────────────────────────
+
+// GET /api/admin/users — liệt kê user (chỉ admin)
+router.get('/users', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT id, username, role, created_at FROM admin_users ORDER BY id ASC'
+    );
+    return res.json(result.rows);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/users — tạo user với role 'admin' hoặc 'mod' (chỉ admin)
+router.post('/users', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { username, password, role } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    if (role !== 'admin' && role !== 'mod') {
+      return res.status(400).json({ error: 'Role must be "admin" or "mod"' });
+    }
+    if (String(password).length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+
+    const existing = await db.query('SELECT id FROM admin_users WHERE username = ?', [username.trim()]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await db.query(
+      'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
+      [username.trim(), passwordHash, role]
+    );
+    console.log('[Auth] User created:', username, 'role:', role);
+    return res.status(201).json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:id — xóa user (chỉ admin; không cho tự xóa chính mình)
+router.delete('/users/:id', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const targetId = parseInt(req.params.id);
+    if (req.adminUser?.id === targetId) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    await db.query('DELETE FROM admin_users WHERE id = ?', [targetId]);
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // PUT /api/admin/change-password — Đổi password (require JWT)
 router.put('/change-password', async (req: Request, res: Response) => {
@@ -521,7 +581,7 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
 
 router.post('/batches', async (req: Request, res: Response) => {
   try {
-    const { name, start_time, end_time, duration, blueprint } = req.body;
+    const { name, start_time, end_time, duration, blueprint, record_enabled } = req.body;
     console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint });
 
     if (!name || !start_time || !end_time || !duration) {
@@ -542,17 +602,20 @@ router.post('/batches', async (req: Request, res: Response) => {
     const endUTC = toStorageTime(end_time);
     console.log('[CreateBatch] Times (UTC stored):', { start_time: startUTC, end_time: endUTC });
     
+    // Cờ record S3 chỉ được bật bởi role 'admin'. Mod tạo batch → luôn false.
+    const recordFlag = (req.adminUser?.role === 'admin' && !!record_enabled) ? 1 : 0;
+
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint)
-        VALUES (?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint)
-        VALUES ($1, $2, $3, $4, $5)
-      `, [name, startUTC, endUTC, duration, blueprintJson]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -604,15 +667,31 @@ router.get('/batches/:id', async (req: Request, res: Response) => {
 router.put('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, start_time, end_time, duration, blueprint } = req.body;
+    const { name, start_time, end_time, duration, blueprint, record_enabled } = req.body;
 
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
 
-    await db.query(`
-      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?
-      WHERE id = ?
-    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), parseInt(id)]);
+    // Cờ record: admin dùng giá trị client gửi; mod KHÔNG đổi được → giữ nguyên cờ cũ.
+    let recordFlag: number;
+    if (req.adminUser?.role === 'admin') {
+      recordFlag = record_enabled ? 1 : 0;
+    } else {
+      const cur = await db.query('SELECT record_enabled FROM batches WHERE id = ?', [parseInt(id)]);
+      recordFlag = cur.rows[0]?.record_enabled ? 1 : 0;
+    }
+
+    if (USE_SQLITE) {
+      await db.query(`
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?
+        WHERE id = ?
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, parseInt(id)]);
+    } else {
+      await db.query(`
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?
+        WHERE id = ?
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, parseInt(id)]);
+    }
 
     res.json({ success: true });
   } catch (error: any) {

@@ -85,10 +85,13 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 
 ### Security model
 
-#### Admin authentication
-- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`)
-- Stored in `localStorage.adminToken`; sent as `Authorization: Bearer <token>` header
+#### Admin authentication & roles
+- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`) + `role`; login response and the JWT payload both carry `role` (read from `admin_users.role`, no longer hard-coded)
+- Stored in `localStorage.adminToken` (+ `localStorage.adminRole`); sent as `Authorization: Bearer <token>` header
 - All `/api/admin/*` routes after `/login` and `/setup` require `authMiddleware`
+- **Roles (added 2026-07-29):** `admin_users.role` ∈ `{'admin', 'mod'}` (default `'admin'`; pre-existing users migrate to `'admin'`). `requireAdmin` middleware (`src/server/middleware/auth.ts`) gates admin-only routes with 403.
+  - **User management** (`GET/POST/DELETE /api/admin/users`) is `requireAdmin`-only. Frontend page `/admin/users` (`UserManagement.tsx`); the nav link and page are hidden/redirected for mods via `useAuth().isAdmin` — but the **backend `requireAdmin` is the real gate**, the frontend hiding is only UX.
+  - **S3 recording toggle per batch** (`batches.record_enabled`, default false): only `role === 'admin'` may set it. Enforced server-side in `POST/PUT /api/admin/batches` — on create a mod's flag is forced false; on update a mod's request **keeps the existing DB value unchanged** (mod can neither enable nor disable). The batch form checkbox is `disabled` for mods (UX only).
 - Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) also require admin JWT
 
 #### Student authentication
@@ -194,18 +197,29 @@ The `violations` table is keyed by `(student_id, type)` and only stores a runnin
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
 
-#### Screen recording (added 2026-07-29)
+#### Screen recording → AWS S3 (added 2026-07-29, moved to S3 upload)
 
-The exam records the candidate's full screen locally and the candidate commits the video to GitLab afterward for post-hoc review. Recording is **mandatory** — the exam cannot start without it.
+The exam records the candidate's full screen and uploads it **directly to AWS S3** during the exam (via presigned PUT URLs). The video never resides on the candidate's machine — this closes the exam-leak hole of the earlier "save-local + candidate-commits-to-GitLab" model (the candidate controlled the evidence and could copy the questions out).
 
-Module: `client/src/services/examRecorder.ts` (singleton **outside React** — it must survive the `/confirm` → `/exam` navigation, so it cannot live in component state):
-- **Local save via File System Access API** (`showDirectoryPicker`) — the candidate picks a folder once at start; each `.webm` part is written straight into it with **no per-file download prompt** (an `<a download>` approach would trigger Chrome's "allow multiple downloads" bar, which could steal focus and false-trigger `focus_lost`/auto-submit). Requires **Chrome/Edge + HTTPS**; unsupported browsers (Safari/Firefox) are blocked at the confirm screen.
-- **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; if `track.getSettings().displaySurface !== 'monitor'` (candidate shared a tab/window) the exam is refused.
-- **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~45 MB per 10-minute part → ~9 files for a 90-minute exam, each under GitLab's 100 MB limit (no LFS needed). Parts are split by a **10-minute `setInterval`**, named `exam_{studentId}_{email}_{stamp}_partNN.webm`.
-- **Lifecycle:** `requestSetup()` (folder + monitor share) is called in `StudentConfirm.tsx#handleStartExam` after `requestFullscreen()` and **before** `navigate('/exam')` — failure blocks entry. `start()` begins recording. `stopAndSave()` is called at the top of `handleSubmit` in `StudentExam.tsx`, covering all three submit paths (manual / cheating auto-submit / timeout); it flushes the final part before submitting and is wrapped in try/catch so a file-write error never blocks submission.
-- **`recording_stopped` violation:** `track.onended` (candidate clicks Chrome's "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). `StudentExam` registers the handler via `examRecorder.setOnRecordingStopped()` after mount (the singleton was started earlier in `StudentConfirm`); if the track already ended before registration, the callback fires immediately.
-- **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while the exam is running but `examRecorder.isActive()` is false, a blocking modal forces them to re-share the screen before continuing.
-- **macOS caveat:** the first `getDisplayMedia` requires granting Screen Recording permission to Chrome in System Settings **and restarting Chrome** — candidates on macOS must do this **before** exam day, not during.
+**Recording is per-batch (added 2026-07-29):** only applies when the batch has `record_enabled = true` (admin-only toggle — see Admin roles). `/verify` returns `record_enabled`; it flows login → `/confirm` (router state) → `localStorage.recordEnabled` → `/exam`. When false, `StudentConfirm` skips screen-share entirely (candidate enters the exam directly) and `StudentExam` skips the `recording_stopped` handler and the resume-after-reload guard. The `POST /exam/recording-url` endpoint also **rechecks `batches.record_enabled` server-side** and returns 403 if off, so the flag cannot be bypassed client-side. When the batch does have it enabled, recording is mandatory to start.
+
+Architecture (presigned URL — sidesteps Vercel serverless payload/timeout limits, since the video goes client→S3, not through the backend):
+```
+Client records → every 5 min cuts a part → asks backend for a presigned PUT URL
+  → PUTs the blob straight to S3 → retry-queue on failure (does not block the exam)
+S3 key: recordings/{batchId}/{studentId}/part{NNN}.webm  (batchId/studentId from JWT, not client)
+Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script)
+```
+
+- **Backend:** `POST /api/student/exam/recording-url` (`studentAuthMiddleware`) returns a presigned PUT URL from `src/server/services/s3.ts` (`createRecordingUploadUrl`). AWS credentials live only in backend env; the URL expires in 15 min. The S3 key is built from `batchId`/`studentId` in the JWT so a candidate cannot overwrite another's video. Returns `503` if S3 env is not configured (`isS3Configured()`).
+- **Frontend module** `client/src/services/examRecorder.ts` (singleton **outside React** — survives the `/confirm` → `/exam` navigation):
+  - **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; a shared tab/window (`displaySurface !== 'monitor'`) is refused. Requires **Chrome/Edge + HTTPS**; Safari/Firefox blocked at confirm.
+  - **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~22 MB per **5-minute part**. Each part: ask for a presigned URL, then `fetch(url, { method: 'PUT', body: blob })` straight to S3. Failed uploads go to a **retry queue** (exponential backoff, max 5 attempts) that runs in the background and never blocks the exam.
+- **Lifecycle:** `requestSetup()` (monitor share only — **no folder picker** anymore) is called in `StudentConfirm.tsx#handleStartExam` **in the click gesture, BEFORE `requestFullscreen()`** (fullscreen consumes the user-activation that `getDisplayMedia` needs — order matters). `start()` begins recording. `stopAndSave()` at the top of `handleSubmit` in `StudentExam.tsx` covers all three submit paths (manual / cheating auto-submit / timeout); wrapped in try/catch so an upload error never blocks submission.
+- **`recording_stopped` violation:** `track.onended` (candidate clicks "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). Registered via `examRecorder.setOnRecordingStopped()` after `/exam` mounts; if the track already ended before registration, the callback fires immediately.
+- **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while running but `examRecorder.isActive()` is false, a blocking modal forces them to re-share the screen.
+- **Env required (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM user should be scoped to `PutObject` on `recordings/*` only.
+- **macOS caveat:** the first `getDisplayMedia` requires granting Screen Recording permission to Chrome in System Settings **and restarting Chrome**. Because exams are time-gated, candidates should do this during a **practice exam** beforehand, not on exam day.
 
 ### Static runtime path
 - There are **three** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
@@ -243,6 +257,10 @@ Batches support two blueprint formats for question assignment:
 | `QUEUE_PROCESS_INTERVAL` | No | `10000` | Milliseconds between AI queue processing ticks |
 | `DB_POOL_MAX` | No | `10` | PostgreSQL connection pool max size |
 | `DB_POOL_MIN` | No | `2` | PostgreSQL connection pool min size |
+| `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
+| `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
+| `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
+| `S3_RECORDINGS_BUCKET` | Rec | — | S3 bucket that stores exam screen recordings. |
 
 ## Important project-specific notes
 

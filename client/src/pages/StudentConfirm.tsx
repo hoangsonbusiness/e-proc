@@ -13,6 +13,7 @@ function StudentConfirm() {
   const studentToken = location.state?.studentToken; // [C-4]
   const email = location.state?.email;
   const duration = location.state?.duration;
+  const recordEnabled = !!location.state?.recordEnabled; // batch có bật ghi màn hình S3
 
   useEffect(() => {
     // Redirect to login if no state or missing token
@@ -23,35 +24,34 @@ function StudentConfirm() {
 
   const handleStartExam = async () => {
     setError('');
-
-    // Bài thi bắt buộc ghi màn hình → cần trình duyệt hỗ trợ (Chrome/Edge, HTTPS).
-    if (!examRecorder.isSupported()) {
-      setError('Trình duyệt của bạn không hỗ trợ ghi màn hình. Vui lòng dùng Google Chrome hoặc Microsoft Edge phiên bản mới để làm bài.');
-      return;
-    }
-
     setLoading(true);
 
-    // QUAN TRỌNG — thứ tự: chọn thư mục + chia sẻ màn hình TRƯỚC, fullscreen SAU.
-    // showDirectoryPicker/getDisplayMedia đòi "user activation" của cú click; nếu
-    // gọi requestFullscreen trước, gesture bị tiêu thụ → picker bị chặn (SecurityError)
-    // và dialog chọn thư mục không hiện ra.
-    const setup = await examRecorder.requestSetup();
-    if (!setup.ok) {
-      const messages: Record<string, string> = {
-        unsupported: 'Trình duyệt không hỗ trợ ghi màn hình. Vui lòng dùng Chrome hoặc Edge.',
-        no_directory: 'Bạn cần chọn một thư mục để lưu video bài thi thì mới bắt đầu được.',
-        no_screen: 'Bạn cần cho phép chia sẻ màn hình để bắt đầu bài thi.',
-        not_fullscreen: 'Vui lòng chọn chia sẻ "Toàn bộ màn hình" (Entire Screen), không phải một tab hay cửa sổ.',
-      };
-      setError(messages[setup.reason || ''] || 'Không thể bắt đầu ghi màn hình. Vui lòng thử lại.');
-      setLoading(false);
-      return;
+    // Chỉ yêu cầu ghi màn hình khi batch được bật record. Batch không bật → thi thẳng.
+    if (recordEnabled) {
+      if (!examRecorder.isSupported()) {
+        setError('Trình duyệt của bạn không hỗ trợ ghi màn hình. Vui lòng dùng Google Chrome hoặc Microsoft Edge phiên bản mới để làm bài.');
+        setLoading(false);
+        return;
+      }
+
+      // QUAN TRỌNG — thứ tự: chia sẻ màn hình TRƯỚC, fullscreen SAU.
+      // getDisplayMedia đòi "user activation" của cú click; nếu gọi requestFullscreen
+      // trước, gesture bị tiêu thụ → getDisplayMedia bị chặn (SecurityError).
+      const setup = await examRecorder.requestSetup();
+      if (!setup.ok) {
+        const messages: Record<string, string> = {
+          unsupported: 'Trình duyệt không hỗ trợ ghi màn hình. Vui lòng dùng Chrome hoặc Edge.',
+          no_screen: 'Bạn cần cho phép chia sẻ màn hình để bắt đầu bài thi.',
+          not_fullscreen: 'Vui lòng chọn chia sẻ "Toàn bộ màn hình" (Entire Screen), không phải một tab hay cửa sổ.',
+        };
+        setError(messages[setup.reason || ''] || 'Không thể bắt đầu ghi màn hình. Vui lòng thử lại.');
+        setLoading(false);
+        return;
+      }
+      examRecorder.start();
     }
 
-    // Bắt đầu ghi ngay sau khi có stream.
-    examRecorder.start({ studentId: studentId.toString(), email });
-
+    localStorage.setItem('recordEnabled', recordEnabled ? '1' : '0'); // để /exam biết có gate recorder không
     localStorage.setItem('studentId', studentId.toString());
     localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
@@ -96,12 +96,14 @@ function StudentConfirm() {
           Vui lòng xác nhận email của bạn trước khi bắt đầu làm bài thi.
         </p>
 
-        <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
-          ⚠️ Bài thi <b>bắt buộc ghi màn hình</b>. Khi bấm bắt đầu, bạn sẽ được yêu cầu:
-          <br />1. Chọn một <b>thư mục</b> để lưu video bài thi.
-          <br />2. Chia sẻ <b>Toàn bộ màn hình</b> (Entire Screen).
-          <br />Vui lòng dùng <b>Google Chrome</b> hoặc <b>Microsoft Edge</b>. Nếu tự dừng chia sẻ giữa chừng, bài thi sẽ bị khóa.
-        </div>
+        {recordEnabled && (
+          <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
+            ⚠️ Bài thi này <b>bắt buộc ghi màn hình</b>. Khi bấm bắt đầu, bạn sẽ được yêu cầu
+            chia sẻ <b>Toàn bộ màn hình</b> (Entire Screen). Video được lưu tự động lên hệ thống
+            trong lúc thi.
+            <br />Vui lòng dùng <b>Google Chrome</b> hoặc <b>Microsoft Edge</b>. Nếu tự dừng chia sẻ giữa chừng, bài thi sẽ bị khóa.
+          </div>
+        )}
 
         {error && (
           <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#991b1b' }}>

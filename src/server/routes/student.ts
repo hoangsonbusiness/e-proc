@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import type { StudentTokenPayload } from '../middleware/studentAuth.js';
+import { createRecordingUploadUrl, isS3Configured } from '../services/s3.js';
 
 dotenv.config();
 
@@ -25,7 +26,7 @@ router.post('/verify', async (req: Request, res: Response) => {
     }
 
     const result = await db.query(`
-      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration
+      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration, b.record_enabled
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.access_code = ?
@@ -80,6 +81,7 @@ router.post('/verify', async (req: Request, res: Response) => {
       dev_mode: isDevMode,
       exam_start: startTime.toISOString(),
       exam_end: endTime.toISOString(),
+      record_enabled: !!student.record_enabled, // batch có bật ghi màn hình S3 không
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -463,6 +465,44 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
       locked,
     });
   } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Cấp presigned PUT URL để client upload 1 phần video record thẳng lên S3.
+// batchId/studentId lấy từ JWT — client KHÔNG thể chỉ định để ghi đè video người khác.
+router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (!isS3Configured()) {
+      return res.status(503).json({ error: 'S3 not configured' });
+    }
+
+    const studentId = req.studentPayload!.studentId;
+    const batchId = req.studentPayload!.batchId;
+
+    // Chỉ cấp URL nếu batch được bật record (chốt chặn server-side, tránh mod/ai lách).
+    const batchRes = await db.query('SELECT record_enabled FROM batches WHERE id = ?', [batchId]);
+    if (!batchRes.rows[0]?.record_enabled) {
+      return res.status(403).json({ error: 'Recording not enabled for this batch' });
+    }
+
+    const { partIndex, contentType } = req.body;
+
+    const idx = Number(partIndex);
+    if (!Number.isInteger(idx) || idx < 0) {
+      return res.status(400).json({ error: 'Invalid partIndex' });
+    }
+
+    const { url, key } = await createRecordingUploadUrl({
+      batchId,
+      studentId,
+      partIndex: idx,
+      contentType: typeof contentType === 'string' ? contentType : undefined,
+    });
+
+    res.json({ url, key });
+  } catch (error: any) {
+    console.error('[recording-url] failed:', error?.message);
     res.status(500).json({ error: error.message });
   }
 });

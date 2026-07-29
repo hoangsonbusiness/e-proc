@@ -60,6 +60,12 @@ export const adminApi = {
   setup: (username: string, password: string) =>
     api.post('/admin/setup', { username, password }),
 
+  // Quản lý user (chỉ admin)
+  getUsers: () => api.get('/admin/users'),
+  createUser: (username: string, password: string, role: 'admin' | 'mod') =>
+    api.post('/admin/users', { username, password, role }),
+  deleteUser: (id: number) => api.delete(`/admin/users/${id}`),
+
   changePassword: (currentPassword: string, newPassword: string) =>
     api.put('/admin/change-password', { currentPassword, newPassword }),
 
@@ -171,6 +177,10 @@ export const studentApi = {
       text_length: meta?.textLength,
       question_id: meta?.questionId,
     }),
+
+  // Xin presigned PUT URL để upload 1 phần video record thẳng lên S3
+  getRecordingUploadUrl: (partIndex: number, contentType: string) =>
+    api.post('/student/exam/recording-url', { partIndex, contentType }),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

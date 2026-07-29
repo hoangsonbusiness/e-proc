@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -67,6 +68,7 @@ interface ModuleTypeStats {
 }
 
 function BatchManagement() {
+  const { isAdmin } = useAuth();
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
@@ -81,7 +83,8 @@ function BatchManagement() {
     end_time: '',
     duration: 30,
     blueprint: [] as BlueprintItem[],
-    blueprintByType: [] as BlueprintItemByType[]
+    blueprintByType: [] as BlueprintItemByType[],
+    record_enabled: false,
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
@@ -366,7 +369,8 @@ function BatchManagement() {
         start_time: localToUTC(editingBatch.start_time),
         end_time: localToUTC(editingBatch.end_time),
         duration: editingBatch.duration,
-        blueprint: blueprintPayload
+        blueprint: blueprintPayload,
+        record_enabled: editingBatch.record_enabled,
       });
       loadBatches();
       setEditingBatch(null);
@@ -415,11 +419,12 @@ function BatchManagement() {
         end_time: localToUTC(formData.end_time),
         duration: formData.duration,
         blueprint: blueprintPayload,
+        record_enabled: formData.record_enabled,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [] });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_enabled: false });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -736,6 +741,23 @@ function BatchManagement() {
                   required
                 />
               </div>
+            </div>
+
+            {/* Ghi màn hình lên S3 — chỉ admin bật được; mod thấy nhưng bị khóa */}
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
+                <input
+                  type="checkbox"
+                  checked={formData.record_enabled}
+                  disabled={!isAdmin}
+                  onChange={e => setFormData(prev => ({ ...prev, record_enabled: e.target.checked }))}
+                  style={{ width: 'auto' }}
+                />
+                <span>Ghi màn hình thí sinh và lưu lên S3</span>
+              </label>
+              {!isAdmin && (
+                <small style={{ color: 'var(--text-light)' }}>Chỉ tài khoản admin mới bật được tính năng này.</small>
+              )}
             </div>
 
             <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/20)</h4>
@@ -1100,6 +1122,23 @@ function BatchManagement() {
               min={1}
               required
             />
+          </div>
+
+          {/* Ghi màn hình lên S3 — chỉ admin đổi được; mod bị khóa (backend giữ nguyên cờ cũ) */}
+          <div className="form-group">
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
+              <input
+                type="checkbox"
+                checked={!!editingBatch.record_enabled}
+                disabled={!isAdmin}
+                onChange={e => setEditingBatch({ ...editingBatch, record_enabled: e.target.checked })}
+                style={{ width: 'auto' }}
+              />
+              <span>Ghi màn hình thí sinh và lưu lên S3</span>
+            </label>
+            {!isAdmin && (
+              <small style={{ color: 'var(--text-light)' }}>Chỉ tài khoản admin mới đổi được cài đặt này.</small>
+            )}
           </div>
 
           <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>

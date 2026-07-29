@@ -9,6 +9,7 @@ import BatchManagement from './pages/BatchManagement';
 import StudentManagement from './pages/StudentManagement';
 import Results from './pages/Results';
 import AISettings from './pages/AISettings';
+import UserManagement from './pages/UserManagement';
 import StudentLogin from './pages/StudentLogin';
 import StudentExam from './pages/StudentExam';
 import StudentConfirm from './pages/StudentConfirm';
@@ -35,6 +36,7 @@ function App() {
         <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/results" element={<PrivateRoute><Results /></PrivateRoute>} />
         <Route path="/admin/settings" element={<PrivateRoute><AISettings /></PrivateRoute>} />
+        <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
       </Routes>
     </AuthProvider>
   );
