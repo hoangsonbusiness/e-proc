@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import AdminNav from '../components/AdminNav';
 
 function StudentManagement() {
   const { id } = useParams<{ id: string }>();
@@ -82,12 +83,7 @@ function StudentManagement() {
         <Link to="/admin/batches" className="btn btn-secondary">Back to Batches</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-      </div>
+      <AdminNav />
 
       <div className="card">
         <h3>Import Students</h3>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import AdminNav from '../components/AdminNav';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
@@ -174,12 +175,7 @@ function QuestionBank() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-      </div>
+      <AdminNav />
 
       {/* ── Import card ── */}
       <div className="card">

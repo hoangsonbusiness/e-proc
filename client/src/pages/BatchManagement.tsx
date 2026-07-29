@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -684,12 +685,7 @@ function BatchManagement() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-      </div>
+      <AdminNav />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Batches</h2>
@@ -753,10 +749,10 @@ function BatchManagement() {
                   onChange={e => setFormData(prev => ({ ...prev, record_enabled: e.target.checked }))}
                   style={{ width: 'auto' }}
                 />
-                <span>Ghi màn hình thí sinh và lưu lên S3</span>
+                <span>Record student screen and save to S3</span>
               </label>
               {!isAdmin && (
-                <small style={{ color: 'var(--text-light)' }}>Chỉ tài khoản admin mới bật được tính năng này.</small>
+                <small style={{ color: 'var(--text-light)' }}>Only admin accounts can enable this feature.</small>
               )}
             </div>
 
@@ -1134,10 +1130,10 @@ function BatchManagement() {
                 onChange={e => setEditingBatch({ ...editingBatch, record_enabled: e.target.checked })}
                 style={{ width: 'auto' }}
               />
-              <span>Ghi màn hình thí sinh và lưu lên S3</span>
+              <span>Record student screen and save to S3</span>
             </label>
             {!isAdmin && (
-              <small style={{ color: 'var(--text-light)' }}>Chỉ tài khoản admin mới đổi được cài đặt này.</small>
+              <small style={{ color: 'var(--text-light)' }}>Only admin accounts can change this setting.</small>
             )}
           </div>
 

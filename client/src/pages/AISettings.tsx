@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import AdminNav from '../components/AdminNav';
 
 interface AISettings {
   provider: string;
@@ -91,12 +92,7 @@ function AISettings() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-      </div>
+      <AdminNav />
 
       <div className="card" style={{ maxWidth: 800 }}>
         <h3>AI Configuration</h3>

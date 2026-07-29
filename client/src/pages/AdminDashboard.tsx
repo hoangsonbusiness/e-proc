@@ -2,11 +2,12 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
-  const { logout, isAdmin } = useAuth();
+  const { logout } = useAuth();
 
   // Đổi mật khẩu (admin & mod đều dùng được — backend dùng id từ token)
   const [showChangePw, setShowChangePw] = useState(false);
@@ -121,13 +122,7 @@ function AdminDashboard() {
         </div>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-        {isAdmin && <Link to="/admin/users">Users</Link>}
-      </div>
+      <AdminNav />
 
       <div className="card">
         <h3>Recent Batches</h3>
