@@ -161,8 +161,16 @@ export const studentApi = {
   submit: () =>
     api.post('/student/exam/submit', {}),
 
-  reportViolation: (type: string) =>
-    api.post('/student/violation', { type }),
+  reportViolation: (
+    type: string,
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+  ) =>
+    api.post('/student/violation', {
+      type,
+      content_preview: meta?.contentPreview,
+      text_length: meta?.textLength,
+      question_id: meta?.questionId,
+    }),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

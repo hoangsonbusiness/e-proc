@@ -397,10 +397,14 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
   try {
     // [C-4] studentId từ token đã xác thực
     const studentId = req.studentPayload!.studentId.toString();
+    const batchId = req.studentPayload!.batchId;
 
-    const { type } = req.body;
+    const { type, content_preview, text_length, question_id } = req.body;
 
-    // Validate violation type — chỉ chấp nhận các loại hợp lệ
+    // Validate violation type — chỉ chấp nhận các loại hợp lệ.
+    // suspicious_paste & focus_lost giờ là lockable (không còn log-only) —
+    // suspicious_paste dùng threshold 300 ký tự + focus_lost đo qua blur/focus
+    // với đệm 3s nên đủ tin cậy để tính vào ngưỡng khóa như mọi type khác.
     const validTypes = [
       'tab_switch',
       'fullscreen_exit',
@@ -411,9 +415,8 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
       'extension_panel',
       'screenshot_attempt',  // phím PrintScreen / PrtSc
       'print_attempt',       // Ctrl+P hoặc browser print dialog
-      // [Anti-Cheat v2] Log-only types: ghi lại nhưng KHÔNG tự lock bài
       'suspicious_paste',    // Thâm nhập text lớn bất thường qua Maccy/Win+V Accessibility API
-      'focus_lost',          // Mất focus cửa sổ liên tục (Split View / app khác được mở)
+      'focus_lost',          // Mất focus cửa sổ (Split View / mở app khác trên macOS)
     ];
     if (!type || !validTypes.includes(type)) {
       return res.status(400).json({ error: 'Invalid violation type' });
@@ -427,25 +430,27 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
       await db.query('UPDATE violations SET count = count + 1 WHERE id = ?', [existingResult.rows[0].id]);
     }
 
+    // Anti-Cheat forensic log: ghi từng lần vi phạm (append-only) để admin review.
+    // content_preview chỉ lưu tối đa 500 ký tự đầu, chỉ có với suspicious_paste.
+    const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
+    const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
+    const qId = typeof question_id === 'string' ? question_id : null;
+    await db.query(
+      'INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id) VALUES (?, ?, ?, ?, ?, ?)',
+      [parseInt(studentId), batchId, type, textLen, preview, qId]
+    );
+
     const totalResult = await db.query('SELECT SUM(count) as total FROM violations WHERE student_id = ?', [parseInt(studentId)]);
     const total = parseInt(totalResult.rows[0]?.total) || 0;
 
     const currentResult = await db.query('SELECT count FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
     const currentCount = parseInt(currentResult.rows[0]?.count) || 0;
 
-    // [Anti-Cheat v2] Log-only types: ghi violation nhưng KHÔNG dẫn đến auto-lock.
-    // suspicious_paste: false positive từ IntelliSense đã được loại trừ bằng threshold 1200 ky tu,
-    //                   nhưng admin vẫn cần review thủ công để phán quyết gọi ý là gian lận.
-    // focus_lost:       một số system dialog (Windows/macOS) có thể steal focus tạm thời,
-    //                   cần ngưỡng 15 giây nên đã giảm false positive nhưng chưa loại hoàn toàn.
-    const LOG_ONLY_TYPES = ['suspicious_paste', 'focus_lost'];
-    const isLogOnly = LOG_ONLY_TYPES.includes(type);
-
-    // Nhưng người dùng bị lock chỉ khi type là lockable và đạt ngưỡng
+    // Khóa bài khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
     res.json({
       violation_count: currentCount,
       total_violations: total,
-      locked: !isLogOnly && (currentCount >= 2 || total >= 2),
+      locked: currentCount >= 2 || total >= 2,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

@@ -15,7 +15,8 @@
       "Bash(npx tsc *)",
       "Bash(npm run *)",
       "Bash(git add *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   },
   "spinnerTipsEnabled": false

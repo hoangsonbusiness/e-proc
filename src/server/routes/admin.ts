@@ -941,11 +941,18 @@ router.get('/batches/:id/results', async (req: Request, res: Response) => {
         violationsBreakdown[row.type] = parseInt(row.count) || 0;
       }
 
+      // Forensic log: từng lần vi phạm kèm preview (500 ký tự) để admin xem qua popup
+      const violationEventsResult = await db.query(`
+        SELECT type, text_length, content_preview, question_id, created_at
+        FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
+      `, [student.id]);
+
       results.push({
         student,
         questions: questionsResult.rows,
         violations: parseInt(violationsResult.rows[0]?.total) || 0,
-        violations_breakdown: violationsBreakdown, // [Anti-Cheat v2]
+        violations_breakdown: violationsBreakdown,
+        violation_events: violationEventsResult.rows,
       });
     }
 

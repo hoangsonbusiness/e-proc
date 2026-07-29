@@ -11,6 +11,8 @@ function Results() {
   const [editFeedback, setEditFeedback] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Forensic popup: xem chi tiết các lần vi phạm (kèm nội dung paste) của 1 học viên
+  const [violationDetail, setViolationDetail] = useState<{ email: string; events: any[] } | null>(null);
 
   useEffect(() => {
     loadBatch();
@@ -131,35 +133,40 @@ function Results() {
                           <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
                             {r.violations} total
                           </span>
-                          {/* [Anti-Cheat v2] Breakdown chi tiết theo type */}
+                          {/* Breakdown chi tiết theo type — mọi type đều lockable (badge cam) */}
                           {r.violations_breakdown && Object.keys(r.violations_breakdown).length > 0 && (
                             <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.6 }}>
                               {Object.entries(r.violations_breakdown as Record<string, number>)
                                 .sort(([,a], [,b]) => b - a)
-                                .map(([type, count]) => {
-                                  // Highlight đặc biệt các log-only types để admin chú ý
-                                  const isLogOnly = type === 'suspicious_paste' || type === 'focus_lost';
-                                  return (
-                                    <div key={type} style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: 4,
+                                .map(([type, count]) => (
+                                  <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <span style={{
+                                      display: 'inline-block',
+                                      background: '#fee2e2',
+                                      color: '#991b1b',
+                                      borderRadius: 3,
+                                      padding: '0 4px',
+                                      fontFamily: 'monospace',
+                                      whiteSpace: 'nowrap',
                                     }}>
-                                      <span style={{
-                                        display: 'inline-block',
-                                        background: isLogOnly ? '#fef3c7' : '#fee2e2',
-                                        color: isLogOnly ? '#92400e' : '#991b1b',
-                                        borderRadius: 3,
-                                        padding: '0 4px',
-                                        fontFamily: 'monospace',
-                                        whiteSpace: 'nowrap',
-                                      }}>
-                                        {isLogOnly ? '🔵' : '🟠'} {type}: <strong>{count}</strong>
-                                      </span>
-                                    </div>
-                                  );
-                                })}
+                                      🟠 {type}: <strong>{count}</strong>
+                                    </span>
+                                  </div>
+                                ))}
                             </div>
+                          )}
+                          {/* Forensic: xem nội dung paste / thời điểm từng lần vi phạm */}
+                          {r.violation_events && r.violation_events.length > 0 && (
+                            <button
+                              onClick={() => setViolationDetail({ email: r.student.email, events: r.violation_events })}
+                              style={{
+                                marginTop: 6, fontSize: 11, cursor: 'pointer',
+                                background: 'transparent', border: '1px solid var(--danger)',
+                                color: 'var(--danger)', borderRadius: 4, padding: '2px 8px',
+                              }}
+                            >
+                              🔍 Xem chi tiết ({r.violation_events.length})
+                            </button>
                           )}
                         </div>
                       ) : (
@@ -275,6 +282,53 @@ function Results() {
             </div>
           )}
         </>
+      )}
+
+      {/* Forensic popup: chi tiết từng lần vi phạm kèm nội dung paste (500 ký tự) */}
+      {violationDetail && (
+        <div
+          onClick={() => setViolationDetail(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--card, #fff)', borderRadius: 8, padding: 24,
+              maxWidth: 720, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>Chi tiết vi phạm — {violationDetail.email}</h3>
+              <button onClick={() => setViolationDetail(null)} className="btn" style={{ fontSize: 14 }}>✕</button>
+            </div>
+            {violationDetail.events.length === 0 ? (
+              <p style={{ color: 'var(--text-light)' }}>Không có bản ghi chi tiết.</p>
+            ) : (
+              violationDetail.events.map((ev: any, i: number) => (
+                <div key={i} style={{ marginBottom: 12, padding: 12, background: 'var(--background, #f8f8f8)', borderRadius: 6 }}>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 13, marginBottom: ev.content_preview ? 8 : 0 }}>
+                    <span><strong>🟠 {ev.type}</strong></span>
+                    <span style={{ color: 'var(--text-light)' }}>{new Date(ev.created_at).toLocaleString()}</span>
+                    {ev.text_length != null && <span>{ev.text_length} ký tự</span>}
+                    {ev.question_id && <span>Q: {ev.question_id}</span>}
+                  </div>
+                  {ev.content_preview && (
+                    <pre style={{
+                      margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      fontSize: 12, fontFamily: 'monospace', background: '#1e1e1e',
+                      color: '#d4d4d4', padding: 10, borderRadius: 4, maxHeight: 200, overflow: 'auto',
+                    }}>
+                      {ev.content_preview}
+                    </pre>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

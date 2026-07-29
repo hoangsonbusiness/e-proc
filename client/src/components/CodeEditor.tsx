@@ -54,9 +54,9 @@ interface CodeEditorProps {
   onCopyAttempt: () => void;
   onCutAttempt: () => void;
   onPasteAttempt: () => void;
-  // [Anti-Cheat v2] Optional: phát hiện paste lớn qua Maccy/Win+V Accessibility API.
-  // Threshold 1200 chars (snippet lớn nhất GlobalExceptionHandler = 1093) nên không false positive.
-  onSuspiciousPaste?: () => void;
+  // Optional: phát hiện paste lớn qua Maccy/Win+V Accessibility API.
+  // Truyền preview (500 ký tự đầu) + độ dài thật để backend ghi forensic log.
+  onSuspiciousPaste?: (preview: string, textLength: number) => void;
   disabled?: boolean;
   defaultLanguage?: SupportedLanguage;
   height?: string;
@@ -1094,15 +1094,20 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           }
         });
 
-        // ── [Anti-Cheat v2] Suspicious paste detection ────────────────────
+        // ── [Anti-Cheat] Suspicious paste detection ───────────────────────
         //
         // Maccy (macOS) và Win+V (Windows clipboard history) inject text
         // qua Accessibility API, bỏ qua keyboard intercept hoàn toàn.
         // Monaco vẫn nhận event qua onDidChangeModelContent với text.length lớn.
         //
-        // Threshold 1200 ký tự:
-        //   - Snippet lớn nhất (GlobalExceptionHandler) = 1093 ký tự → KHÔNG flag
-        //   - Paste code từ ChatGPT/Google thường > 1200 ký tự → BỊ PHÁT HIỆN
+        // Threshold 300 ký tự: bắt được cả câu trả lời copy từ Notes (300–800 ký tự)
+        // vốn lọt lưới với ngưỡng 1200 cũ.
+        //
+        // ⚠️ CẢNH BÁO false positive: các snippet IntelliSense lớn trong
+        // useMonacoJavaCompletions.ts (SpringController=366 … GlobalExceptionHandler=1093)
+        // sẽ bị flag oan NẾU được gõ ra. Hiện các snippet này KHÔNG được sử dụng nên
+        // an toàn. Nếu sau này bật lại chúng, phải kèm điều kiện loại snippet
+        // (vd: check suggest widget đang mở) trước khi giữ ngưỡng 300.
         //
         // isFlush: bỏ qua khi resume exam (setAnswers → value prop thay đổi)
         if (onSuspiciousPaste) {
@@ -1117,9 +1122,9 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
             if (now - suspiciousPasteLastFired < 10000) return;
 
             for (const change of e.changes) {
-              if (change.text.length >= 1200) {
+              if (change.text.length >= 300) {
                 suspiciousPasteLastFired = now;
-                onSuspiciousPaste();
+                onSuspiciousPaste(change.text.slice(0, 500), change.text.length);
                 break;
               }
             }

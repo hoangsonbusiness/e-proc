@@ -53,14 +53,14 @@ function StudentExam() {
   const documentWidthBaselineRef = useRef<number | null>(null);
   const devtoolsViolationCooldownRef = useRef<number>(0);
   // [Anti-Cheat v2] focus heartbeat refs
-  const focusLostCountRef = useRef<number>(0);
-  const focusLostLastReportedRef = useRef<number>(0);
+  const focusLostTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // [Anti-Cheat v2] suspicious paste cooldown ref
   const suspiciousPasteCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
   const lastViolationTimeRef = useRef<number>(0);
+  const currentQuestionIdRef = useRef<string | undefined>(undefined);
   const navigate = useNavigate();
 
   // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
@@ -140,6 +140,10 @@ function StudentExam() {
     submittingRef.current = submitting;
   }, [submitting]);
 
+  useEffect(() => {
+    currentQuestionIdRef.current = questions[currentIndex]?.id;
+  }, [questions, currentIndex]);
+
   // Gửi beacon khi học viên tắt trình duyệt / đóng tab
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -175,7 +179,10 @@ function StudentExam() {
     }
   }, [navigate]);
 
-  const handleViolation = useCallback(async (type: string): Promise<boolean> => {
+  const handleViolation = useCallback(async (
+    type: string,
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+  ): Promise<boolean> => {
     const now = Date.now();
     // Global cooldown: ignore multiple violations within 3 seconds
     // This prevents copy+paste or alt+tab from counting as 2 violations instantly
@@ -185,7 +192,7 @@ function StudentExam() {
     lastViolationTimeRef.current = now;
 
     try {
-      const res = await studentApi.reportViolation(type); // [C-4] token tự động
+      const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
       setViolationCount(res.data.total_violations);
       if (res.data.locked) {
         setLocked(true);
@@ -335,40 +342,56 @@ function StudentExam() {
     return () => clearInterval(interval);
   }, [started, locked, submitting, handleViolation]);
 
-  // [Anti-Cheat v2] Focus heartbeat: phát hiện Split View / mở app khác không qua fullscreenchange
-  // Logic: nếu document.hasFocus() = false liên tục trong >= 15 giây (3 polls x 5s) thì report focus_lost.
-  // Threshold 15s bảo vệ khỏi: macOS Spotlight (~2s), Windows notification (~3s), fullscreen transition.
-  // Trên macOS: bắt được khi học viên mở Notes/TextEdit song song và giữ focus lâu.
-  const FOCUS_CHECK_INTERVAL_MS = 5000;
-  const FOCUS_LOST_THRESHOLD_POLLS = 3; // 3 polls x 5s = 15 giây
-  const FOCUS_LOST_REPORT_COOLDOWN_MS = 30000; // 30s giữa các lần report
+  // [Anti-Cheat] Focus detection: bắt việc mất focus cửa sổ (mở Notes/Maccy/app khác trên macOS
+  // song song mà không thoát fullscreen — visibilitychange & fullscreenchange đều không bắn).
+  //
+  // Dùng event blur/focus (không poll) để đo chính xác thời lượng mất focus, tránh aliasing
+  // của polling (một khoảng mất focus ngắn có thể lọt gọn giữa 2 lần poll).
+  //
+  // Đệm 3 giây: sau khi đã fullscreen, không có lý do hợp lệ nào để focus rời cửa sổ.
+  // 3s loại được nhiễu chính đáng: fullscreen transition (~0.5s), dialog xin quyền fullscreen,
+  // Windows notification (~1–2s), macOS Spotlight (~2s). Maccy/Notes luôn tốn > 3s.
+  const FOCUS_LOST_GRACE_MS = 3000;
 
   useEffect(() => {
     if (!started || locked || submitting) {
-      focusLostCountRef.current = 0;
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
+      }
       return;
     }
 
-    const interval = setInterval(() => {
+    const handleBlur = () => {
       if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      if (focusLostTimeoutRef.current) return; // đã có timer đang chạy
+      focusLostTimeoutRef.current = setTimeout(() => {
+        focusLostTimeoutRef.current = null;
+        if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+        if (document.hasFocus()) return; // focus đã quay lại
+        void handleViolation('focus_lost');
+      }, FOCUS_LOST_GRACE_MS);
+    };
 
-      if (!document.hasFocus()) {
-        focusLostCountRef.current += 1;
-        if (focusLostCountRef.current >= FOCUS_LOST_THRESHOLD_POLLS) {
-          const now = Date.now();
-          if (now - focusLostLastReportedRef.current >= FOCUS_LOST_REPORT_COOLDOWN_MS) {
-            focusLostLastReportedRef.current = now;
-            focusLostCountRef.current = 0;
-            void handleViolation('focus_lost');
-          }
-        }
-      } else {
-        // Reset khi focus trở lại
-        focusLostCountRef.current = 0;
+    const handleFocus = () => {
+      // Focus quay lại trước khi hết grace → hủy, không tính vi phạm
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
       }
-    }, FOCUS_CHECK_INTERVAL_MS);
+    };
 
-    return () => clearInterval(interval);
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
+      }
+    };
   }, [started, locked, submitting, handleViolation]);
 
   // [Anti-Cheat v2] Dynamic watermark interval
@@ -596,14 +619,19 @@ function StudentExam() {
   const handleCutAttempt   = useCallback(() => handleClipboardAttempt('cut_attempt'),   [handleClipboardAttempt]);
   const handlePasteAttempt = useCallback(() => handleClipboardAttempt('paste_attempt'), [handleClipboardAttempt]);
 
-  // [Anti-Cheat v2] Suspicious paste handler: được gọi từ CodeEditor khi Monaco phát hiện
-  // có >= 1200 ký tự xuất hiện đột ngột trong 1 change event (vượt ngưỡng snippet lớn nhất).
-  const handleSuspiciousPaste = useCallback(() => {
+  // [Anti-Cheat] Suspicious paste handler: được gọi từ CodeEditor khi Monaco phát hiện
+  // >= 300 ký tự xuất hiện đột ngột trong 1 change event. Gửi kèm preview (500 ký tự)
+  // và độ dài thật để backend ghi forensic log.
+  const handleSuspiciousPaste = useCallback((preview: string, textLength: number) => {
     if (!started || locked || submitting) return;
     const now = Date.now();
     if (now - suspiciousPasteCooldownRef.current < 10000) return; // 10s cooldown
     suspiciousPasteCooldownRef.current = now;
-    void handleViolation('suspicious_paste');
+    void handleViolation('suspicious_paste', {
+      contentPreview: preview,
+      textLength,
+      questionId: currentQuestionIdRef.current,
+    });
   }, [started, locked, submitting, handleViolation]);
 
   const saveAnswer = useCallback((order: number, text: string) => {

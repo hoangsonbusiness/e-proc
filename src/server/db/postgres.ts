@@ -168,7 +168,24 @@ await client.query(`
     )
   `);
   console.log('[DB] violations ready');
-  
+
+  // Anti-Cheat: append-only forensic log — mỗi lần vi phạm một dòng (khác với
+  // bảng violations vốn khóa theo (student_id, type) nên chỉ đếm được số lần).
+  // content_preview chỉ có với suspicious_paste (500 ký tự đầu); focus_lost để NULL.
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS violation_events (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER,
+      type TEXT NOT NULL,
+      text_length INTEGER,
+      content_preview VARCHAR(500),
+      question_id VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] violation_events ready');
+
   await client.query(`
     CREATE TABLE IF NOT EXISTS ai_queue (
       id SERIAL PRIMARY KEY,
@@ -295,6 +312,20 @@ function initSqlite() {
       )
     `);
     
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS violation_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER,
+        type TEXT NOT NULL,
+        text_length INTEGER,
+        content_preview TEXT,
+        question_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS ai_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
