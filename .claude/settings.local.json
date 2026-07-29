@@ -16,7 +16,16 @@
       "Bash(npm run *)",
       "Bash(git add *)",
       "Bash(git push *)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(git -C .. status --short)",
+      "Bash(git -C .. rev-parse --show-toplevel)",
+      "Bash(echo \"=== tìm StudentExam.tsx trên toàn ổ liên quan ===\"; find /d/Workspace_openCode /d/Workspace_claude -name 'StudentExam.tsx' 2>/dev/null | grep -v node_modules; echo; echo \"=== tìm CodeEditor.tsx ===\"; find /d/Workspace_openCode /d/Workspace_claude -name 'CodeEditor.tsx' 2>/dev/null | grep -v node_modules)",
+      "Bash(echo \"=== git diff của repo e-proc \\(mọi file source\\) ===\")",
+      "Bash(git -C /d/Workspace_openCode/e-proc status --short)",
+      "Bash(echo)",
+      "Bash(echo \"=== 'hasFocus' còn ở đâu ===\")",
+      "Bash(cp /tmp/verify_fix.mjs ./verify_fix.mjs)",
+      "Bash(node ./verify_fix.mjs)"
     ]
   },
   "spinnerTipsEnabled": false

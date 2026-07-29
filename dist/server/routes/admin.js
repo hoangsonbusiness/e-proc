@@ -817,17 +817,26 @@ router.get('/batches/:id/results', async (req, res) => {
             for (const row of violationsBreakdownResult.rows) {
                 violationsBreakdown[row.type] = parseInt(row.count) || 0;
             }
-            // Forensic log: từng lần vi phạm kèm preview (500 ký tự) để admin xem qua popup
-            const violationEventsResult = await db.query(`
-        SELECT type, text_length, content_preview, question_id, created_at
-        FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
-      `, [student.id]);
+            // Forensic log: từng lần vi phạm kèm preview (500 ký tự) để admin xem qua popup.
+            // Bọc riêng: nếu bảng chưa tồn tại (DB cũ chưa migrate) thì trả mảng rỗng
+            // thay vì làm sập cả endpoint results.
+            let violationEvents = [];
+            try {
+                const violationEventsResult = await db.query(`
+          SELECT type, text_length, content_preview, question_id, created_at
+          FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
+        `, [student.id]);
+                violationEvents = violationEventsResult.rows;
+            }
+            catch (evErr) {
+                console.error('[results] violation_events query failed (non-fatal):', evErr?.message);
+            }
             results.push({
                 student,
                 questions: questionsResult.rows,
                 violations: parseInt(violationsResult.rows[0]?.total) || 0,
                 violations_breakdown: violationsBreakdown,
-                violation_events: violationEventsResult.rows,
+                violation_events: violationEvents,
             });
         }
         res.json(results);

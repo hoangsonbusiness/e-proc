@@ -339,10 +339,18 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
         }
         // Anti-Cheat forensic log: ghi từng lần vi phạm (append-only) để admin review.
         // content_preview chỉ lưu tối đa 500 ký tự đầu, chỉ có với suspicious_paste.
-        const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
-        const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
-        const qId = typeof question_id === 'string' ? question_id : null;
-        await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id) VALUES (?, ?, ?, ?, ?, ?)', [parseInt(studentId), batchId, type, textLen, preview, qId]);
+        // QUAN TRỌNG: forensic log là phụ trợ — KHÔNG được để lỗi ghi log (vd bảng chưa
+        // tồn tại trên DB cũ) làm hỏng logic lock/auto-submit của MỌI loại vi phạm.
+        // Vì vậy bọc riêng try/catch, nuốt lỗi và chỉ log ra console.
+        try {
+            const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
+            const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
+            const qId = typeof question_id === 'string' ? question_id : null;
+            await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id) VALUES (?, ?, ?, ?, ?, ?)', [parseInt(studentId), batchId, type, textLen, preview, qId]);
+        }
+        catch (logErr) {
+            console.error('[violation] forensic log insert failed (non-fatal):', logErr?.message);
+        }
         const totalResult = await db.query('SELECT SUM(count) as total FROM violations WHERE student_id = ?', [parseInt(studentId)]);
         const total = parseInt(totalResult.rows[0]?.total) || 0;
         const currentResult = await db.query('SELECT count FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
