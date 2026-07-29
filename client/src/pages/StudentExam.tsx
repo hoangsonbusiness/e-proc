@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react'
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
+import * as examRecorder from '../services/examRecorder';
 import { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
@@ -42,6 +43,8 @@ function StudentExam() {
   const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
   // Thông báo khi bài thi bị block (timeout / vắng mặt quá lâu)
   const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
+  // Modal yêu cầu bật lại ghi màn hình (khi recorder mất state sau reload/F5)
+  const [recordingLost, setRecordingLost] = useState(false);
   const editorRef = useRef<CodeEditorHandle>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
@@ -168,6 +171,15 @@ function StudentExam() {
     if (!force && !confirm('Are you sure you want to submit?')) return;
 
     setSubmitting(true);
+
+    // Dừng ghi màn hình và lưu nốt file cuối TRƯỚC khi submit — bao trọn mọi đường
+    // (thủ công / cheating / timeout). Bọc try/catch để lỗi ghi file không chặn submit.
+    try {
+      await examRecorder.stopAndSave();
+    } catch (recErr) {
+      console.error('[exam] stopAndSave failed (non-fatal):', recErr);
+    }
+
     try {
       await studentApi.submit(); // [C-4] token tự động qua interceptor
       document.exitFullscreen().catch(() => { });
@@ -393,6 +405,23 @@ function StudentExam() {
       }
     };
   }, [started, locked, submitting, handleViolation]);
+
+  // Ghi màn hình: đăng ký handler khi thí sinh tự dừng chia sẻ giữa bài.
+  // recording_stopped → backend khóa NGAY lần đầu → handleViolation auto-submit.
+  // Nếu track đã ended trước khi effect này chạy, setOnRecordingStopped gọi lại ngay.
+  useEffect(() => {
+    examRecorder.setOnRecordingStopped(() => {
+      void handleViolation('recording_stopped');
+    });
+  }, [handleViolation]);
+
+  // Resume-after-reload guard: nếu vào /exam khi bài đang chạy nhưng recorder KHÔNG
+  // còn active (thí sinh F5/reload làm mất singleton), yêu cầu bật lại ghi màn hình.
+  useEffect(() => {
+    if (started && !locked && !submitting && !examRecorder.isActive()) {
+      setRecordingLost(true);
+    }
+  }, [started, locked, submitting]);
 
   // [Anti-Cheat v2] Dynamic watermark interval
   useEffect(() => {
@@ -634,6 +663,16 @@ function StudentExam() {
     });
   }, [started, locked, submitting, handleViolation]);
 
+  // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chọn lại thư mục +
+  // chia sẻ toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
+  const handleResumeRecording = useCallback(async () => {
+    const setup = await examRecorder.requestSetup();
+    if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
+    examRecorder.start({ studentId: studentId || '', email: studentEmail || '' });
+    examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
+    setRecordingLost(false);
+  }, [studentId, studentEmail, handleViolation]);
+
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
 
@@ -841,6 +880,32 @@ function StudentExam() {
       </div>
 
       {/* Violation Warning Modal (Toast) */}
+      {/* Modal chặn: recorder mất state (reload) — buộc bật lại ghi màn hình mới thi tiếp */}
+      {recordingLost && !locked && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.75)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            background: 'white', padding: '30px', borderRadius: '12px',
+            maxWidth: '480px', textAlign: 'center', border: '2px solid var(--danger)'
+          }}>
+            <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '22px' }}>
+              🎥 Cần bật lại ghi màn hình
+            </h3>
+            <p style={{ fontSize: '16px', lineHeight: '1.5', color: '#333', marginBottom: 20 }}>
+              Việc ghi màn hình đã bị gián đoạn (có thể do tải lại trang). Bạn cần chọn lại
+              thư mục lưu và chia sẻ <b>toàn bộ màn hình</b> để tiếp tục làm bài.
+            </p>
+            <button onClick={handleResumeRecording} className="btn btn-primary" style={{ width: '100%' }}>
+              Bật lại ghi màn hình
+            </button>
+          </div>
+        </div>
+      )}
+
       {violationWarningModal && (
         <div style={{
           position: 'fixed',
@@ -934,23 +999,25 @@ function StudentExam() {
             overflow: 'hidden',
           }}
         >
-          {Array.from({ length: 24 }).map((_, i) => (
+          {/* 12 lát (4 cột x 3 hàng): to & rõ đủ để đọc trên video ghi màn hình 5fps,
+              nhưng thưa và mờ vừa phải để không che bài làm của thí sinh. */}
+          {Array.from({ length: 12 }).map((_, i) => (
             <span
               key={i}
               style={{
                 position: 'absolute',
-                top: `${(i % 6) * 18}%`,
-                left: `${Math.floor(i / 6) * 26}%`,
+                top: `${(i % 3) * 33 + 8}%`,
+                left: `${Math.floor(i / 3) * 26}%`,
                 transform: 'rotate(-25deg)',
-                opacity: 0.07,
-                fontSize: 13,
-                fontWeight: 600,
+                opacity: 0.14,
+                fontSize: 26,
+                fontWeight: 700,
                 whiteSpace: 'nowrap',
                 color: '#000',
                 userSelect: 'none',
               }}
             >
-              Email:{studentEmail || studentId} {watermarkTime.toLocaleTimeString('vi-VN')}
+              {studentEmail || studentId} · {watermarkTime.toLocaleString('vi-VN')}
             </span>
           ))}
         </div>

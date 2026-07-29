@@ -326,6 +326,7 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
             'print_attempt', // Ctrl+P hoặc browser print dialog
             'suspicious_paste', // Thâm nhập text lớn bất thường qua Maccy/Win+V Accessibility API
             'focus_lost', // Mất focus cửa sổ (Split View / mở app khác trên macOS)
+            'recording_stopped', // Thí sinh tự dừng chia sẻ màn hình giữa bài (getDisplayMedia track ended)
         ];
         if (!type || !validTypes.includes(type)) {
             return res.status(400).json({ error: 'Invalid violation type' });
@@ -355,11 +356,13 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
         const total = parseInt(totalResult.rows[0]?.total) || 0;
         const currentResult = await db.query('SELECT count FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
         const currentCount = parseInt(currentResult.rows[0]?.count) || 0;
-        // Khóa bài khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
+        // recording_stopped: dừng chia sẻ màn hình = cố ý trốn giám sát → khóa NGAY lần đầu.
+        // Các type khác: khóa khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
+        const locked = type === 'recording_stopped' || currentCount >= 2 || total >= 2;
         res.json({
             violation_count: currentCount,
             total_violations: total,
-            locked: currentCount >= 2 || total >= 2,
+            locked,
         });
     }
     catch (error) {

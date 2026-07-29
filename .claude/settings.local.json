@@ -25,7 +25,9 @@
       "Bash(echo)",
       "Bash(echo \"=== 'hasFocus' còn ở đâu ===\")",
       "Bash(cp /tmp/verify_fix.mjs ./verify_fix.mjs)",
-      "Bash(node ./verify_fix.mjs)"
+      "Bash(node ./verify_fix.mjs)",
+      "Bash(echo \"BE_EXIT:$?\")",
+      "Bash(echo \"FE_EXIT:$?\")"
     ]
   },
   "spinnerTipsEnabled": false

@@ -120,8 +120,8 @@ When debugging student exam state, inspect:
   - backend buffers answers through `src/server/cache.ts`
   - buffered answers are flushed periodically or on submit
 - Violations are reported from the frontend through `studentApi.reportViolation(type)` and stored in the `violations` table
-- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`
-- Locking occurs when `violation_count >= 2` for any single type or `total_violations >= 2`. **As of 2026-07-29 the log-only exemption was removed** — `suspicious_paste` and `focus_lost` are now lockable like every other type and count toward `total_violations` (see Anti-Cheat v2 section for the rationale behind the change)
+- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`
+- Locking occurs when `violation_count >= 2` for any single type or `total_violations >= 2`. **As of 2026-07-29 the log-only exemption was removed** — `suspicious_paste` and `focus_lost` are now lockable like every other type and count toward `total_violations` (see Anti-Cheat v2 section for the rationale behind the change). **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** (see Screen recording section) — stopping the screen share is treated as deliberate evasion.
 - Every violation report is additionally appended to the `violation_events` table (append-only forensic log); `suspicious_paste` events carry a `content_preview` (first 500 chars of the pasted text) — see Anti-Cheat v2 section
 - Anti-cheat behavior is concentrated in `client/src/pages/StudentExam.tsx`:
   - clipboard attempts (`copy_attempt`, `cut_attempt`, `paste_attempt`) are intercepted inside the Monaco CodeEditor via `addCommand()` and reported as violations
@@ -193,6 +193,19 @@ The `violations` table is keyed by `(student_id, type)` and only stores a runnin
 - `client/src/pages/Results.tsx` shows a "🔍 Xem chi tiết (N)" button that opens a modal listing each event (type, timestamp, char length, question id, and the paste preview in a monospace block) — so admins can adjudicate a flag from the actual pasted text without querying the DB.
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
+
+#### Screen recording (added 2026-07-29)
+
+The exam records the candidate's full screen locally and the candidate commits the video to GitLab afterward for post-hoc review. Recording is **mandatory** — the exam cannot start without it.
+
+Module: `client/src/services/examRecorder.ts` (singleton **outside React** — it must survive the `/confirm` → `/exam` navigation, so it cannot live in component state):
+- **Local save via File System Access API** (`showDirectoryPicker`) — the candidate picks a folder once at start; each `.webm` part is written straight into it with **no per-file download prompt** (an `<a download>` approach would trigger Chrome's "allow multiple downloads" bar, which could steal focus and false-trigger `focus_lost`/auto-submit). Requires **Chrome/Edge + HTTPS**; unsupported browsers (Safari/Firefox) are blocked at the confirm screen.
+- **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; if `track.getSettings().displaySurface !== 'monitor'` (candidate shared a tab/window) the exam is refused.
+- **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~45 MB per 10-minute part → ~9 files for a 90-minute exam, each under GitLab's 100 MB limit (no LFS needed). Parts are split by a **10-minute `setInterval`**, named `exam_{studentId}_{email}_{stamp}_partNN.webm`.
+- **Lifecycle:** `requestSetup()` (folder + monitor share) is called in `StudentConfirm.tsx#handleStartExam` after `requestFullscreen()` and **before** `navigate('/exam')` — failure blocks entry. `start()` begins recording. `stopAndSave()` is called at the top of `handleSubmit` in `StudentExam.tsx`, covering all three submit paths (manual / cheating auto-submit / timeout); it flushes the final part before submitting and is wrapped in try/catch so a file-write error never blocks submission.
+- **`recording_stopped` violation:** `track.onended` (candidate clicks Chrome's "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). `StudentExam` registers the handler via `examRecorder.setOnRecordingStopped()` after mount (the singleton was started earlier in `StudentConfirm`); if the track already ended before registration, the callback fires immediately.
+- **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while the exam is running but `examRecorder.isActive()` is false, a blocking modal forces them to re-share the screen before continuing.
+- **macOS caveat:** the first `getDisplayMedia` requires granting Screen Recording permission to Chrome in System Settings **and restarting Chrome** — candidates on macOS must do this **before** exam day, not during.
 
 ### Static runtime path
 - There are **three** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
