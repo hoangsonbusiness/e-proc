@@ -1,21 +1,26 @@
-// examRecorder.ts — Ghi màn hình bài thi và upload thẳng lên AWS S3.
+// examRecorder.ts — Ghi màn hình bài thi. Hỗ trợ 2 chế độ:
+//   - 's3'   : upload thẳng lên AWS S3 qua presigned PUT URL (video không nằm trên máy HV).
+//   - 'local': ghi ra thư mục HV chọn, mỗi phần nén + MÃ HÓA AES-256 thành .zip. Password
+//              do server sinh & giữ (HV không thấy) → dù HV commit file zip lên GitLab cũng
+//              không tự mở lại được đề. Dùng File System Access API (Chrome/Edge).
 //
-// Singleton ngoài React: phải sống xuyên qua navigate từ /confirm sang /exam nên
-// không dùng state của component.
+// Singleton ngoài React: phải sống xuyên qua navigate từ /confirm sang /exam nên không
+// dùng state của component.
 //
-// Luồng upload: mỗi ~5 phút cắt 1 phần video → xin presigned PUT URL từ backend →
-// PUT blob THẲNG lên S3 (không qua backend → né payload/timeout Vercel). Upload lỗi
-// (mạng yếu) → đưa vào retry queue, thử lại nền, KHÔNG chặn thi. Video không nằm
-// trên máy thí sinh → không có bản local để lộ đề. Xóa qua S3 Lifecycle rule.
+// Luồng chung: mỗi ~5 phút cắt 1 phần video → (s3) xin presigned URL + PUT thẳng / (local)
+// nén-mã hóa zip rồi ghi file. Upload S3 lỗi → retry queue nền, KHÔNG chặn thi.
 
 import { studentApi } from './api';
+import { ZipWriter, BlobWriter, BlobReader } from '@zip.js/zip.js';
 
 const FPS = 5;
 const VIDEO_BITRATE = 600_000;             // ~600 kbps
-const PART_INTERVAL_MS = 5 * 60 * 1000;    // cắt & upload 1 phần mỗi 5 phút (~22MB)
+const PART_INTERVAL_MS = 5 * 60 * 1000;    // cắt & xử lý 1 phần mỗi 5 phút (~22MB)
 const TIMESLICE_MS = 1000;                 // ondataavailable mỗi giây
-const MAX_RETRY = 5;                       // số lần thử lại tối đa cho 1 phần
+const MAX_RETRY = 5;                       // số lần thử lại tối đa cho 1 phần (s3)
 const RETRY_BASE_MS = 3000;                // backoff cơ sở
+
+type RecordMode = 's3' | 'local';
 
 interface PendingPart {
   partIndex: number;
@@ -33,19 +38,28 @@ let onRecordingStopped: (() => void) | null = null;
 let recordingStoppedFired = false;
 let active = false;
 
-// Hàng đợi upload lỗi cần thử lại
+// Cấu hình chế độ ghi (đặt khi start)
+let mode: RecordMode = 's3';
+let dirHandle: any = null;              // FileSystemDirectoryHandle (chỉ mode 'local')
+let localPassword: string | null = null; // password mã hóa zip (chỉ mode 'local')
+let sessionStamp = '';
+
+// Hàng đợi upload lỗi cần thử lại (chỉ mode 's3')
 let retryQueue: PendingPart[] = [];
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/** Trình duyệt có đủ API để ghi hình + upload không. */
-export function isSupported(): boolean {
-  return (
+/** Trình duyệt có đủ API để ghi hình cho mode tương ứng không. */
+export function isSupported(forMode: RecordMode = 's3'): boolean {
+  const base =
     !!navigator.mediaDevices?.getDisplayMedia &&
     typeof MediaRecorder !== 'undefined' &&
-    typeof fetch === 'function'
-  );
+    typeof fetch === 'function';
+  if (forMode === 'local') {
+    return base && typeof (window as any).showDirectoryPicker === 'function';
+  }
+  return base;
 }
 
 export function isActive(): boolean {
@@ -58,6 +72,14 @@ export function setOnRecordingStopped(cb: () => void): void {
   onRecordingStopped = cb;
   if (recordingStoppedFired) cb();
 }
+
+function makeStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+// ── Mode S3: upload phần ───────────────────────────────────────────────────
 
 /** Upload 1 phần lên S3: xin presigned URL rồi PUT thẳng. Trả về thành công/thất bại. */
 async function uploadPart(part: PendingPart): Promise<boolean> {
@@ -110,25 +132,78 @@ function scheduleRetry(): void {
   }, delay);
 }
 
-/** Gộp buffer hiện tại thành 1 phần và upload; reset buffer. */
+// ── Mode Local: nén + mã hóa AES rồi ghi file .zip ─────────────────────────
+
+/**
+ * Nén blob .webm thành .zip mã hóa AES-256 (password server cấp) rồi ghi vào thư mục
+ * HV đã chọn. Không nén thêm (level 0) vì webm đã nén sẵn — chỉ tốn CPU vô ích.
+ */
+async function saveLocalPart(partIdx: number, blob: Blob): Promise<void> {
+  if (!dirHandle || !localPassword) {
+    console.error('[examRecorder] saveLocalPart: thiếu dirHandle/password');
+    return;
+  }
+  const part = String(partIdx).padStart(3, '0');
+  const webmName = `exam_${sessionStamp}_part${part}.webm`;
+  const zipName = `exam_${sessionStamp}_part${part}.zip`;
+
+  try {
+    // Tạo zip mã hóa AES-256 chứa 1 file .webm
+    const zipWriter = new ZipWriter(new BlobWriter('application/zip'), {
+      password: localPassword,
+      encryptionStrength: 3, // AES-256
+      level: 0,              // webm đã nén → không nén lại
+    });
+    await zipWriter.add(webmName, new BlobReader(blob));
+    const zipBlob = await zipWriter.close();
+
+    // Ghi file .zip vào thư mục
+    const fileHandle = await dirHandle.getFileHandle(zipName, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(zipBlob);
+    await writable.close();
+  } catch (err) {
+    // Không để lỗi ghi/nén làm hỏng bài thi — chỉ log.
+    console.error('[examRecorder] saveLocalPart failed:', err);
+  }
+}
+
+// ── Cắt phần & định tuyến theo mode ────────────────────────────────────────
+
+/** Gộp buffer hiện tại thành 1 phần và xử lý (s3 upload / local zip); reset buffer. */
 function flushPart(): void {
   if (chunkBuffer.length === 0) return;
   const blob = new Blob(chunkBuffer, { type: 'video/webm' });
   chunkBuffer = [];
   const idx = partIndex;
   partIndex += 1;
-  enqueueAndUpload({ partIndex: idx, blob, attempts: 0 });
+
+  if (mode === 'local') {
+    void saveLocalPart(idx, blob);
+  } else {
+    enqueueAndUpload({ partIndex: idx, blob, attempts: 0 });
+  }
 }
 
 // ── API công khai ────────────────────────────────────────────────────────
 
 /**
- * Xin chia sẻ TOÀN MÀN HÌNH. Trả về { ok, reason }. ok=false → KHÔNG được vào thi.
+ * Chuẩn bị ghi. Với mode 'local' cũng xin HV chọn thư mục lưu.
+ * Trả về { ok, reason }. ok=false → KHÔNG được vào thi.
  * Gọi trong cùng user gesture của cú click (không await gì tiêu thụ gesture trước đó).
  */
-export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> {
-  if (!isSupported()) {
+export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: boolean; reason?: string }> {
+  if (!isSupported(forMode)) {
     return { ok: false, reason: 'unsupported' };
+  }
+
+  // Mode local: chọn thư mục lưu TRƯỚC (còn gesture). getDisplayMedia gọi sau vẫn trong gesture.
+  if (forMode === 'local') {
+    try {
+      dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+    } catch {
+      return { ok: false, reason: 'no_directory' };
+    }
   }
 
   try {
@@ -138,6 +213,7 @@ export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> 
     });
   } catch (err: any) {
     console.error('[examRecorder] getDisplayMedia failed:', err?.name, err?.message);
+    dirHandle = forMode === 'local' ? null : dirHandle;
     return { ok: false, reason: 'no_screen' };
   }
 
@@ -146,6 +222,7 @@ export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> 
   if (surface && surface !== 'monitor') {
     track.stop();
     stream = null;
+    dirHandle = forMode === 'local' ? null : dirHandle;
     return { ok: false, reason: 'not_fullscreen' };
   }
 
@@ -154,15 +231,23 @@ export async function requestSetup(): Promise<{ ok: boolean; reason?: string }> 
 
 /**
  * Bắt đầu ghi. Phải gọi sau requestSetup() thành công.
+ * opts.mode: 's3' | 'local'; opts.password: bắt buộc khi 'local'.
  */
-export function start(): void {
+export function start(opts?: { mode?: RecordMode; password?: string | null }): void {
   if (!stream) {
     console.error('[examRecorder] start() gọi khi chưa có stream');
     return;
   }
+  mode = opts?.mode || 's3';
+  localPassword = opts?.password || null;
+  if (mode === 'local' && !localPassword) {
+    console.error('[examRecorder] start() mode=local nhưng thiếu password');
+  }
+
   chunkBuffer = [];
   partIndex = 0;
   retryQueue = [];
+  sessionStamp = makeStamp();
 
   let mimeType = 'video/webm;codecs=vp9';
   if (!MediaRecorder.isTypeSupported(mimeType)) {
@@ -176,7 +261,7 @@ export function start(): void {
   recorder.start(TIMESLICE_MS);
   active = true;
 
-  // Cắt & upload 1 phần mỗi 5 phút
+  // Cắt & xử lý 1 phần mỗi 5 phút
   partTimer = setInterval(() => flushPart(), PART_INTERVAL_MS);
 
   // Thí sinh bấm "Stop sharing" của trình duyệt giữa bài
@@ -190,8 +275,8 @@ export function start(): void {
 }
 
 /**
- * Dừng ghi và upload nốt phần cuối. Gọi ở đầu handleSubmit (mọi đường: thủ công /
- * cheating / timeout). Idempotent. Chờ recorder flush dữ liệu còn đệm trước khi upload.
+ * Dừng ghi và xử lý nốt phần cuối. Gọi ở đầu handleSubmit (mọi đường: thủ công /
+ * cheating / timeout). Idempotent. Chờ recorder flush dữ liệu còn đệm trước khi xử lý.
  */
 export async function stopAndSave(): Promise<void> {
   if (partTimer) {
@@ -209,8 +294,18 @@ export async function stopAndSave(): Promise<void> {
     });
   }
 
-  // Upload phần cuối và chờ (best-effort) để tăng khả năng nó lên được S3 trước khi rời trang.
-  flushPart();
+  // Xử lý phần cuối. Mode local: await để đảm bảo file zip cuối được ghi xong trước khi rời trang.
+  if (mode === 'local') {
+    if (chunkBuffer.length > 0) {
+      const blob = new Blob(chunkBuffer, { type: 'video/webm' });
+      chunkBuffer = [];
+      const idx = partIndex;
+      partIndex += 1;
+      await saveLocalPart(idx, blob);
+    }
+  } else {
+    flushPart();
+  }
 
   if (stream) {
     stream.getTracks().forEach((t) => t.stop());

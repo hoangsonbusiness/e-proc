@@ -83,7 +83,7 @@ function UserManagement() {
           <div className="form-group">
             <label>Vai trò</label>
             <select value={role} onChange={(e) => setRole(e.target.value as 'admin' | 'mod')}>
-              <option value="mod">Mod (no user management, cannot enable S3 recording)</option>
+              <option value="mod">Mod (no user management, cannot enable screen recording)</option>
               <option value="admin">Admin (full access)</option>
             </select>
           </div>

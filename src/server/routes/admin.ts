@@ -725,8 +725,8 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
 
 router.post('/batches', async (req: Request, res: Response) => {
   try {
-    const { name, start_time, end_time, duration, blueprint, record_enabled, exam_type } = req.body;
-    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type });
+    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     if (!name || !start_time || !end_time || !duration) {
@@ -747,20 +747,24 @@ router.post('/batches', async (req: Request, res: Response) => {
     const endUTC = toStorageTime(end_time);
     console.log('[CreateBatch] Times (UTC stored):', { start_time: startUTC, end_time: endUTC });
     
-    // Cờ record S3 chỉ được bật bởi role 'admin'. Mod tạo batch → luôn false.
-    const recordFlag = (req.adminUser?.role === 'admin' && !!record_enabled) ? 1 : 0;
+    // Chế độ record ('none' | 'local' | 's3') chỉ được đặt khác 'none' bởi role 'admin'.
+    // Mod tạo batch → luôn ép 'none'. record_enabled giữ đồng bộ (= mode==='s3') để tương thích ngược.
+    const RECORD_MODES = ['none', 'local', 's3'];
+    let recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
+    if (req.adminUser?.role !== 'admin') recordMode = 'none';
+    const recordFlag = recordMode === 's3' ? 1 : 0;
 
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, exam_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, exam_type)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -812,31 +816,33 @@ router.get('/batches/:id', async (req: Request, res: Response) => {
 router.put('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, start_time, end_time, duration, blueprint, record_enabled, exam_type } = req.body;
+    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
 
-    // Cờ record: admin dùng giá trị client gửi; mod KHÔNG đổi được → giữ nguyên cờ cũ.
-    let recordFlag: number;
+    // Chế độ record: admin dùng giá trị client gửi; mod KHÔNG đổi được → giữ nguyên mode cũ trong DB.
+    const RECORD_MODES = ['none', 'local', 's3'];
+    let recordMode: string;
     if (req.adminUser?.role === 'admin') {
-      recordFlag = record_enabled ? 1 : 0;
+      recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
     } else {
-      const cur = await db.query('SELECT record_enabled FROM batches WHERE id = ?', [parseInt(id)]);
-      recordFlag = cur.rows[0]?.record_enabled ? 1 : 0;
+      const cur = await db.query('SELECT record_mode FROM batches WHERE id = ?', [parseInt(id)]);
+      recordMode = cur.rows[0]?.record_mode || 'none';
     }
+    const recordFlag = recordMode === 's3' ? 1 : 0;
 
     if (USE_SQLITE) {
       await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, exam_type = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, examType, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, recordMode, examType, parseInt(id)]);
     } else {
       await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, exam_type = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, examType, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, recordMode, examType, parseInt(id)]);
     }
 
     res.json({ success: true });

@@ -85,7 +85,7 @@ function BatchManagement() {
     duration: 30,
     blueprint: [] as BlueprintItem[],
     blueprintByType: [] as BlueprintItemByType[],
-    record_enabled: false,
+    record_mode: 'none' as 'none' | 'local' | 's3',
     exam_type: 'essay' as 'essay' | 'quiz',
   });
   // Edit form state
@@ -372,7 +372,7 @@ function BatchManagement() {
         end_time: localToUTC(editingBatch.end_time),
         duration: editingBatch.duration,
         blueprint: blueprintPayload,
-        record_enabled: editingBatch.record_enabled,
+        record_mode: editingBatch.record_mode || 'none',
         exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
       });
       loadBatches();
@@ -422,13 +422,13 @@ function BatchManagement() {
         end_time: localToUTC(formData.end_time),
         duration: formData.duration,
         blueprint: blueprintPayload,
-        record_enabled: formData.record_enabled,
+        record_mode: formData.record_mode,
         exam_type: formData.exam_type,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_enabled: false, exam_type: 'essay' });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay' });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -755,20 +755,21 @@ function BatchManagement() {
               </select>
             </div>
 
-            {/* Ghi màn hình lên S3 — chỉ admin bật được; mod thấy nhưng bị khóa */}
+            {/* Chế độ ghi màn hình — chỉ admin đổi được; mod thấy nhưng bị khóa */}
             <div className="form-group" style={{ marginTop: 12 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
-                <input
-                  type="checkbox"
-                  checked={formData.record_enabled}
-                  disabled={!isAdmin}
-                  onChange={e => setFormData(prev => ({ ...prev, record_enabled: e.target.checked }))}
-                  style={{ width: 'auto' }}
-                />
-                <span>Record student screen and save to S3</span>
-              </label>
+              <label>Ghi màn hình</label>
+              <select
+                value={formData.record_mode}
+                disabled={!isAdmin}
+                onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
+                style={{ width: 'auto' }}
+              >
+                <option value="none">Default (Không ghi)</option>
+                <option value="local">Record Local (Lưu trên máy học viên, mã hóa)</option>
+                <option value="s3">Record S3 (Lưu trên AWS S3)</option>
+              </select>
               {!isAdmin && (
-                <small style={{ color: 'var(--text-light)' }}>Only admin accounts can enable this feature.</small>
+                <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
               )}
             </div>
 
@@ -1149,20 +1150,21 @@ function BatchManagement() {
             </select>
           </div>
 
-          {/* Ghi màn hình lên S3 — chỉ admin đổi được; mod bị khóa (backend giữ nguyên cờ cũ) */}
+          {/* Chế độ ghi màn hình — chỉ admin đổi được; mod bị khóa (backend giữ nguyên mode cũ) */}
           <div className="form-group">
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
-              <input
-                type="checkbox"
-                checked={!!editingBatch.record_enabled}
-                disabled={!isAdmin}
-                onChange={e => setEditingBatch({ ...editingBatch, record_enabled: e.target.checked })}
-                style={{ width: 'auto' }}
-              />
-              <span>Record student screen and save to S3</span>
-            </label>
+            <label>Ghi màn hình</label>
+            <select
+              value={editingBatch.record_mode || 'none'}
+              disabled={!isAdmin}
+              onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
+              style={{ width: 'auto' }}
+            >
+              <option value="none">Default (Không ghi)</option>
+              <option value="local">Record Local (Lưu trên máy học viên, mã hóa)</option>
+              <option value="s3">Record S3 (Lưu trên AWS S3)</option>
+            </select>
             {!isAdmin && (
-              <small style={{ color: 'var(--text-light)' }}>Only admin accounts can change this setting.</small>
+              <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
             )}
           </div>
 

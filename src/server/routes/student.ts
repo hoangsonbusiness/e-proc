@@ -3,6 +3,7 @@ import db from '../db/postgres.js';
 import { cache } from '../cache.js';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import type { StudentTokenPayload } from '../middleware/studentAuth.js';
 import { createRecordingUploadUrl, isS3Configured } from '../services/s3.js';
@@ -69,7 +70,7 @@ router.post('/verify', async (req: Request, res: Response) => {
     }
 
     const result = await db.query(`
-      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration, b.record_enabled
+      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration, b.record_enabled, b.record_mode
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.access_code = ?
@@ -114,6 +115,18 @@ router.post('/verify', async (req: Request, res: Response) => {
       { expiresIn: '4h' }
     );
 
+    // Chế độ ghi màn hình: 'none' | 'local' | 's3'. record_enabled cũ vẫn được suy ra để tương thích.
+    const recordMode: string = student.record_mode || (student.record_enabled ? 's3' : 'none');
+
+    // Với mode 'local': cấp password mã hóa zip (server sinh & giữ, học viên KHÔNG thấy).
+    // Sinh 1 lần rồi tái dùng để resume-after-reload dùng lại đúng pass. Học viên chỉ
+    // dùng ngầm để mã hóa file .zip; muốn xem lại video phải lấy pass từ trang Results.
+    let recordingPassword: string | null = student.recording_password || null;
+    if (recordMode === 'local' && !recordingPassword) {
+      recordingPassword = crypto.randomBytes(24).toString('base64url');
+      await db.query('UPDATE students SET recording_password = ? WHERE id = ?', [recordingPassword, student.id]);
+    }
+
     res.json({
       valid: true,
       student_token: studentToken,
@@ -124,7 +137,10 @@ router.post('/verify', async (req: Request, res: Response) => {
       dev_mode: isDevMode,
       exam_start: startTime.toISOString(),
       exam_end: endTime.toISOString(),
-      record_enabled: !!student.record_enabled, // batch có bật ghi màn hình S3 không
+      record_enabled: !!student.record_enabled, // giữ để tương thích ngược
+      record_mode: recordMode,
+      // chỉ trả pass khi local — client dùng ngầm để mã hóa, không hiển thị
+      recording_password: recordMode === 'local' ? recordingPassword : undefined,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -558,10 +574,12 @@ router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, r
     const studentId = req.studentPayload!.studentId;
     const batchId = req.studentPayload!.batchId;
 
-    // Chỉ cấp URL nếu batch được bật record (chốt chặn server-side, tránh mod/ai lách).
-    const batchRes = await db.query('SELECT record_enabled FROM batches WHERE id = ?', [batchId]);
-    if (!batchRes.rows[0]?.record_enabled) {
-      return res.status(403).json({ error: 'Recording not enabled for this batch' });
+    // Chỉ cấp URL khi batch ở mode 's3' (chốt chặn server-side, tránh mod/ai lách).
+    // Mode 'local' ghi ra máy học viên, không dùng S3 → không cấp URL.
+    const batchRes = await db.query('SELECT record_mode, record_enabled FROM batches WHERE id = ?', [batchId]);
+    const batchMode = batchRes.rows[0]?.record_mode || (batchRes.rows[0]?.record_enabled ? 's3' : 'none');
+    if (batchMode !== 's3') {
+      return res.status(403).json({ error: 'S3 recording not enabled for this batch' });
     }
 
     const { partIndex, contentType } = req.body;

@@ -79,7 +79,8 @@ function StudentExam() {
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
   const studentToken = localStorage.getItem('studentToken');
   const studentEmail = localStorage.getItem('studentEmail');
-  const recordEnabled = localStorage.getItem('recordEnabled') === '1';
+  const recordMode = (localStorage.getItem('recordMode') || 'none') as 'none' | 'local' | 's3';
+  const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
 
   useEffect(() => {
     if (!studentId || !studentToken) {
@@ -676,12 +677,15 @@ function StudentExam() {
   // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chia sẻ lại
   // toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
   const handleResumeRecording = useCallback(async () => {
-    const setup = await examRecorder.requestSetup();
+    // Resume sau F5: dirHandle (local) không sống qua reload → phải chọn lại thư mục.
+    // Password lấy lại từ localStorage (server đã cấp lúc verify, tái dùng đúng pass cũ).
+    const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
     if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
-    examRecorder.start();
+    const password = localStorage.getItem('recordingPassword');
+    examRecorder.start({ mode: recordMode === 'none' ? 's3' : recordMode, password });
     examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
     setRecordingLost(false);
-  }, [handleViolation]);
+  }, [handleViolation, recordMode]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));

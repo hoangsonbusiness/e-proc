@@ -111,7 +111,21 @@ function Results() {
               <tbody>
                 {results.map(r => (
                   <tr key={r.student.id}>
-                    <td>{r.student.email}</td>
+                    <td>
+                      {r.student.email}
+                      {/* Mật khẩu giải nén video record (mode local). HV không thấy — chỉ admin. */}
+                      {r.student.recording_password && (
+                        <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-light)' }}>
+                          🔑 Pass giải nén:{' '}
+                          <code style={{
+                            background: '#f1f5f9', padding: '1px 5px', borderRadius: 3,
+                            fontFamily: 'monospace', userSelect: 'all', wordBreak: 'break-all',
+                          }}>
+                            {r.student.recording_password}
+                          </code>
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <span style={{
                         padding: '4px 8px',

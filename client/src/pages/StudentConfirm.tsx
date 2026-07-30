@@ -13,7 +13,8 @@ function StudentConfirm() {
   const studentToken = location.state?.studentToken; // [C-4]
   const email = location.state?.email;
   const duration = location.state?.duration;
-  const recordEnabled = !!location.state?.recordEnabled; // batch có bật ghi màn hình S3
+  const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
+  const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
 
   useEffect(() => {
     // Redirect to login if no state or missing token
@@ -26,21 +27,22 @@ function StudentConfirm() {
     setError('');
     setLoading(true);
 
-    // Chỉ yêu cầu ghi màn hình khi batch được bật record. Batch không bật → thi thẳng.
-    if (recordEnabled) {
-      if (!examRecorder.isSupported()) {
+    // Chỉ yêu cầu ghi màn hình khi batch bật record (local/s3). Mode 'none' → thi thẳng.
+    if (recordMode !== 'none') {
+      if (!examRecorder.isSupported(recordMode)) {
         setError('Trình duyệt của bạn không hỗ trợ ghi màn hình. Vui lòng dùng Google Chrome hoặc Microsoft Edge phiên bản mới để làm bài.');
         setLoading(false);
         return;
       }
 
-      // QUAN TRỌNG — thứ tự: chia sẻ màn hình TRƯỚC, fullscreen SAU.
+      // QUAN TRỌNG — thứ tự: chia sẻ màn hình (và chọn thư mục nếu local) TRƯỚC, fullscreen SAU.
       // getDisplayMedia đòi "user activation" của cú click; nếu gọi requestFullscreen
       // trước, gesture bị tiêu thụ → getDisplayMedia bị chặn (SecurityError).
-      const setup = await examRecorder.requestSetup();
+      const setup = await examRecorder.requestSetup(recordMode);
       if (!setup.ok) {
         const messages: Record<string, string> = {
           unsupported: 'Trình duyệt không hỗ trợ ghi màn hình. Vui lòng dùng Chrome hoặc Edge.',
+          no_directory: 'Bạn cần chọn thư mục để lưu video bài thi.',
           no_screen: 'Bạn cần cho phép chia sẻ màn hình để bắt đầu bài thi.',
           not_fullscreen: 'Vui lòng chọn chia sẻ "Toàn bộ màn hình" (Entire Screen), không phải một tab hay cửa sổ.',
         };
@@ -48,10 +50,13 @@ function StudentConfirm() {
         setLoading(false);
         return;
       }
-      examRecorder.start();
+      examRecorder.start({ mode: recordMode, password: recordingPassword });
     }
 
-    localStorage.setItem('recordEnabled', recordEnabled ? '1' : '0'); // để /exam biết có gate recorder không
+    localStorage.setItem('recordMode', recordMode); // để /exam biết mode (none/local/s3)
+    if (recordMode === 'local' && recordingPassword) {
+      localStorage.setItem('recordingPassword', recordingPassword); // dùng ngầm cho resume-after-reload
+    }
     localStorage.setItem('studentId', studentId.toString());
     localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
     localStorage.setItem('duration', duration.toString());
@@ -96,11 +101,13 @@ function StudentConfirm() {
           Vui lòng xác nhận email của bạn trước khi bắt đầu làm bài thi.
         </p>
 
-        {recordEnabled && (
+        {recordMode !== 'none' && (
           <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
             ⚠️ Bài thi này <b>bắt buộc ghi màn hình</b>. Khi bấm bắt đầu, bạn sẽ được yêu cầu
-            chia sẻ <b>Toàn bộ màn hình</b> (Entire Screen). Video được lưu tự động lên hệ thống
-            trong lúc thi.
+            {recordMode === 'local' && <> chọn <b>thư mục lưu video</b> và</>} chia sẻ <b>Toàn bộ màn hình</b> (Entire Screen).
+            {recordMode === 'local'
+              ? <> Video được lưu vào thư mục bạn chọn. Sau khi thi xong, hãy commit thư mục này lên GitLab theo hướng dẫn.</>
+              : <> Video được lưu tự động lên hệ thống trong lúc thi.</>}
             <br />Vui lòng dùng <b>Google Chrome</b> hoặc <b>Microsoft Edge</b>. Nếu tự dừng chia sẻ giữa chừng, bài thi sẽ bị khóa.
           </div>
         )}

@@ -105,12 +105,20 @@ async function initPostgres() {
       duration INTEGER NOT NULL,
       blueprint JSONB,
       record_enabled BOOLEAN DEFAULT false,
+      record_mode VARCHAR(16) DEFAULT 'none',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
     // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
     try {
         await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
+    }
+    catch (_) { /* already exists */ }
+    // Migration: chế độ ghi màn hình 'none' | 'local' | 's3' (thay cho record_enabled bool).
+    // Chỉ admin đặt được mode khác 'none'. Backfill: batch có record_enabled=true → 's3'.
+    try {
+        await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_mode VARCHAR(16) DEFAULT 'none'");
+        await client.query("UPDATE batches SET record_mode = 's3' WHERE record_enabled = true AND (record_mode IS NULL OR record_mode = 'none')");
     }
     catch (_) { /* already exists */ }
     // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
@@ -131,6 +139,7 @@ async function initPostgres() {
       exam_started_at TIMESTAMP,
       exam_deadline TIMESTAMP,
       disconnected_at TIMESTAMP,
+      recording_password TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -139,6 +148,7 @@ async function initPostgres() {
         { col: 'exam_started_at', def: 'TIMESTAMP' },
         { col: 'exam_deadline', def: 'TIMESTAMP' },
         { col: 'disconnected_at', def: 'TIMESTAMP' },
+        { col: 'recording_password', def: 'TEXT' },
     ];
     for (const { col, def } of colChecks) {
         try {
@@ -259,6 +269,7 @@ function initSqlite() {
         duration INTEGER NOT NULL,
         blueprint TEXT,
         record_enabled INTEGER DEFAULT 0,
+        record_mode TEXT DEFAULT 'none',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -272,6 +283,7 @@ function initSqlite() {
         exam_started_at DATETIME,
         exam_deadline DATETIME,
         disconnected_at DATETIME,
+        recording_password TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -287,6 +299,9 @@ function initSqlite() {
         }
         if (!colNames.includes('disconnected_at')) {
             sqliteDb.exec('ALTER TABLE students ADD COLUMN disconnected_at DATETIME');
+        }
+        if (!colNames.includes('recording_password')) {
+            sqliteDb.exec('ALTER TABLE students ADD COLUMN recording_password TEXT');
         }
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_questions (
@@ -355,6 +370,11 @@ function initSqlite() {
         }
         if (!batchCols.includes('exam_type')) {
             sqliteDb.exec("ALTER TABLE batches ADD COLUMN exam_type TEXT DEFAULT 'essay'");
+        }
+        if (!batchCols.includes('record_mode')) {
+            sqliteDb.exec("ALTER TABLE batches ADD COLUMN record_mode TEXT DEFAULT 'none'");
+            // Backfill: batch cũ có record_enabled=1 → 's3'
+            sqliteDb.exec("UPDATE batches SET record_mode = 's3' WHERE record_enabled = 1 AND (record_mode IS NULL OR record_mode = 'none')");
         }
         const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all().map(c => c.name);
         if (!adminCols.includes('role')) {
