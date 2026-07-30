@@ -115,11 +115,11 @@ function BatchManagement() {
     for (const item of blueprint) {
       const stats = getStatsForModule(item.module);
       if (item.easy > stats.easy)
-        errors.push(`Module "${item.module}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+        errors.push(`Module "${item.module}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${item.module}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+        errors.push(`Module "${item.module}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${item.module}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+        errors.push(`Module "${item.module}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -130,11 +130,11 @@ function BatchManagement() {
     for (const item of blueprint) {
       const stats = getStatsForModuleType(item.module, item.type);
       if (item.easy > stats.easy)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+        errors.push(`Module "${item.module}" / Type "${item.type}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -354,7 +354,7 @@ function BatchManagement() {
       statsErrors = validateBlueprintAgainstStats(editingBatch.blueprint || []);
     }
     if (statsErrors.length > 0) {
-      alert('Không thể lưu vì blueprint vượt quá số câu hỏi có sẵn:\n\n' + statsErrors.join('\n'));
+      alert('Cannot save because the blueprint exceeds the available question count:\n\n' + statsErrors.join('\n'));
       return;
     }
 
@@ -457,7 +457,7 @@ function BatchManagement() {
 
       const skipped = res.data.skippedEmails;
       if (skipped && skipped.length > 0) {
-        alert(`Đã skip ${skipped.length} email trùng:\n${skipped.join('\n')}`);
+        alert(`Skipped ${skipped.length} duplicate email(s):\n${skipped.join('\n')}`);
       }
 
       setInviteResult({
@@ -548,7 +548,7 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>📊</span>
           <strong style={{ color: '#1e40af', fontSize: 14 }}>Question Bank – By Module</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn theo Module
+            — Available question counts by Module
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -600,7 +600,7 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>🏷</span>
           <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Module + Type</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn theo từng Module × Type
+            — Available question counts by Module × Type
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -744,7 +744,7 @@ function BatchManagement() {
 
             {/* Loại đề: tự luận/coding (chấm AI) hoặc trắc nghiệm (chấm tự động) */}
             <div className="form-group" style={{ marginTop: 12 }}>
-              <label>Loại đề</label>
+              <label>Exam Type</label>
               <select
                 value={formData.exam_type}
                 onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
@@ -757,16 +757,16 @@ function BatchManagement() {
 
             {/* Chế độ ghi màn hình — chỉ admin đổi được; mod thấy nhưng bị khóa */}
             <div className="form-group" style={{ marginTop: 12 }}>
-              <label>Ghi màn hình</label>
+              <label>Screen Recording</label>
               <select
                 value={formData.record_mode}
                 disabled={!isAdmin}
                 onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
                 style={{ width: 'auto' }}
               >
-                <option value="none">Default (Không ghi)</option>
-                <option value="local">Record Local (Lưu trên máy học viên, mã hóa)</option>
-                <option value="s3">Record S3 (Lưu trên AWS S3)</option>
+                <option value="none">Default (No recording)</option>
+                <option value="local">Record Local (Save on student's machine, encrypted)</option>
+                <option value="s3">Record S3 (Save to AWS S3)</option>
               </select>
               {!isAdmin && (
                 <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
@@ -816,7 +816,7 @@ function BatchManagement() {
                               ))}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -893,13 +893,13 @@ function BatchManagement() {
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
-                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                    {t}{isUsed ? ' (selected)' : ''}
                                   </option>
                                 );
                               })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -930,7 +930,7 @@ function BatchManagement() {
                   disabled={!nextAvailableModuleType}
                   className="btn btn-secondary"
                   style={{ marginTop: 10 }}
-                  title={!nextAvailableModuleType ? 'Tất cả combinations đã được thêm' : ''}
+                  title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
                 >
                   + Add Module / Type
                 </button>
@@ -1137,9 +1137,9 @@ function BatchManagement() {
             />
           </div>
 
-          {/* Loại đề */}
+          {/* Exam type */}
           <div className="form-group">
-            <label>Loại đề</label>
+            <label>Exam Type</label>
             <select
               value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
               onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
@@ -1152,16 +1152,16 @@ function BatchManagement() {
 
           {/* Chế độ ghi màn hình — chỉ admin đổi được; mod bị khóa (backend giữ nguyên mode cũ) */}
           <div className="form-group">
-            <label>Ghi màn hình</label>
+            <label>Screen Recording</label>
             <select
               value={editingBatch.record_mode || 'none'}
               disabled={!isAdmin}
               onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
               style={{ width: 'auto' }}
             >
-              <option value="none">Default (Không ghi)</option>
-              <option value="local">Record Local (Lưu trên máy học viên, mã hóa)</option>
-              <option value="s3">Record S3 (Lưu trên AWS S3)</option>
+              <option value="none">Default (No recording)</option>
+              <option value="local">Record Local (Save on student's machine, encrypted)</option>
+              <option value="s3">Record S3 (Save to AWS S3)</option>
             </select>
             {!isAdmin && (
               <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
@@ -1207,7 +1207,7 @@ function BatchManagement() {
                               {modules.map(m => <option key={m} value={m}>{m}</option>)}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1298,13 +1298,13 @@ function BatchManagement() {
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
-                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                    {t}{isUsed ? ' (selected)' : ''}
                                   </option>
                                 );
                               })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1347,7 +1347,7 @@ function BatchManagement() {
           {/* Edit blueprint validation errors */}
           {editBlueprintErrors.length > 0 && (
             <div style={{ marginTop: 12, padding: '12px 16px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8 }}>
-              <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Blueprint vượt quá số câu hỏi có sẵn:</strong>
+              <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Blueprint exceeds available question count:</strong>
               {editBlueprintErrors.map((err, i) => (
                 <p key={i} style={{ color: '#b91c1c', margin: '4px 0 0', fontSize: 13 }}>{err}</p>
               ))}
@@ -1379,7 +1379,7 @@ function BatchManagement() {
                 }}
                 disabled={!nextAvailableModuleTypeEdit}
                 className="btn btn-secondary"
-                title={!nextAvailableModuleTypeEdit ? 'Tất cả combinations đã được thêm' : ''}
+                title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
               >
                 + Add Module / Type
               </button>

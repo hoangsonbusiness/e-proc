@@ -27,20 +27,20 @@ function AdminDashboard() {
     e.preventDefault();
     setPwError(''); setPwSuccess('');
     if (pwNew.length < 8) {
-      setPwError('Mật khẩu mới phải có ít nhất 8 ký tự.');
+      setPwError('New password must be at least 8 characters.');
       return;
     }
     if (pwNew !== pwConfirm) {
-      setPwError('Xác nhận mật khẩu không khớp.');
+      setPwError('Password confirmation does not match.');
       return;
     }
     setPwSaving(true);
     try {
       await adminApi.changePassword(pwCurrent, pwNew);
-      setPwSuccess('Đổi mật khẩu thành công.');
+      setPwSuccess('Password changed successfully.');
       setPwCurrent(''); setPwNew(''); setPwConfirm('');
     } catch (err: any) {
-      setPwError(err.response?.data?.error || 'Không đổi được mật khẩu.');
+      setPwError(err.response?.data?.error || 'Failed to change password.');
     }
     setPwSaving(false);
   };
@@ -67,7 +67,7 @@ function AdminDashboard() {
         <h1>Admin Dashboard</h1>
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn btn-secondary" onClick={() => { resetPwForm(); setShowChangePw(true); }}>
-            Đổi mật khẩu
+            Change password
           </button>
           <button className="btn btn-secondary" onClick={logout}>
             Logout
@@ -85,26 +85,26 @@ function AdminDashboard() {
         >
           <div onClick={(e) => e.stopPropagation()} className="card" style={{ maxWidth: 420, width: '90%' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h3 style={{ margin: 0 }}>Đổi mật khẩu</h3>
+              <h3 style={{ margin: 0 }}>Change password</h3>
               <button className="btn btn-secondary" style={{ fontSize: 14 }} onClick={() => setShowChangePw(false)}>✕</button>
             </div>
             <form onSubmit={handleChangePassword} style={{ display: 'grid', gap: 12 }}>
               <div className="form-group">
-                <label>Mật khẩu hiện tại</label>
+                <label>Current password</label>
                 <input type="password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} required />
               </div>
               <div className="form-group">
-                <label>Mật khẩu mới (tối thiểu 8 ký tự)</label>
+                <label>New password (minimum 8 characters)</label>
                 <input type="password" value={pwNew} onChange={(e) => setPwNew(e.target.value)} required minLength={8} />
               </div>
               <div className="form-group">
-                <label>Xác nhận mật khẩu mới</label>
+                <label>Confirm new password</label>
                 <input type="password" value={pwConfirm} onChange={(e) => setPwConfirm(e.target.value)} required />
               </div>
               {pwError && <div style={{ color: 'var(--danger)', fontSize: 14 }}>{pwError}</div>}
               {pwSuccess && <div style={{ color: 'var(--success, #16a34a)', fontSize: 14 }}>{pwSuccess}</div>}
               <button type="submit" className="btn btn-primary" disabled={pwSaving}>
-                {pwSaving ? 'Đang lưu...' : 'Đổi mật khẩu'}
+                {pwSaving ? 'Saving...' : 'Change password'}
               </button>
             </form>
           </div>

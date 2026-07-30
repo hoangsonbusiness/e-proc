@@ -854,7 +854,7 @@ function StudentExam() {
                 return (
                   <div className="quiz-options">
                     <p style={{ color: '#666', fontSize: 13, marginBottom: 10 }}>
-                      {multiple ? 'Chọn tất cả đáp án đúng (có thể nhiều lựa chọn)' : 'Chọn một đáp án'}
+                      {multiple ? 'Select all correct answers (multiple choices allowed)' : 'Select one answer'}
                     </p>
                     {(currentQuestion.options || []).map((opt) => {
                       const checked = selected.includes(opt.key);
@@ -970,14 +970,14 @@ function StudentExam() {
             maxWidth: '480px', textAlign: 'center', border: '2px solid var(--danger)'
           }}>
             <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '22px' }}>
-              🎥 Cần bật lại ghi màn hình
+              🎥 Screen recording must be restarted
             </h3>
             <p style={{ fontSize: '16px', lineHeight: '1.5', color: '#333', marginBottom: 20 }}>
-              Việc ghi màn hình đã bị gián đoạn (có thể do tải lại trang). Bạn cần chia sẻ
-              lại <b>toàn bộ màn hình</b> để tiếp tục làm bài.
+              Screen recording was interrupted (possibly by a page reload). You need to share
+              your <b>entire screen</b> again to continue the exam.
             </p>
             <button onClick={handleResumeRecording} className="btn btn-primary" style={{ width: '100%' }}>
-              Bật lại ghi màn hình
+              Restart screen recording
             </button>
           </div>
         </div>

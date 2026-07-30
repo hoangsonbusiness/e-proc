@@ -30,7 +30,7 @@ function StudentConfirm() {
     // Chỉ yêu cầu ghi màn hình khi batch bật record (local/s3). Mode 'none' → thi thẳng.
     if (recordMode !== 'none') {
       if (!examRecorder.isSupported(recordMode)) {
-        setError('Trình duyệt của bạn không hỗ trợ ghi màn hình. Vui lòng dùng Google Chrome hoặc Microsoft Edge phiên bản mới để làm bài.');
+        setError('Your browser does not support screen recording. Please use a recent version of Google Chrome or Microsoft Edge to take the exam.');
         setLoading(false);
         return;
       }
@@ -41,12 +41,12 @@ function StudentConfirm() {
       const setup = await examRecorder.requestSetup(recordMode);
       if (!setup.ok) {
         const messages: Record<string, string> = {
-          unsupported: 'Trình duyệt không hỗ trợ ghi màn hình. Vui lòng dùng Chrome hoặc Edge.',
-          no_directory: 'Bạn cần chọn thư mục để lưu video bài thi.',
-          no_screen: 'Bạn cần cho phép chia sẻ màn hình để bắt đầu bài thi.',
-          not_fullscreen: 'Vui lòng chọn chia sẻ "Toàn bộ màn hình" (Entire Screen), không phải một tab hay cửa sổ.',
+          unsupported: 'Your browser does not support screen recording. Please use Chrome or Edge.',
+          no_directory: 'You must choose a folder to save the exam video.',
+          no_screen: 'You must allow screen sharing to start the exam.',
+          not_fullscreen: 'Please share your "Entire Screen", not a single tab or window.',
         };
-        setError(messages[setup.reason || ''] || 'Không thể bắt đầu ghi màn hình. Vui lòng thử lại.');
+        setError(messages[setup.reason || ''] || 'Could not start screen recording. Please try again.');
         setLoading(false);
         return;
       }
@@ -81,7 +81,7 @@ function StudentConfirm() {
       background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
     }}>
       <div className="card" style={{ maxWidth: 400, width: '100%' }}>
-        <h2 style={{ textAlign: 'center', marginBottom: 10 }}>Xác nhận thông tin</h2>
+        <h2 style={{ textAlign: 'center', marginBottom: 10 }}>Confirm Information</h2>
         
         <div style={{ 
           background: 'var(--background)', 
@@ -90,7 +90,7 @@ function StudentConfirm() {
           marginBottom: 20 
         }}>
           <p style={{ color: 'var(--text-light)', fontSize: 14, marginBottom: 8 }}>
-            Email đăng ký:
+            Registered email:
           </p>
           <p style={{ fontSize: 18, fontWeight: 'bold' }}>
             {email}
@@ -98,17 +98,17 @@ function StudentConfirm() {
         </div>
 
         <p style={{ color: 'var(--text-light)', fontSize: 14, marginBottom: 12 }}>
-          Vui lòng xác nhận email của bạn trước khi bắt đầu làm bài thi.
+          Please confirm your email before starting the exam.
         </p>
 
         {recordMode !== 'none' && (
           <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
-            ⚠️ Bài thi này <b>bắt buộc ghi màn hình</b>. Khi bấm bắt đầu, bạn sẽ được yêu cầu
-            {recordMode === 'local' && <> chọn <b>thư mục lưu video</b> và</>} chia sẻ <b>Toàn bộ màn hình</b> (Entire Screen).
+            ⚠️ This exam <b>requires screen recording</b>. When you start, you will be asked to
+            {recordMode === 'local' && <> choose a <b>folder to save the video</b> and</>} share your <b>Entire Screen</b>.
             {recordMode === 'local'
-              ? <> Video được lưu vào thư mục bạn chọn. Sau khi thi xong, hãy commit thư mục này lên GitLab theo hướng dẫn.</>
-              : <> Video được lưu tự động lên hệ thống trong lúc thi.</>}
-            <br />Vui lòng dùng <b>Google Chrome</b> hoặc <b>Microsoft Edge</b>. Nếu tự dừng chia sẻ giữa chừng, bài thi sẽ bị khóa.
+              ? <> The video is saved to the folder you choose. After the exam, commit this folder to GitLab as instructed.</>
+              : <> The video is uploaded automatically to the system during the exam.</>}
+            <br />Please use <b>Google Chrome</b> or <b>Microsoft Edge</b>. If you stop sharing during the exam, it will be locked.
           </div>
         )}
 
@@ -124,7 +124,7 @@ function StudentConfirm() {
           className="btn btn-primary"
           style={{ width: '100%', marginTop: 8 }}
         >
-          {loading ? 'Đang chuẩn bị ghi màn hình...' : 'Bắt đầu làm bài'}
+          {loading ? 'Preparing screen recording...' : 'Start Exam'}
         </button>
 
         <button 
@@ -135,7 +135,7 @@ function StudentConfirm() {
           className="btn btn-secondary" 
           style={{ width: '100%', marginTop: 10 }}
         >
-          Huỷ
+          Cancel
         </button>
       </div>
     </div>

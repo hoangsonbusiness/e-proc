@@ -785,7 +785,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       },
       // ─── Frontend: Bootstrap 5 Utility Classes ────────────────────────────
       {
-        group: '🎨 Bootstrap 5 — Utility Classes (gõ tên class)',
+        group: '🎨 Bootstrap 5 — Utility Classes (type the class name)',
         rows: [
           ['d-flex / d-grid / d-none / d-block', 'Display utilities'],
           ['justify-content-{start|end|center|between|evenly}', 'Flex justify-content'],
@@ -1187,7 +1187,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
             <div className="code-editor-guide-header">
               <strong>📖 IntelliSense Prefix Reference</strong>
               <p className="code-editor-guide-desc">
-                Gõ đúng <strong>prefix</strong> bên dưới rồi nhấn <kbd>Ctrl</kbd>+<kbd>Space</kbd> để xem gợi ý.
+                Type the correct <strong>prefix</strong> below, then press <kbd>Ctrl</kbd>+<kbd>Space</kbd> to see suggestions.
                 <br />
                 <strong>Java:</strong> <code>str.</code>, <code>list.</code>, <code>ldt.</code>, <code>ScannerStdin</code>, <code>JDBC Connect</code>...
                 <br />

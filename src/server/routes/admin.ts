@@ -510,7 +510,7 @@ router.post('/questions/quiz/import', upload.single('file'), async (req: Request
         }
       }
       if (options.length < 2) {
-        errors.push(`ID ${id}: cần ít nhất 2 lựa chọn`);
+        errors.push(`ID ${id}: needs at least 2 options`);
         continue;
       }
 
@@ -523,15 +523,15 @@ router.post('/questions/quiz/import', upload.single('file'), async (req: Request
       const availableKeys = options.map((o) => o.key);
       const invalidCorrect = correct.filter((c: string) => !availableKeys.includes(c));
       if (correct.length === 0) {
-        errors.push(`ID ${id}: thiếu đáp án đúng (cột Correct)`);
+        errors.push(`ID ${id}: missing correct answer (Correct column)`);
         continue;
       }
       if (invalidCorrect.length > 0) {
-        errors.push(`ID ${id}: đáp án "${invalidCorrect.join(',')}" không có trong các lựa chọn`);
+        errors.push(`ID ${id}: answer "${invalidCorrect.join(',')}" is not among the options`);
         continue;
       }
       if (type === 'SingleChoice' && correct.length !== 1) {
-        errors.push(`ID ${id}: SingleChoice phải có đúng 1 đáp án, đang có ${correct.length}`);
+        errors.push(`ID ${id}: SingleChoice must have exactly 1 correct answer, found ${correct.length}`);
         continue;
       }
 

@@ -201,14 +201,14 @@ function QuestionBank() {
             style={{ width: 'auto' }}
           />
           <button onClick={() => handleImport('essay')} disabled={!file || loading} className="btn btn-primary">
-            {loading ? 'Importing...' : 'Import Tự luận'}
+            {loading ? 'Importing...' : 'Import Essay'}
           </button>
           <button onClick={() => handleImport('quiz')} disabled={!file || loading} className="btn btn-secondary">
-            {loading ? 'Importing...' : 'Import Quiz (Trắc nghiệm)'}
+            {loading ? 'Importing...' : 'Import Quiz'}
           </button>
         </div>
         <p style={{ color: '#888', fontSize: 12, marginTop: -8 }}>
-          Quiz template (header 1 dòng): ID | Type (SingleChoice/MultipleChoice) | Level | Topic | Question Sample | Option A…F | Correct (VD "A" hoặc "A,C,D") | Score
+          Quiz template (single-row header): ID | Type (SingleChoice/MultipleChoice) | Level | Topic | Question Sample | Option A…F | Correct (e.g. "A" or "A,C,D") | Score
         </p>
         {message && <p className={message.includes('Error') || message.includes('Lỗi') ? 'error' : 'success'}>{message}</p>}
       </div>
@@ -256,7 +256,7 @@ function QuestionBank() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>
-              Loại:
+              Type:
             </label>
             <select
               id="category-filter"
@@ -264,9 +264,9 @@ function QuestionBank() {
               onChange={e => { setSelectedCategory(e.target.value as 'all' | 'essay' | 'quiz'); setCurrentPage(1); setSelectedIds(new Set()); }}
               style={{ fontSize: 13, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', minWidth: 140 }}
             >
-              <option value="all">Tất cả</option>
-              <option value="essay">Tự luận / Coding</option>
-              <option value="quiz">Quiz (Trắc nghiệm)</option>
+              <option value="all">All</option>
+              <option value="essay">Essay / Coding</option>
+              <option value="quiz">Quiz</option>
             </select>
           </div>
 

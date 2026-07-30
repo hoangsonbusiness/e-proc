@@ -116,7 +116,7 @@ function Results() {
                       {/* Mật khẩu giải nén video record (mode local). HV không thấy — chỉ admin. */}
                       {r.student.recording_password && (
                         <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-light)' }}>
-                          🔑 Pass giải nén:{' '}
+                          🔑 Decryption password:{' '}
                           <code style={{
                             background: '#f1f5f9', padding: '1px 5px', borderRadius: 3,
                             fontFamily: 'monospace', userSelect: 'all', wordBreak: 'break-all',
@@ -175,7 +175,7 @@ function Results() {
                                 color: 'var(--danger)', borderRadius: 4, padding: '2px 8px',
                               }}
                             >
-                              🔍 Xem chi tiết ({r.violation_events.length})
+                              🔍 View details ({r.violation_events.length})
                             </button>
                           )}
                         </div>
@@ -311,18 +311,18 @@ function Results() {
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <h3 style={{ margin: 0 }}>Chi tiết vi phạm — {violationDetail.email}</h3>
+              <h3 style={{ margin: 0 }}>Violation details — {violationDetail.email}</h3>
               <button onClick={() => setViolationDetail(null)} className="btn" style={{ fontSize: 14 }}>✕</button>
             </div>
             {violationDetail.events.length === 0 ? (
-              <p style={{ color: 'var(--text-light)' }}>Không có bản ghi chi tiết.</p>
+              <p style={{ color: 'var(--text-light)' }}>No detailed records.</p>
             ) : (
               violationDetail.events.map((ev: any, i: number) => (
                 <div key={i} style={{ marginBottom: 12, padding: 12, background: 'var(--background, #f8f8f8)', borderRadius: 6 }}>
                   <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 13, marginBottom: ev.content_preview ? 8 : 0 }}>
                     <span><strong>🟠 {ev.type}</strong></span>
                     <span style={{ color: 'var(--text-light)' }}>{new Date(ev.created_at).toLocaleString()}</span>
-                    {ev.text_length != null && <span>{ev.text_length} ký tự</span>}
+                    {ev.text_length != null && <span>{ev.text_length} chars</span>}
                     {ev.question_id && <span>Q: {ev.question_id}</span>}
                   </div>
                   {ev.content_preview && (

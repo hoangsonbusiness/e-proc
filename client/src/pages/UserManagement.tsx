@@ -45,18 +45,18 @@ function UserManagement() {
       setRole('mod');
       await loadUsers();
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Không tạo được user');
+      setError(err.response?.data?.error || 'Failed to create user');
     }
     setSaving(false);
   };
 
   const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Xóa user "${name}"?`)) return;
+    if (!confirm(`Delete user "${name}"?`)) return;
     try {
       await adminApi.deleteUser(id);
       await loadUsers();
     } catch (err: any) {
-      alert(err.response?.data?.error || 'Không xóa được user');
+      alert(err.response?.data?.error || 'Failed to delete user');
     }
   };
 
@@ -65,23 +65,23 @@ function UserManagement() {
   return (
     <div className="container">
       <div className="header">
-        <h1>Quản lý User</h1>
+        <h1>User Management</h1>
         <Link to="/admin/dashboard" className="btn btn-secondary">← Dashboard</Link>
       </div>
 
       <div className="card" style={{ marginBottom: 24 }}>
-        <h3 style={{ marginBottom: 16 }}>Tạo user mới</h3>
+        <h3 style={{ marginBottom: 16 }}>Create new user</h3>
         <form onSubmit={handleCreate} style={{ display: 'grid', gap: 12, maxWidth: 420 }}>
           <div className="form-group">
-            <label>Tên đăng nhập</label>
+            <label>Username</label>
             <input value={username} onChange={(e) => setUsername(e.target.value)} required />
           </div>
           <div className="form-group">
-            <label>Mật khẩu (tối thiểu 6 ký tự)</label>
+            <label>Password (minimum 6 characters)</label>
             <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} />
           </div>
           <div className="form-group">
-            <label>Vai trò</label>
+            <label>Role</label>
             <select value={role} onChange={(e) => setRole(e.target.value as 'admin' | 'mod')}>
               <option value="mod">Mod (no user management, cannot enable screen recording)</option>
               <option value="admin">Admin (full access)</option>
@@ -89,21 +89,21 @@ function UserManagement() {
           </div>
           {error && <div style={{ color: 'var(--danger)', fontSize: 14 }}>{error}</div>}
           <button type="submit" className="btn btn-primary" disabled={saving}>
-            {saving ? 'Đang tạo...' : 'Tạo user'}
+            {saving ? 'Creating...' : 'Create user'}
           </button>
         </form>
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 16 }}>Danh sách user</h3>
+        <h3 style={{ marginBottom: 16 }}>User list</h3>
         <table>
           <thead>
             <tr>
               <th>ID</th>
-              <th>Tên đăng nhập</th>
-              <th>Vai trò</th>
-              <th>Ngày tạo</th>
-              <th>Thao tác</th>
+              <th>Username</th>
+              <th>Role</th>
+              <th>Created at</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -120,16 +120,16 @@ function UserManagement() {
                     {u.role}
                   </span>
                 </td>
-                <td>{u.created_at ? new Date(u.created_at).toLocaleString('vi-VN') : '-'}</td>
+                <td>{u.created_at ? new Date(u.created_at).toLocaleString('en-US') : '-'}</td>
                 <td>
                   <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={() => handleDelete(u.id, u.username)}>
-                    Xóa
+                    Delete
                   </button>
                 </td>
               </tr>
             ))}
             {users.length === 0 && (
-              <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-light)' }}>Chưa có user</td></tr>
+              <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-light)' }}>No users yet</td></tr>
             )}
           </tbody>
         </table>
