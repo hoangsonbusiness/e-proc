@@ -1,13 +1,14 @@
-import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
-import { detectLanguage } from '../components/CodeEditor';
+import CodeEditor, { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
-// Lazy-load Monaco Editor to avoid bloating the initial bundle
-const CodeEditor = lazy(() => import('../components/CodeEditor'));
+// Static import: `detectLanguage` was already imported statically above, so Monaco was
+// always in the main bundle — lazy() gave no real split. Static import also avoids the
+// dynamic import() string that the obfuscator mangled (broke Monaco loading in production).
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
