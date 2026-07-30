@@ -67,7 +67,7 @@ async function initPostgres() {
         AND conname = 'question_bank_type_check'
     `);
 
-    const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text])))`;
+    const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text, 'SingleChoice'::text, 'MultipleChoice'::text])))`;
     const existing = constraintCheck.rows[0];
 
     if (!existing) {
@@ -76,7 +76,7 @@ async function initPostgres() {
       await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
-          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
     } else if (existing.condef !== targetDef) {
       // Constraint tồn tại nhưng định nghĩa cũ → DROP rồi ADD mới
@@ -85,7 +85,7 @@ async function initPostgres() {
       await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
-          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
     } else {
       console.log('[DB] question_bank_type_check: already up-to-date, skipping');
@@ -97,8 +97,20 @@ async function initPostgres() {
     console.error('[DB] question_bank_type_check migration error:', err);
   }
 
+  // Migration: cột quiz (SingleChoice/MultipleChoice). Câu tự luận cũ để NULL.
+  // options: JSON [{"key":"A","text":"..."}], correct_answers: JSON ["A","C"], score mặc định 1.
+  const qbQuizCols = [
+    { col: 'options', def: 'TEXT' },
+    { col: 'correct_answers', def: 'TEXT' },
+    { col: 'score', def: 'REAL DEFAULT 1' },
+  ];
+  for (const { col, def } of qbQuizCols) {
+    try {
+      await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+    } catch (_) { /* already exists */ }
+  }
   console.log('[DB] question_bank ready');
-  
+
 await client.query(`
     CREATE TABLE IF NOT EXISTS batches (
       id SERIAL PRIMARY KEY,
@@ -114,6 +126,10 @@ await client.query(`
   // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
   try {
     await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
+  } catch (_) { /* already exists */ }
+  // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
+  try {
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
   } catch (_) { /* already exists */ }
   
   const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
@@ -161,6 +177,10 @@ await client.query(`
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: thứ tự option đã xáo cho riêng SV (quiz). JSON ["C","A","F","B"]. Câu tự luận để NULL.
+  try {
+    await client.query('ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS option_order TEXT');
+  } catch (_) { /* already exists */ }
   console.log('[DB] exam_questions ready');
   
   await client.query(`
@@ -366,10 +386,20 @@ function initSqlite() {
     if (!batchCols.includes('record_enabled')) {
       sqliteDb.exec('ALTER TABLE batches ADD COLUMN record_enabled INTEGER DEFAULT 0');
     }
+    if (!batchCols.includes('exam_type')) {
+      sqliteDb.exec("ALTER TABLE batches ADD COLUMN exam_type TEXT DEFAULT 'essay'");
+    }
     const adminCols = (sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[]).map(c => c.name);
     if (!adminCols.includes('role')) {
       sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
     }
+    // Migration: cột quiz cho question_bank + option_order cho exam_questions (SQLite DB cũ)
+    const qbCols = (sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[]).map(c => c.name);
+    if (!qbCols.includes('options')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN options TEXT');
+    if (!qbCols.includes('correct_answers')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN correct_answers TEXT');
+    if (!qbCols.includes('score')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN score REAL DEFAULT 1');
+    const eqCols = (sqliteDb.prepare("PRAGMA table_info(exam_questions)").all() as { name: string }[]).map(c => c.name);
+    if (!eqCols.includes('option_order')) sqliteDb.exec('ALTER TABLE exam_questions ADD COLUMN option_order TEXT');
 
     console.log('[DB] All SQLite tables initialized');
   } catch (err) {

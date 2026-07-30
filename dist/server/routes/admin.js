@@ -365,6 +365,140 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Import ngân hàng câu hỏi QUIZ (SingleChoice / MultipleChoice) từ Excel.
+// Template MỚI (header 1 dòng): ID | Type | Level | Topic | Question Sample |
+//   Option A | Option B | Option C | Option D | Option E | Option F | Correct | Score
+// Correct: chữ cái (A) cho single; nhiều chữ cách nhau phẩy (A,C,D) cho multiple.
+// Score: điểm câu (mặc định 1). Option để trống → câu ít lựa chọn hơn.
+router.post('/questions/quiz/import', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+        const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const sheetName = workbook.SheetNames[0];
+        const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 });
+        if (rawData.length < 2) {
+            return res.status(400).json({ error: 'Invalid file format' });
+        }
+        const header = rawData[0];
+        const colIndex = {};
+        header.forEach((col, i) => {
+            if (col)
+                colIndex[col.toString().trim()] = i;
+        });
+        const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
+        const validLevels = ['Easy', 'Medium', 'Hard'];
+        const validTypes = ['SingleChoice', 'MultipleChoice'];
+        const errors = [];
+        let imported = 0;
+        let updated = 0;
+        let skipped = 0;
+        const get = (row, name) => colIndex[name] !== undefined ? row[colIndex[name]] : undefined;
+        for (let i = 1; i < rawData.length; i++) {
+            const row = rawData[i];
+            if (!row || row.length === 0)
+                continue;
+            const id = get(row, 'ID');
+            const type = get(row, 'Type')?.toString().trim();
+            const level = get(row, 'Level')?.toString().trim();
+            const module = (get(row, 'Topic') ?? get(row, 'Module'))?.toString();
+            const question = get(row, 'Question Sample')?.toString();
+            if (!id || !type || !level || !module || !question) {
+                skipped++;
+                continue;
+            }
+            if (!validLevels.includes(level)) {
+                errors.push(`Invalid Level "${level}" for ID ${id}`);
+                continue;
+            }
+            if (!validTypes.includes(type)) {
+                errors.push(`Invalid Type "${type}" for ID ${id} (expected SingleChoice/MultipleChoice)`);
+                continue;
+            }
+            // Đọc các option A–F, bỏ qua ô trống
+            const options = [];
+            for (const key of OPTION_KEYS) {
+                const text = get(row, `Option ${key}`);
+                if (text !== undefined && text !== null && text.toString().trim() !== '') {
+                    options.push({ key, text: text.toString() });
+                }
+            }
+            if (options.length < 2) {
+                errors.push(`ID ${id}: cần ít nhất 2 lựa chọn`);
+                continue;
+            }
+            // Correct: "A" hoặc "A,C,D" → mảng key, phải nằm trong options
+            const correctRaw = get(row, 'Correct')?.toString() || '';
+            const correct = correctRaw
+                .split(',')
+                .map((s) => s.trim().toUpperCase())
+                .filter((s) => s.length > 0);
+            const availableKeys = options.map((o) => o.key);
+            const invalidCorrect = correct.filter((c) => !availableKeys.includes(c));
+            if (correct.length === 0) {
+                errors.push(`ID ${id}: thiếu đáp án đúng (cột Correct)`);
+                continue;
+            }
+            if (invalidCorrect.length > 0) {
+                errors.push(`ID ${id}: đáp án "${invalidCorrect.join(',')}" không có trong các lựa chọn`);
+                continue;
+            }
+            if (type === 'SingleChoice' && correct.length !== 1) {
+                errors.push(`ID ${id}: SingleChoice phải có đúng 1 đáp án, đang có ${correct.length}`);
+                continue;
+            }
+            const scoreRaw = get(row, 'Score');
+            const score = scoreRaw !== undefined && scoreRaw !== '' && !isNaN(Number(scoreRaw))
+                ? Number(scoreRaw)
+                : 1;
+            const normalizedModule = normalizeUnicode(module);
+            const optionsJson = JSON.stringify(options);
+            const correctJson = JSON.stringify(correct);
+            const existing = await db.query('SELECT id FROM question_bank WHERE id = $1', [id]);
+            if (existing.rows.length > 0)
+                updated++;
+            else
+                imported++;
+            // rubric_* là NOT NULL trong schema → điền '' cho câu quiz
+            if (USE_SQLITE) {
+                await db.query(`
+          INSERT OR REPLACE INTO question_bank
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
+          VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+            }
+            else {
+                await db.query(`
+          INSERT INTO question_bank
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
+          VALUES ($1, $2, $3, $4, $5, '', '', '', $6, $7, $8, CURRENT_TIMESTAMP)
+          ON CONFLICT (id) DO UPDATE SET
+            type = EXCLUDED.type,
+            level = EXCLUDED.level,
+            module = EXCLUDED.module,
+            question_sample = EXCLUDED.question_sample,
+            options = EXCLUDED.options,
+            correct_answers = EXCLUDED.correct_answers,
+            score = EXCLUDED.score,
+            updated_at = CURRENT_TIMESTAMP
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+            }
+        }
+        console.log(`[QuizImport] Imported: ${imported}, Updated: ${updated}, Skipped: ${skipped}`);
+        res.json({
+            success: true,
+            imported,
+            updated,
+            skipped,
+            errors: errors.length > 0 ? errors : undefined,
+        });
+    }
+    catch (error) {
+        console.error('Quiz import error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 router.get('/questions', async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM question_bank ORDER BY module, level');
@@ -502,16 +636,17 @@ router.delete('/questions/:id', async (req, res) => {
 });
 router.post('/batches', async (req, res) => {
     try {
-        const { name, start_time, end_time, duration, blueprint, record_enabled } = req.body;
-        console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint });
+        const { name, start_time, end_time, duration, blueprint, record_enabled, exam_type } = req.body;
+        console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type });
+        const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
         if (!name || !start_time || !end_time || !duration) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
         // Support both legacy array format and new { blueprintMode, items } object format
         const { items: blueprintItems } = parseBlueprintCompat(blueprint);
         const totalQuestions = blueprintItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
-        if (totalQuestions < 1 || totalQuestions > 20) {
-            return res.status(400).json({ error: 'Total questions must be between 1 and 20' });
+        if (totalQuestions < 1 || totalQuestions > 100) {
+            return res.status(400).json({ error: 'Total questions must be between 1 and 100' });
         }
         const blueprintJson = JSON.stringify(blueprint);
         console.log('[CreateBatch] Blueprint JSON:', blueprintJson);
@@ -523,15 +658,15 @@ router.post('/batches', async (req, res) => {
         let result;
         if (USE_SQLITE) {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, exam_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, examType]);
         }
         else {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled)
-        VALUES ($1, $2, $3, $4, $5, $6)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, exam_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, examType]);
         }
         console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
         res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -581,7 +716,8 @@ router.get('/batches/:id', async (req, res) => {
 router.put('/batches/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, start_time, end_time, duration, blueprint, record_enabled } = req.body;
+        const { name, start_time, end_time, duration, blueprint, record_enabled, exam_type } = req.body;
+        const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
         const startUTC = toStorageTime(start_time);
         const endUTC = toStorageTime(end_time);
         // Cờ record: admin dùng giá trị client gửi; mod KHÔNG đổi được → giữ nguyên cờ cũ.
@@ -595,15 +731,15 @@ router.put('/batches/:id', async (req, res) => {
         }
         if (USE_SQLITE) {
             await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, examType, parseInt(id)]);
         }
         else {
             await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, examType, parseInt(id)]);
         }
         res.json({ success: true });
     }

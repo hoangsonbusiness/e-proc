@@ -86,6 +86,7 @@ function BatchManagement() {
     blueprint: [] as BlueprintItem[],
     blueprintByType: [] as BlueprintItemByType[],
     record_enabled: false,
+    exam_type: 'essay' as 'essay' | 'quiz',
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
@@ -372,6 +373,7 @@ function BatchManagement() {
         duration: editingBatch.duration,
         blueprint: blueprintPayload,
         record_enabled: editingBatch.record_enabled,
+        exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
       });
       loadBatches();
       setEditingBatch(null);
@@ -391,8 +393,8 @@ function BatchManagement() {
     const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
     const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
     console.log('[BatchManagement] Total questions:', total);
-    if (total < 1 || total > 20) {
-      setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
+    if (total < 1 || total > 100) {
+      setFeasibilityErrors([`Total questions must be between 1 and 100. Current: ${total}`]);
       setLoading(false);
       return;
     }
@@ -421,11 +423,12 @@ function BatchManagement() {
         duration: formData.duration,
         blueprint: blueprintPayload,
         record_enabled: formData.record_enabled,
+        exam_type: formData.exam_type,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_enabled: false });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_enabled: false, exam_type: 'essay' });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -739,6 +742,19 @@ function BatchManagement() {
               </div>
             </div>
 
+            {/* Loại đề: tự luận/coding (chấm AI) hoặc trắc nghiệm (chấm tự động) */}
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label>Loại đề</label>
+              <select
+                value={formData.exam_type}
+                onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
+                style={{ width: 'auto' }}
+              >
+                <option value="essay">Tự luận / Coding</option>
+                <option value="quiz">Trắc nghiệm (Quiz)</option>
+              </select>
+            </div>
+
             {/* Ghi màn hình lên S3 — chỉ admin bật được; mod thấy nhưng bị khóa */}
             <div className="form-group" style={{ marginTop: 12 }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: isAdmin ? 'pointer' : 'not-allowed' }}>
@@ -756,7 +772,7 @@ function BatchManagement() {
               )}
             </div>
 
-            <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/20)</h4>
+            <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/100)</h4>
 
             {/* Blueprint Mode Toggle */}
             <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
@@ -935,7 +951,7 @@ function BatchManagement() {
               disabled={
                 loading ||
                 totalQuestions < 1 ||
-                totalQuestions > 20 ||
+                totalQuestions > 100 ||
                 (blueprintMode === 'module' && modules.length === 0) ||
                 (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
                 createBlueprintErrors.length > 0
@@ -1118,6 +1134,19 @@ function BatchManagement() {
               min={1}
               required
             />
+          </div>
+
+          {/* Loại đề */}
+          <div className="form-group">
+            <label>Loại đề</label>
+            <select
+              value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
+              onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
+              style={{ width: 'auto' }}
+            >
+              <option value="essay">Tự luận / Coding</option>
+              <option value="quiz">Trắc nghiệm (Quiz)</option>
+            </select>
           </div>
 
           {/* Ghi màn hình lên S3 — chỉ admin đổi được; mod bị khóa (backend giữ nguyên cờ cũ) */}

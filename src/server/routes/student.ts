@@ -17,6 +17,49 @@ const toGMT7 = (utcDate: Date): Date => {
   return new Date(utcDate.getTime() + 7 * 60 * 60 * 1000);
 };
 
+// Hoàn tất nộp bài: quiz → chấm tự động ngay (bỏ qua ai_queue); essay → đẩy hàng đợi AI.
+// Dùng chung cho cả nộp thủ công lẫn auto-submit (timeout / vắng mặt quá lâu).
+// Không tự set status='submitted' — caller đảm nhiệm việc đó.
+async function finalizeSubmission(studentId: number): Promise<void> {
+  const batchType = await db.query(`
+    SELECT b.exam_type FROM students s JOIN batches b ON s.batch_id = b.id WHERE s.id = ?
+  `, [studentId]);
+  const examType = batchType.rows[0]?.exam_type || 'essay';
+
+  if (examType === 'quiz') {
+    const quizRows = await db.query(`
+      SELECT eq.id, eq.answer, q.type, q.correct_answers, q.score
+      FROM exam_questions eq
+      JOIN question_bank q ON eq.question_id = q.id
+      WHERE eq.student_id = ?
+    `, [studentId]);
+
+    const norm = (arr: string[]) => [...new Set(arr.map((s) => String(s).trim().toUpperCase()))].sort();
+
+    for (const row of quizRows.rows) {
+      let correct: string[] = [];
+      try { correct = row.correct_answers ? JSON.parse(row.correct_answers) : []; } catch (_) {}
+      let chosen: string[] = [];
+      try { chosen = row.answer ? JSON.parse(row.answer) : []; } catch (_) {
+        if (typeof row.answer === 'string' && row.answer.trim()) chosen = [row.answer.trim()];
+      }
+      const c = norm(correct);
+      const a = norm(chosen);
+      const isCorrect = c.length > 0 && c.length === a.length && c.every((k, i) => k === a[i]);
+      const gained = isCorrect ? (row.score != null ? Number(row.score) : 1) : 0;
+      await db.query(
+        'UPDATE exam_questions SET ai_score = ?, ai_feedback = ? WHERE id = ?',
+        [gained, isCorrect ? 'Correct' : 'Incorrect', row.id]
+      );
+    }
+  } else {
+    const examQuestionsResult = await db.query('SELECT id FROM exam_questions WHERE student_id = ?', [studentId]);
+    for (const eq of examQuestionsResult.rows) {
+      cache.addToQueue(eq.id, studentId);
+    }
+  }
+}
+
 router.post('/verify', async (req: Request, res: Response) => {
   try {
     const { access_code } = req.body;
@@ -150,37 +193,65 @@ router.post('/exam/start', async (req: Request, res: Response) => {
       }
     }
 
-    const batchResult = await db.query('SELECT blueprint FROM batches WHERE id = ?', [student.batch_id]);
+    const batchResult = await db.query('SELECT blueprint, exam_type FROM batches WHERE id = ?', [student.batch_id]);
     const batch = batchResult.rows[0];
     const blueprint = batch?.blueprint
       ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint)
       : [];
+    const examType = batch?.exam_type === 'quiz' ? 'quiz' : 'essay';
 
-    const questionIds: string[] = [];
+    // Batch quiz chỉ lấy câu trắc nghiệm; batch essay chỉ lấy câu tự luận/coding.
+    // Tránh lôi nhầm câu khác loại khi một module chứa lẫn cả hai (blueprint mode 'module').
+    const typeFilterSql = examType === 'quiz'
+      ? `AND type IN ('SingleChoice', 'MultipleChoice')`
+      : `AND type NOT IN ('SingleChoice', 'MultipleChoice')`;
+
+    // Mỗi câu kèm type + options (để sinh thứ tự đáp án xáo cho câu quiz)
+    const picked: { id: string; type: string; options: string | null }[] = [];
 
     for (const item of blueprint) {
       for (const level of ['Easy', 'Medium', 'Hard'] as const) {
         const count = item[level.toLowerCase() as 'easy' | 'medium' | 'hard'];
         if (count > 0) {
           const availableResult = await db.query(`
-            SELECT id FROM question_bank
-            WHERE module = ? AND level = ?
+            SELECT id, type, options FROM question_bank
+            WHERE module = ? AND level = ? ${typeFilterSql}
             ORDER BY RANDOM()
             LIMIT ?
           `, [item.module, level, count]);
 
           for (const q of availableResult.rows) {
-            questionIds.push(q.id);
+            picked.push({ id: q.id, type: q.type, options: q.options ?? null });
           }
         }
       }
     }
 
-    for (let i = 0; i < questionIds.length; i++) {
+    // Fisher–Yates: xáo thứ tự CÂU cho riêng học viên này
+    for (let i = picked.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [picked[i], picked[j]] = [picked[j], picked[i]];
+    }
+
+    for (let i = 0; i < picked.length; i++) {
+      const q = picked[i];
+      // Câu quiz (Single/Multiple): xáo thứ tự các key option và persist để chấm/F5 ổn định
+      let optionOrder: string | null = null;
+      if ((q.type === 'SingleChoice' || q.type === 'MultipleChoice') && q.options) {
+        try {
+          const opts = JSON.parse(q.options) as { key: string }[];
+          const keys = opts.map((o) => o.key);
+          for (let a = keys.length - 1; a > 0; a--) {
+            const b = Math.floor(Math.random() * (a + 1));
+            [keys[a], keys[b]] = [keys[b], keys[a]];
+          }
+          optionOrder = JSON.stringify(keys);
+        } catch (_) { /* options lỗi → để NULL, client hiển thị theo thứ tự gốc */ }
+      }
       await db.query(`
-        INSERT INTO exam_questions (student_id, question_id, question_order)
-        VALUES (?, ?, ?)
-      `, [student_id, questionIds[i], i + 1]);
+        INSERT INTO exam_questions (student_id, question_id, question_order, option_order)
+        VALUES (?, ?, ?, ?)
+      `, [student_id, q.id, i + 1, optionOrder]);
     }
 
     // Ghi thời điểm bắt đầu và deadline (chỉ set khi chưa có)
@@ -192,7 +263,7 @@ router.post('/exam/start', async (req: Request, res: Response) => {
       [now.toISOString(), deadline.toISOString(), student_id]
     );
 
-    res.json({ success: true, questions_count: questionIds.length });
+    res.json({ success: true, questions_count: picked.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -250,13 +321,7 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
         console.log('[getQuestions] Deadline passed, auto-submitting student:', studentId);
         await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
         await cache.flushAnswers();
-        const examQuestionsResult = await db.query(
-          'SELECT id FROM exam_questions WHERE student_id = ?',
-          [parseInt(studentId)]
-        );
-        for (const eq of examQuestionsResult.rows) {
-          cache.addToQueue(eq.id, parseInt(studentId));
-        }
+        await finalizeSubmission(parseInt(studentId));
         return res.status(410).json({
           error: 'Time is up. Your exam has been automatically submitted.',
           reason: 'timeout'
@@ -273,13 +338,7 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
         console.log('[getQuestions] Student absent too long (%ds), auto-submitting:', Math.round(absentSeconds));
         await db.query("UPDATE students SET status = 'submitted', disconnected_at = NULL WHERE id = ?", [parseInt(studentId)]);
         await cache.flushAnswers();
-        const examQuestionsResult = await db.query(
-          'SELECT id FROM exam_questions WHERE student_id = ?',
-          [parseInt(studentId)]
-        );
-        for (const eq of examQuestionsResult.rows) {
-          cache.addToQueue(eq.id, parseInt(studentId));
-        }
+        await finalizeSubmission(parseInt(studentId));
         return res.status(410).json({
           error: 'You were absent for more than 2 minutes. Your exam has been automatically submitted.',
           reason: 'absent_too_long'
@@ -297,18 +356,41 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
     }
     // === END GUARD ===
 
+    // Lưu ý bảo mật: KHÔNG select q.correct_answers — đáp án đúng không bao giờ rời server.
     const result = await db.query(`
-      SELECT eq.question_order, eq.answer, q.id, q.type, q.level, q.module, q.question_sample
+      SELECT eq.question_order, eq.answer, eq.option_order, q.id, q.type, q.level, q.module, q.question_sample, q.options
       FROM exam_questions eq
       JOIN question_bank q ON eq.question_id = q.id
       WHERE eq.student_id = ?
       ORDER BY eq.question_order
     `, [parseInt(studentId)]);
 
-    const questions = result.rows.map((q: any) => ({
-      ...q,
-      answer: q.answer || ''
-    }));
+    const questions = result.rows.map((q: any) => {
+      const isQuiz = q.type === 'SingleChoice' || q.type === 'MultipleChoice';
+      let options: { key: string; text: string }[] | undefined;
+      if (isQuiz && q.options) {
+        try {
+          const parsed = JSON.parse(q.options) as { key: string; text: string }[];
+          const order: string[] | null = q.option_order ? JSON.parse(q.option_order) : null;
+          if (order && order.length) {
+            const byKey = new Map(parsed.map((o) => [o.key, o]));
+            options = order.map((k) => byKey.get(k)).filter(Boolean) as { key: string; text: string }[];
+          } else {
+            options = parsed;
+          }
+        } catch (_) { options = undefined; }
+      }
+      return {
+        question_order: q.question_order,
+        id: q.id,
+        type: q.type,
+        level: q.level,
+        module: q.module,
+        question_sample: q.question_sample,
+        answer: q.answer || '',
+        ...(options ? { options } : {}),
+      };
+    });
 
     res.json({ questions, time_remaining });
   } catch (error: any) {
@@ -382,11 +464,7 @@ router.post('/exam/submit', studentAuthMiddleware, async (req: Request, res: Res
 
     await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
 
-    const examQuestionsResult = await db.query('SELECT id FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
-
-    for (const eq of examQuestionsResult.rows) {
-      cache.addToQueue(eq.id, parseInt(studentId));
-    }
+    await finalizeSubmission(parseInt(studentId));
 
     res.json({ success: true, message: 'Exam submitted. Results will be available shortly.' });
   } catch (error: any) {

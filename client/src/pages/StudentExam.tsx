@@ -15,6 +15,11 @@ const VIEWPORT_SHRINK_THRESHOLD_PX = 80;
 const VIEWPORT_CHECK_INTERVAL_MS = 1500;
 const VIEWPORT_SUSTAIN_POLLS = 2;
 
+interface QuizOption {
+  key: string;
+  text: string;
+}
+
 interface Question {
   id: string;
   question_order: number;
@@ -23,6 +28,7 @@ interface Question {
   level: string;
   type: string;
   answer?: string;
+  options?: QuizOption[];
 }
 
 type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
@@ -686,6 +692,27 @@ function StudentExam() {
     }, 2000);
   }, []);
 
+  // Chọn/bỏ chọn đáp án trắc nghiệm. answer được lưu dưới dạng JSON mảng key, VD ["A","C"].
+  // Single: thay thế; Multiple: toggle. Lưu ngay (debounce ngắn) qua studentApi.saveAnswer.
+  const toggleQuizAnswer = useCallback((order: number, key: string, multiple: boolean) => {
+    setAnswers(prev => {
+      let current: string[] = [];
+      try { current = prev[order] ? JSON.parse(prev[order]) : []; } catch (_) { current = []; }
+      let next: string[];
+      if (multiple) {
+        next = current.includes(key) ? current.filter(k => k !== key) : [...current, key];
+      } else {
+        next = [key];
+      }
+      const serialized = JSON.stringify(next);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        studentApi.saveAnswer(order, serialized).catch(console.error);
+      }, 500);
+      return { ...prev, [order]: serialized };
+    });
+  }, []);
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -812,29 +839,71 @@ function StudentExam() {
           />
           <div className="form-group">
             <label>Your Answer:</label>
-            <Suspense
-              fallback={
-                <div className="code-editor-loading-fallback">
-                  Loading editor...
-                </div>
-              }
-            >
-              <CodeEditor
-                ref={editorRef}
-                value={answers[currentQuestion.question_order] || ''}
-                onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
-                onCopyAttempt={handleCopyAttempt}
-                onCutAttempt={handleCutAttempt}
-                onPasteAttempt={handlePasteAttempt}
-                onSuspiciousPaste={handleSuspiciousPaste}
-                defaultLanguage={detectLanguage(
-                  currentQuestion.type,
-                  currentQuestion.module
-                )}
-                disabled={locked || submitting}
-                height="550px"
-              />
-            </Suspense>
+            {(currentQuestion.type === 'SingleChoice' || currentQuestion.type === 'MultipleChoice') ? (
+              (() => {
+                const multiple = currentQuestion.type === 'MultipleChoice';
+                let selected: string[] = [];
+                try {
+                  const raw = answers[currentQuestion.question_order];
+                  selected = raw ? JSON.parse(raw) : [];
+                } catch (_) { selected = []; }
+                return (
+                  <div className="quiz-options">
+                    <p style={{ color: '#666', fontSize: 13, marginBottom: 10 }}>
+                      {multiple ? 'Chọn tất cả đáp án đúng (có thể nhiều lựa chọn)' : 'Chọn một đáp án'}
+                    </p>
+                    {(currentQuestion.options || []).map((opt) => {
+                      const checked = selected.includes(opt.key);
+                      return (
+                        <label
+                          key={opt.key}
+                          style={{
+                            display: 'flex', alignItems: 'flex-start', gap: 10,
+                            padding: '12px 14px', marginBottom: 8, cursor: (locked || submitting) ? 'not-allowed' : 'pointer',
+                            border: `1px solid ${checked ? '#4f46e5' : '#ddd'}`, borderRadius: 8,
+                            background: checked ? '#eef2ff' : '#fff',
+                          }}
+                        >
+                          <input
+                            type={multiple ? 'checkbox' : 'radio'}
+                            name={`q-${currentQuestion.question_order}`}
+                            checked={checked}
+                            disabled={locked || submitting}
+                            onChange={() => toggleQuizAnswer(currentQuestion.question_order, opt.key, multiple)}
+                            style={{ marginTop: 3 }}
+                          />
+                          <span><strong>{opt.key}.</strong> {opt.text}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })()
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="code-editor-loading-fallback">
+                    Loading editor...
+                  </div>
+                }
+              >
+                <CodeEditor
+                  ref={editorRef}
+                  value={answers[currentQuestion.question_order] || ''}
+                  onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
+                  onCopyAttempt={handleCopyAttempt}
+                  onCutAttempt={handleCutAttempt}
+                  onPasteAttempt={handlePasteAttempt}
+                  onSuspiciousPaste={handleSuspiciousPaste}
+                  defaultLanguage={detectLanguage(
+                    currentQuestion.type,
+                    currentQuestion.module
+                  )}
+                  disabled={locked || submitting}
+                  height="550px"
+                />
+              </Suspense>
+            )}
           </div>
         </div>
 

@@ -72,6 +72,9 @@ export const adminApi = {
   // --- Question endpoints ---
   importQuestions: (formData: FormData) =>
     api.post('/admin/questions/import', formData),
+
+  importQuizQuestions: (formData: FormData) =>
+    api.post('/admin/questions/quiz/import', formData),
   
   getQuestions: () =>
     api.get('/admin/questions'),

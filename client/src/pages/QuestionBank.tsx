@@ -16,6 +16,7 @@ function QuestionBank() {
 
   // Filter & pagination
   const [selectedModule, setSelectedModule] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'essay' | 'quiz'>('all');
   const [pageSize, setPageSize] = useState<PageSize>(25);
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -48,15 +49,20 @@ function QuestionBank() {
     }
   };
 
-  const handleImport = async () => {
+  const handleImport = async (mode: 'essay' | 'quiz' = 'essay') => {
     if (!file) return;
     setLoading(true);
     setMessage('');
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await adminApi.importQuestions(formData);
-      setMessage(`Imported: ${res.data.imported}, Updated: ${res.data.updated}`);
+      const res = mode === 'quiz'
+        ? await adminApi.importQuizQuestions(formData)
+        : await adminApi.importQuestions(formData);
+      let msg = `Imported: ${res.data.imported}, Updated: ${res.data.updated}`;
+      if (res.data.skipped) msg += `, Skipped: ${res.data.skipped}`;
+      if (res.data.errors?.length) msg += ` — Lỗi: ${res.data.errors.join('; ')}`;
+      setMessage(msg);
       loadQuestions();
       loadModules();
       setFile(null);
@@ -91,9 +97,15 @@ function QuestionBank() {
   };
 
   // ── Derived data ──────────────────────────────────────────────────────────
+  const QUIZ_TYPES = ['SingleChoice', 'MultipleChoice'];
   const filtered = useMemo(() =>
-    selectedModule ? questions.filter(q => q.module === selectedModule) : questions,
-    [questions, selectedModule]
+    questions.filter(q => {
+      if (selectedModule && q.module !== selectedModule) return false;
+      if (selectedCategory === 'quiz') return QUIZ_TYPES.includes(q.type);
+      if (selectedCategory === 'essay') return !QUIZ_TYPES.includes(q.type);
+      return true;
+    }),
+    [questions, selectedModule, selectedCategory]
   );
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -188,11 +200,17 @@ function QuestionBank() {
             onChange={e => setFile(e.target.files?.[0] || null)}
             style={{ width: 'auto' }}
           />
-          <button onClick={handleImport} disabled={!file || loading} className="btn btn-primary">
-            {loading ? 'Importing...' : 'Import'}
+          <button onClick={() => handleImport('essay')} disabled={!file || loading} className="btn btn-primary">
+            {loading ? 'Importing...' : 'Import Tự luận'}
+          </button>
+          <button onClick={() => handleImport('quiz')} disabled={!file || loading} className="btn btn-secondary">
+            {loading ? 'Importing...' : 'Import Quiz (Trắc nghiệm)'}
           </button>
         </div>
-        {message && <p className={message.includes('Error') ? 'error' : 'success'}>{message}</p>}
+        <p style={{ color: '#888', fontSize: 12, marginTop: -8 }}>
+          Quiz template (header 1 dòng): ID | Type (SingleChoice/MultipleChoice) | Level | Topic | Question Sample | Option A…F | Correct (VD "A" hoặc "A,C,D") | Score
+        </p>
+        {message && <p className={message.includes('Error') || message.includes('Lỗi') ? 'error' : 'success'}>{message}</p>}
       </div>
 
       {/* ── Questions card ── */}
@@ -233,6 +251,22 @@ function QuestionBank() {
               {modules.map(mod => (
                 <option key={mod} value={mod}>{mod}</option>
               ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>
+              Loại:
+            </label>
+            <select
+              id="category-filter"
+              value={selectedCategory}
+              onChange={e => { setSelectedCategory(e.target.value as 'all' | 'essay' | 'quiz'); setCurrentPage(1); setSelectedIds(new Set()); }}
+              style={{ fontSize: 13, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', minWidth: 140 }}
+            >
+              <option value="all">Tất cả</option>
+              <option value="essay">Tự luận / Coding</option>
+              <option value="quiz">Quiz (Trắc nghiệm)</option>
             </select>
           </div>
 
