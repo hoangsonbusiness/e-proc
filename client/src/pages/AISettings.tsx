@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
-import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 interface AISettings {
   provider: string;
@@ -35,7 +35,6 @@ function AISettings() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{success: boolean; message: string} | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
-  const { isSuperAdmin } = useAuth();
 
   useEffect(() => {
     loadSettings();
@@ -93,14 +92,7 @@ function AISettings() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/practice">Practice</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
-      </div>
+      <AdminNav />
 
       <div className="card" style={{ maxWidth: 800 }}>
         <h3>AI Configuration</h3>

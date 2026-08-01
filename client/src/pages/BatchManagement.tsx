@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -109,7 +110,9 @@ function BatchManagement() {
     end_time: '',
     duration: 30,
     blueprint: [] as BlueprintItem[],
-    blueprintByType: [] as BlueprintItemByType[]
+    blueprintByType: [] as BlueprintItemByType[],
+    record_mode: 'none' as 'none' | 'local' | 's3',
+    exam_type: 'essay' as 'essay' | 'quiz',
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
@@ -117,7 +120,7 @@ function BatchManagement() {
   const [editingBatch, setEditingBatch] = useState<any>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
   const [emails, setEmails] = useState('');
-  const [inviteResult, setInviteResult] = useState<{success: number; emails: {email: string; code: string}[]} | null>(null);
+  const [inviteResult, setInviteResult] = useState<{ success: number; emails: { email: string; code: string }[] } | null>(null);
   const [feasibilityErrors, setFeasibilityErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -140,11 +143,11 @@ function BatchManagement() {
       const stats = getStatsForModuleGroup(item.module, item.question_group);
       const label = comboLabel(item.module, item.question_group);
       if (item.easy > stats.easy)
-        errors.push(`Module "${label}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+        errors.push(`Module "${label}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${label}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+        errors.push(`Module "${label}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${label}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+        errors.push(`Module "${label}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -156,11 +159,11 @@ function BatchManagement() {
       const stats = getStatsForModuleGroupType(item.module, item.question_group, item.type);
       const label = comboLabel(item.module, item.question_group);
       if (item.easy > stats.easy)
-        errors.push(`Module "${label}" / Type "${item.type}": Easy yêu cầu ${item.easy}, chỉ có ${stats.easy} câu.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${label}" / Type "${item.type}": Medium yêu cầu ${item.medium}, chỉ có ${stats.medium} câu.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${label}" / Type "${item.type}": Hard yêu cầu ${item.hard}, chỉ có ${stats.hard} câu.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -435,7 +438,7 @@ function BatchManagement() {
       statsErrors = validateBlueprintAgainstStats(editingBatch.blueprint || []);
     }
     if (statsErrors.length > 0) {
-      alert('Không thể lưu vì blueprint vượt quá số câu hỏi có sẵn:\n\n' + statsErrors.join('\n'));
+      alert('Cannot save because the blueprint exceeds the available question count:\n\n' + statsErrors.join('\n'));
       return;
     }
 
@@ -452,7 +455,9 @@ function BatchManagement() {
         start_time: localToUTC(editingBatch.start_time),
         end_time: localToUTC(editingBatch.end_time),
         duration: editingBatch.duration,
-        blueprint: blueprintPayload
+        blueprint: blueprintPayload,
+        record_mode: editingBatch.record_mode || 'none',
+        exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
       });
       loadBatches();
       setEditingBatch(null);
@@ -473,6 +478,8 @@ function BatchManagement() {
       start_time: localToUTC(formData.start_time),
       end_time: localToUTC(formData.end_time),
       duration: formData.duration,
+      record_mode: formData.record_mode,
+      exam_type: formData.exam_type,
     };
 
     if (examMode === 'practice') {
@@ -488,8 +495,10 @@ function BatchManagement() {
       const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
       const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
       console.log('[BatchManagement] Total questions:', total);
-      if (total < 1 || total > 20) {
-        setFeasibilityErrors([`Total questions must be between 1 and 20. Current: ${total}`]);
+      // Đề trắc nghiệm (quiz) cho phép tới 100 câu; đề tự luận giữ giới hạn 20 câu như trước.
+      const maxQuestions = formData.exam_type === 'quiz' ? 100 : 20;
+      if (total < 1 || total > maxQuestions) {
+        setFeasibilityErrors([`Total questions must be between 1 and ${maxQuestions}. Current: ${total}`]);
         setLoading(false);
         return;
       }
@@ -516,7 +525,7 @@ function BatchManagement() {
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [] });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay' });
       setBlueprintMode('module');
       setExamMode('question_bank');
       setSelectedPracticeId('');
@@ -547,7 +556,7 @@ function BatchManagement() {
 
       const skipped = res.data.skippedEmails;
       if (skipped && skipped.length > 0) {
-        alert(`Đã skip ${skipped.length} email trùng:\n${skipped.join('\n')}`);
+        alert(`Skipped ${skipped.length} duplicate email(s):\n${skipped.join('\n')}`);
       }
 
       setInviteResult({
@@ -664,7 +673,7 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>📊</span>
           <strong style={{ color: '#1e40af', fontSize: 14 }}>Question Bank – By Module</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn theo Module (và Question Group)
+            — Available question counts by Module (and Question Group)
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -713,7 +722,7 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>🏷</span>
           <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Module + Type</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Số câu hỏi có sẵn theo từng Module (Question Group) × Type
+            — Available question counts by Module (Question Group) × Type
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -810,14 +819,7 @@ function BatchManagement() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/practice">Practice</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
-      </div>
+      <AdminNav />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Batches</h2>
@@ -871,6 +873,25 @@ function BatchManagement() {
               </div>
             </div>
 
+            {/* Chế độ ghi màn hình — chỉ superadmin đổi được; admin thường thấy nhưng bị khóa.
+                Áp dụng cho cả batch Question Bank lẫn Practice. */}
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label>Screen Recording</label>
+              <select
+                value={formData.record_mode}
+                disabled={!isSuperAdmin}
+                onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
+                style={{ width: 'auto' }}
+              >
+                <option value="none">Default (No recording)</option>
+                <option value="local">Record Local (Save on student's machine, encrypted)</option>
+                <option value="s3">Record S3 (Save to AWS S3)</option>
+              </select>
+              {!isSuperAdmin && (
+                <small style={{ color: 'var(--text-light)', display: 'block' }}>Only superadmin accounts can change this setting.</small>
+              )}
+            </div>
+
             {/* Exam Mode Tabs: Question Bank (blueprint) vs Practice (bài import từ .docx) */}
             <div style={{ display: 'flex', gap: 0, marginTop: 20, marginBottom: 16, border: '1.5px solid #0ea5e9', borderRadius: 8, overflow: 'hidden', width: 'fit-content' }}>
               {(['question_bank', 'practice'] as const).map(mode => (
@@ -919,7 +940,22 @@ function BatchManagement() {
               </div>
             ) : (
             <>
-            <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/20)</h4>
+            {/* Loại đề: tự luận/coding (chấm AI) hoặc trắc nghiệm (chấm tự động) */}
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label>Exam Type</label>
+              <select
+                value={formData.exam_type}
+                onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
+                style={{ width: 'auto' }}
+              >
+                <option value="essay">Tự luận / Coding</option>
+                <option value="quiz">Trắc nghiệm (Quiz)</option>
+              </select>
+            </div>
+
+            <h4 style={{ marginTop: 20, marginBottom: 10 }}>
+              Exam Blueprint (Total: {totalQuestions}/{formData.exam_type === 'quiz' ? 100 : 20})
+            </h4>
 
             {/* Blueprint Mode Toggle */}
             <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
@@ -955,7 +991,7 @@ function BatchManagement() {
                               onChange={(module, question_group) => updateBlueprintModuleGroup(index, module, question_group)}
                             />
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1027,13 +1063,13 @@ function BatchManagement() {
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
-                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                    {t}{isUsed ? ' (selected)' : ''}
                                   </option>
                                 );
                               })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1064,7 +1100,7 @@ function BatchManagement() {
                   disabled={!nextAvailableModuleType}
                   className="btn btn-secondary"
                   style={{ marginTop: 10 }}
-                  title={!nextAvailableModuleType ? 'Tất cả combinations đã được thêm' : ''}
+                  title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
                 >
                   + Add Module / Type
                 </button>
@@ -1091,7 +1127,7 @@ function BatchManagement() {
                   ? !selectedPracticeId
                   : (
                     totalQuestions < 1 ||
-                    totalQuestions > 20 ||
+                    totalQuestions > (formData.exam_type === 'quiz' ? 100 : 20) ||
                     (blueprintMode === 'module' && moduleGroups.length === 0) ||
                     (blueprintMode === 'type' && moduleGroupTypeStats.length === 0) ||
                     createBlueprintErrors.length > 0
@@ -1247,7 +1283,7 @@ function BatchManagement() {
             <input
               type="text"
               value={editingBatch.name}
-              onChange={e => setEditingBatch({...editingBatch, name: e.target.value})}
+              onChange={e => setEditingBatch({ ...editingBatch, name: e.target.value })}
               required
             />
           </div>
@@ -1258,7 +1294,7 @@ function BatchManagement() {
               <input
                 type="datetime-local"
                 value={editingBatch.start_time || ''}
-                onChange={e => setEditingBatch({...editingBatch, start_time: e.target.value})}
+                onChange={e => setEditingBatch({ ...editingBatch, start_time: e.target.value })}
                 required
               />
             </div>
@@ -1267,7 +1303,7 @@ function BatchManagement() {
               <input
                 type="datetime-local"
                 value={editingBatch.end_time || ''}
-                onChange={e => setEditingBatch({...editingBatch, end_time: e.target.value})}
+                onChange={e => setEditingBatch({ ...editingBatch, end_time: e.target.value })}
                 required
               />
             </div>
@@ -1278,10 +1314,28 @@ function BatchManagement() {
             <input
               type="number"
               value={editingBatch.duration}
-              onChange={e => setEditingBatch({...editingBatch, duration: parseInt(e.target.value)})}
+              onChange={e => setEditingBatch({ ...editingBatch, duration: parseInt(e.target.value) })}
               min={1}
               required
             />
+          </div>
+
+          {/* Chế độ ghi màn hình — chỉ superadmin đổi được; admin thường bị khóa (backend giữ nguyên mode cũ) */}
+          <div className="form-group">
+            <label>Screen Recording</label>
+            <select
+              value={editingBatch.record_mode || 'none'}
+              disabled={!isSuperAdmin}
+              onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
+              style={{ width: 'auto' }}
+            >
+              <option value="none">Default (No recording)</option>
+              <option value="local">Record Local (Save on student's machine, encrypted)</option>
+              <option value="s3">Record S3 (Save to AWS S3)</option>
+            </select>
+            {!isSuperAdmin && (
+              <small style={{ color: 'var(--text-light)', display: 'block' }}>Only superadmin accounts can change this setting.</small>
+            )}
           </div>
 
           {editingBatch.practice_exam_id ? (
@@ -1299,6 +1353,19 @@ function BatchManagement() {
             </div>
           ) : (
           <>
+          {/* Exam type */}
+          <div className="form-group">
+            <label>Exam Type</label>
+            <select
+              value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
+              onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
+              style={{ width: 'auto' }}
+            >
+              <option value="essay">Tự luận / Coding</option>
+              <option value="quiz">Trắc nghiệm (Quiz)</option>
+            </select>
+          </div>
+
           <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>
 
           {/* Blueprint Mode Toggle for Edit form */}
@@ -1314,9 +1381,9 @@ function BatchManagement() {
                   <thead>
                     <tr>
                       <th>Module</th>
-                      <th>🟢 Easy</th>
-                      <th>🟡 Medium</th>
-                      <th>🔴 Hard</th>
+                      <th style={{ textAlign: 'center' }}>🟢 Easy</th>
+                      <th style={{ textAlign: 'center' }}>🟡 Medium</th>
+                      <th style={{ textAlign: 'center' }}>🔴 Hard</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -1335,7 +1402,7 @@ function BatchManagement() {
                               }}
                             />
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1423,13 +1490,13 @@ function BatchManagement() {
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
-                                    {t}{isUsed ? ' (đã chọn)' : ''}
+                                    {t}{isUsed ? ' (selected)' : ''}
                                   </option>
                                 );
                               })}
                             </select>
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Có sẵn: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
                           <td>
@@ -1472,7 +1539,7 @@ function BatchManagement() {
           {/* Edit blueprint validation errors */}
           {editBlueprintErrors.length > 0 && (
             <div style={{ marginTop: 12, padding: '12px 16px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8 }}>
-              <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Blueprint vượt quá số câu hỏi có sẵn:</strong>
+              <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Blueprint exceeds available question count:</strong>
               {editBlueprintErrors.map((err, i) => (
                 <p key={i} style={{ color: '#b91c1c', margin: '4px 0 0', fontSize: 13 }}>{err}</p>
               ))}
@@ -1515,7 +1582,7 @@ function BatchManagement() {
                 }}
                 disabled={!nextAvailableModuleTypeEdit}
                 className="btn btn-secondary"
-                title={!nextAvailableModuleTypeEdit ? 'Tất cả combinations đã được thêm' : ''}
+                title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
               >
                 + Add Module / Type
               </button>

@@ -44,6 +44,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 }
 
 // Chỉ cho phép role 'superadmin' — dùng sau authMiddleware, cho các route quản lý user
+// và các thao tác đặc quyền khác (vd bật ghi màn hình lên S3).
 export function requireSuperAdmin(req: Request, res: Response, next: NextFunction) {
   if (req.adminUser?.role !== 'superadmin') {
     return res.status(403).json({ error: 'Forbidden: Superadmin access required' });

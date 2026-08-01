@@ -45,9 +45,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     localStorage.setItem('adminToken', newToken);
     localStorage.setItem('adminTokenExpiry', expiresAt);
-    localStorage.setItem('adminRole', newRole);
+    localStorage.setItem('adminRole', newRole || 'admin');
     setToken(newToken);
-    setRole(newRole);
+    setRole(newRole || 'admin');
   };
 
   const logout = () => {

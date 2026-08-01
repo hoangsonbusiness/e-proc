@@ -72,6 +72,9 @@ export const adminApi = {
   // --- Question endpoints ---
   importQuestions: (formData: FormData) =>
     api.post('/admin/questions/import', formData),
+
+  importQuizQuestions: (formData: FormData) =>
+    api.post('/admin/questions/quiz/import', formData),
   
   getQuestions: () =>
     api.get('/admin/questions'),
@@ -201,8 +204,20 @@ export const studentApi = {
   submit: () =>
     api.post('/student/exam/submit', {}),
 
-  reportViolation: (type: string) =>
-    api.post('/student/violation', { type }),
+  reportViolation: (
+    type: string,
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+  ) =>
+    api.post('/student/violation', {
+      type,
+      content_preview: meta?.contentPreview,
+      text_length: meta?.textLength,
+      question_id: meta?.questionId,
+    }),
+
+  // Xin presigned PUT URL để upload 1 phần video record thẳng lên S3
+  getRecordingUploadUrl: (partIndex: number, contentType: string) =>
+    api.post('/student/exam/recording-url', { partIndex, contentType }),
 
   // --- Run code (học viên tự kiểm tra tính đúng đắn) ---
   runCode: (language: string, code: string, stdin?: string) =>

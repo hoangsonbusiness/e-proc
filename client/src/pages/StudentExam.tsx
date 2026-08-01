@@ -1,15 +1,25 @@
-import { useState, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
-import { detectLanguage } from '../components/CodeEditor';
+import * as examRecorder from '../services/examRecorder';
+import CodeEditor, { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
-// Lazy-load Monaco Editor to avoid bloating the initial bundle
-const CodeEditor = lazy(() => import('../components/CodeEditor'));
+// Static import: `detectLanguage` was already imported statically above, so Monaco was
+// always in the main bundle — lazy() gave no real split. Static import also avoids the
+// dynamic import() string that the obfuscator mangled (broke Monaco loading in production).
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
+const VIEWPORT_SHRINK_THRESHOLD_PX = 80;
+const VIEWPORT_CHECK_INTERVAL_MS = 1500;
+const VIEWPORT_SUSTAIN_POLLS = 2;
+
+interface QuizOption {
+  key: string;
+  text: string;
+}
 
 interface Question {
   id: string;
@@ -19,6 +29,7 @@ interface Question {
   level: string;
   type: string;
   answer?: string;
+  options?: QuizOption[];
 }
 
 type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
@@ -39,6 +50,8 @@ function StudentExam() {
   const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
   // Thông báo khi bài thi bị block (timeout / vắng mặt quá lâu)
   const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
+  // Modal yêu cầu bật lại ghi màn hình (khi recorder mất state sau reload/F5)
+  const [recordingLost, setRecordingLost] = useState(false);
   const editorRef = useRef<CodeEditorHandle>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const clipboardCooldownRef = useRef<Record<string, number>>({});
@@ -46,16 +59,29 @@ function StudentExam() {
   const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
+  const viewportShrinkPollCountRef = useRef(0);
+  const documentWidthBaselineRef = useRef<number | null>(null);
   const devtoolsViolationCooldownRef = useRef<number>(0);
+  // [Anti-Cheat v2] focus heartbeat refs
+  const focusLostTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // [Anti-Cheat v2] suspicious paste cooldown ref
+  const suspiciousPasteCooldownRef = useRef<number>(0);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
   const lastViolationTimeRef = useRef<number>(0);
+  const currentQuestionIdRef = useRef<string | undefined>(undefined);
   const navigate = useNavigate();
+
+  // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
+  const [watermarkTime, setWatermarkTime] = useState(() => new Date());
 
   const studentId = localStorage.getItem('studentId');
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
   const studentToken = localStorage.getItem('studentToken');
+  const studentEmail = localStorage.getItem('studentEmail');
+  const recordMode = (localStorage.getItem('recordMode') || 'none') as 'none' | 'local' | 's3';
+  const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
 
   useEffect(() => {
     if (!studentId || !studentToken) {
@@ -134,6 +160,10 @@ function StudentExam() {
     submittingRef.current = submitting;
   }, [submitting]);
 
+  useEffect(() => {
+    currentQuestionIdRef.current = questions[currentIndex]?.id;
+  }, [questions, currentIndex]);
+
   // Gửi beacon khi học viên tắt trình duyệt / đóng tab
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -158,6 +188,15 @@ function StudentExam() {
     if (!force && !confirm('Are you sure you want to submit?')) return;
 
     setSubmitting(true);
+
+    // Dừng ghi màn hình và lưu nốt file cuối TRƯỚC khi submit — bao trọn mọi đường
+    // (thủ công / cheating / timeout). Bọc try/catch để lỗi ghi file không chặn submit.
+    try {
+      await examRecorder.stopAndSave();
+    } catch (recErr) {
+      console.error('[exam] stopAndSave failed (non-fatal):', recErr);
+    }
+
     try {
       await studentApi.submit(); // [C-4] token tự động qua interceptor
       document.exitFullscreen().catch(() => { });
@@ -169,7 +208,10 @@ function StudentExam() {
     }
   }, [navigate]);
 
-  const handleViolation = useCallback(async (type: string): Promise<boolean> => {
+  const handleViolation = useCallback(async (
+    type: string,
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+  ): Promise<boolean> => {
     const now = Date.now();
     // Global cooldown: ignore multiple violations within 3 seconds
     // This prevents copy+paste or alt+tab from counting as 2 violations instantly
@@ -179,7 +221,7 @@ function StudentExam() {
     lastViolationTimeRef.current = now;
 
     try {
-      const res = await studentApi.reportViolation(type); // [C-4] token tự động
+      const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
       setViolationCount(res.data.total_violations);
       if (res.data.locked) {
         setLocked(true);
@@ -195,7 +237,13 @@ function StudentExam() {
           copy_attempt: 'You attempted to copy text',
           cut_attempt: 'You attempted to cut text',
           paste_attempt: 'You attempted to paste text',
-          devtools_open: 'You attempted to open Developer Tools'
+          devtools_open: 'You attempted to open Developer Tools',
+          extension_panel: 'A browser extension panel was detected',
+          screenshot_attempt: 'You attempted to take a screenshot',
+          print_attempt: 'You attempted to print or capture the page',
+          // [Anti-Cheat v2] log-only types — hiển warning nhưng không lock
+          suspicious_paste: 'A large text insertion was detected (possible external paste)',
+          focus_lost: 'Browser window lost focus for an extended period',
         };
         const warning = warningByType[type] || 'You violated the exam rules';
 
@@ -228,6 +276,10 @@ function StudentExam() {
       if (document.fullscreenElement) {
         clearFullscreenExitTimeout();
         fullscreenAutoSubmitTriggeredRef.current = false;
+        // Ghi lại baseline width để so sánh sau này — Side Panel extension (Monica)
+        // co lại documentElement/body nhưng không đổi innerWidth/screen.width khi đang fullscreen.
+        documentWidthBaselineRef.current = document.documentElement.getBoundingClientRect().width;
+        viewportShrinkPollCountRef.current = 0;
         return;
       }
 
@@ -275,6 +327,130 @@ function StudentExam() {
     };
   }, [clearFullscreenExitTimeout, handleSubmit, handleViolation]);
 
+  // Phát hiện extension side-panel (vd: Monica AI) che một phần viewport
+  // mà không thoát Fullscreen API thực sự, nên fullscreenchange không bắn.
+  // Lưu ý: window.innerWidth/window.screen.width KHÔNG đổi khi Chrome Side Panel
+  // mở trong lúc đang fullscreen (đã đo thực nghiệm) — chỉ document.documentElement/
+  // body mới phản ánh đúng shrink thật, nên phải so với baseline ghi lúc vào fullscreen.
+  // Yêu cầu shrink kéo dài qua nhiều lần poll để tránh false positive
+  // trong lúc chuyển đổi fullscreen (giống lý do devtools window-size check cũ đã bị gỡ).
+  useEffect(() => {
+    if (!started || locked || submitting) {
+      viewportShrinkPollCountRef.current = 0;
+      return;
+    }
+
+    const interval = setInterval(() => {
+      if (!document.fullscreenElement) {
+        viewportShrinkPollCountRef.current = 0;
+        return;
+      }
+
+      const currentWidth = document.documentElement.getBoundingClientRect().width;
+
+      // Trường hợp effect mount sau khi fullscreen đã bật sẵn (vd: resume sau reload)
+      // thì fullscreenchange không bắn lại, nên baseline chưa được ghi — ghi ngay tại đây.
+      if (documentWidthBaselineRef.current === null) {
+        documentWidthBaselineRef.current = currentWidth;
+        viewportShrinkPollCountRef.current = 0;
+        return;
+      }
+
+      const widthShrink = documentWidthBaselineRef.current - currentWidth;
+      if (widthShrink > VIEWPORT_SHRINK_THRESHOLD_PX) {
+        viewportShrinkPollCountRef.current += 1;
+        if (viewportShrinkPollCountRef.current >= VIEWPORT_SUSTAIN_POLLS) {
+          viewportShrinkPollCountRef.current = 0;
+          void handleViolation('extension_panel');
+        }
+      } else {
+        viewportShrinkPollCountRef.current = 0;
+      }
+    }, VIEWPORT_CHECK_INTERVAL_MS);
+
+    return () => clearInterval(interval);
+  }, [started, locked, submitting, handleViolation]);
+
+  // [Anti-Cheat] Focus detection: bắt việc mất focus cửa sổ (mở Notes/Maccy/app khác trên macOS
+  // song song mà không thoát fullscreen — visibilitychange & fullscreenchange đều không bắn).
+  //
+  // Dùng event blur/focus (không poll) để đo chính xác thời lượng mất focus, tránh aliasing
+  // của polling (một khoảng mất focus ngắn có thể lọt gọn giữa 2 lần poll).
+  //
+  // Đệm 3 giây: sau khi đã fullscreen, không có lý do hợp lệ nào để focus rời cửa sổ.
+  // 3s loại được nhiễu chính đáng: fullscreen transition (~0.5s), dialog xin quyền fullscreen,
+  // Windows notification (~1–2s), macOS Spotlight (~2s). Maccy/Notes luôn tốn > 3s.
+  const FOCUS_LOST_GRACE_MS = 3000;
+
+  useEffect(() => {
+    if (!started || locked || submitting) {
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    const handleBlur = () => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      if (focusLostTimeoutRef.current) return; // đã có timer đang chạy
+      focusLostTimeoutRef.current = setTimeout(() => {
+        focusLostTimeoutRef.current = null;
+        if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+        if (document.hasFocus()) return; // focus đã quay lại
+        void handleViolation('focus_lost');
+      }, FOCUS_LOST_GRACE_MS);
+    };
+
+    const handleFocus = () => {
+      // Focus quay lại trước khi hết grace → hủy, không tính vi phạm
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
+      }
+    };
+
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
+      if (focusLostTimeoutRef.current) {
+        clearTimeout(focusLostTimeoutRef.current);
+        focusLostTimeoutRef.current = null;
+      }
+    };
+  }, [started, locked, submitting, handleViolation]);
+
+  // Ghi màn hình: đăng ký handler khi thí sinh tự dừng chia sẻ giữa bài.
+  // recording_stopped → backend khóa NGAY lần đầu → handleViolation auto-submit.
+  // Nếu track đã ended trước khi effect này chạy, setOnRecordingStopped gọi lại ngay.
+  useEffect(() => {
+    if (!recordEnabled) return; // batch không ghi màn hình → bỏ qua
+    examRecorder.setOnRecordingStopped(() => {
+      void handleViolation('recording_stopped');
+    });
+  }, [handleViolation, recordEnabled]);
+
+  // Resume-after-reload guard: nếu vào /exam khi bài đang chạy nhưng recorder KHÔNG
+  // còn active (thí sinh F5/reload làm mất singleton), yêu cầu bật lại ghi màn hình.
+  // Chỉ áp dụng khi batch bật record.
+  useEffect(() => {
+    if (!recordEnabled) return;
+    if (started && !locked && !submitting && !examRecorder.isActive()) {
+      setRecordingLost(true);
+    }
+  }, [started, locked, submitting, recordEnabled]);
+
+  // [Anti-Cheat v2] Dynamic watermark interval
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setWatermarkTime(new Date());
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const triggerDevtoolsViolation = useCallback(() => {
     if (!startedRef.current || lockedRef.current || submittingRef.current) return;
     const now = Date.now();
@@ -294,6 +470,10 @@ function StudentExam() {
       const isCtrlShiftC = e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c');
       const isCtrlShiftK = e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k');
       const isCtrlU = e.ctrlKey && (e.key === 'u' || e.key === 'U');
+      // Phím chụp màn hình
+      const isPrintScreen = e.key === 'PrintScreen' || e.key === 'Snapshot';
+      // Ctrl+P (in trang) — một số extension dùng print API để capture
+      const isCtrlP = e.ctrlKey && (e.key === 'p' || e.key === 'P');
 
       // Intercept F11 to force HTML5 Fullscreen API
       if (e.key === 'F11') {
@@ -312,6 +492,18 @@ function StudentExam() {
         e.stopPropagation();
         triggerDevtoolsViolation();
       }
+
+      if (isPrintScreen) {
+        e.preventDefault();
+        e.stopPropagation();
+        void handleViolation('screenshot_attempt');
+      }
+
+      if (isCtrlP) {
+        e.preventDefault();
+        e.stopPropagation();
+        void handleViolation('print_attempt');
+      }
     };
 
     const handleContextMenu = (e: MouseEvent) => {
@@ -328,11 +520,21 @@ function StudentExam() {
       document.removeEventListener('keydown', handleKeyDown, true);
       document.removeEventListener('contextmenu', handleContextMenu);
     };
-  }, [triggerDevtoolsViolation]);
+  }, [triggerDevtoolsViolation, handleViolation]);
 
   // Đã gỡ bỏ tính năng phát hiện DevTools qua kích thước cửa sổ vì tính năng này 
   // không tương thích với quá trình chuyển đổi (transition) Fullscreen của trình duyệt,
   // gây ra các báo cáo vi phạm giả mạo (false positives).
+
+  // Chặn in trang (Ctrl+P qua menu browser) — kích hoạt beforeprint event
+  useEffect(() => {
+    const handleBeforePrint = () => {
+      if (!startedRef.current || lockedRef.current || submittingRef.current) return;
+      void handleViolation('print_attempt');
+    };
+    window.addEventListener('beforeprint', handleBeforePrint);
+    return () => window.removeEventListener('beforeprint', handleBeforePrint);
+  }, [handleViolation]);
 
   useEffect(() => {
     if (locked || submitting) {
@@ -466,6 +668,34 @@ function StudentExam() {
   const handleCutAttempt   = useCallback(() => handleClipboardAttempt('cut_attempt'),   [handleClipboardAttempt]);
   const handlePasteAttempt = useCallback(() => handleClipboardAttempt('paste_attempt'), [handleClipboardAttempt]);
 
+  // [Anti-Cheat] Suspicious paste handler: được gọi từ CodeEditor khi Monaco phát hiện
+  // >= 300 ký tự xuất hiện đột ngột trong 1 change event. Gửi kèm preview (500 ký tự)
+  // và độ dài thật để backend ghi forensic log.
+  const handleSuspiciousPaste = useCallback((preview: string, textLength: number) => {
+    if (!started || locked || submitting) return;
+    const now = Date.now();
+    if (now - suspiciousPasteCooldownRef.current < 10000) return; // 10s cooldown
+    suspiciousPasteCooldownRef.current = now;
+    void handleViolation('suspicious_paste', {
+      contentPreview: preview,
+      textLength,
+      questionId: currentQuestionIdRef.current,
+    });
+  }, [started, locked, submitting, handleViolation]);
+
+  // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chia sẻ lại
+  // toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
+  const handleResumeRecording = useCallback(async () => {
+    // Resume sau F5: dirHandle (local) không sống qua reload → phải chọn lại thư mục.
+    // Password lấy lại từ localStorage (server đã cấp lúc verify, tái dùng đúng pass cũ).
+    const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
+    if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
+    const password = localStorage.getItem('recordingPassword');
+    examRecorder.start({ mode: recordMode === 'none' ? 's3' : recordMode, password });
+    examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
+    setRecordingLost(false);
+  }, [handleViolation, recordMode]);
+
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
 
@@ -473,6 +703,27 @@ function StudentExam() {
     debounceRef.current = setTimeout(() => {
       studentApi.saveAnswer(order, text).catch(console.error); // [C-4] token tự động
     }, 2000);
+  }, []);
+
+  // Chọn/bỏ chọn đáp án trắc nghiệm. answer được lưu dưới dạng JSON mảng key, VD ["A","C"].
+  // Single: thay thế; Multiple: toggle. Lưu ngay (debounce ngắn) qua studentApi.saveAnswer.
+  const toggleQuizAnswer = useCallback((order: number, key: string, multiple: boolean) => {
+    setAnswers(prev => {
+      let current: string[] = [];
+      try { current = prev[order] ? JSON.parse(prev[order]) : []; } catch (_) { current = []; }
+      let next: string[];
+      if (multiple) {
+        next = current.includes(key) ? current.filter(k => k !== key) : [...current, key];
+      } else {
+        next = [key];
+      }
+      const serialized = JSON.stringify(next);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        studentApi.saveAnswer(order, serialized).catch(console.error);
+      }, 500);
+      return { ...prev, [order]: serialized };
+    });
   }, []);
 
   const formatTime = (seconds: number) => {
@@ -558,7 +809,7 @@ function StudentExam() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--background)' }}>
+    <div style={{ minHeight: '100vh', background: 'var(--background)', userSelect: 'none' }}>
       <div className="exam-timer" style={{ background: timeLeft < 300 ? 'var(--danger)' : 'var(--primary)' }}>
         {formatTime(timeLeft)}
       </div>
@@ -601,28 +852,71 @@ function StudentExam() {
           />
           <div className="form-group">
             <label>Your Answer:</label>
-            <Suspense
-              fallback={
-                <div className="code-editor-loading-fallback">
-                  Loading editor...
-                </div>
-              }
-            >
-              <CodeEditor
-                ref={editorRef}
-                value={answers[currentQuestion.question_order] || ''}
-                onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
-                onCopyAttempt={handleCopyAttempt}
-                onCutAttempt={handleCutAttempt}
-                onPasteAttempt={handlePasteAttempt}
-                defaultLanguage={detectLanguage(
-                  currentQuestion.type,
-                  currentQuestion.module
-                )}
-                disabled={locked || submitting}
-                height="550px"
-              />
-            </Suspense>
+            {(currentQuestion.type === 'SingleChoice' || currentQuestion.type === 'MultipleChoice') ? (
+              (() => {
+                const multiple = currentQuestion.type === 'MultipleChoice';
+                let selected: string[] = [];
+                try {
+                  const raw = answers[currentQuestion.question_order];
+                  selected = raw ? JSON.parse(raw) : [];
+                } catch (_) { selected = []; }
+                return (
+                  <div className="quiz-options">
+                    <p style={{ color: '#666', fontSize: 13, marginBottom: 10 }}>
+                      {multiple ? 'Select all correct answers (multiple choices allowed)' : 'Select one answer'}
+                    </p>
+                    {(currentQuestion.options || []).map((opt) => {
+                      const checked = selected.includes(opt.key);
+                      return (
+                        <label
+                          key={opt.key}
+                          style={{
+                            display: 'flex', alignItems: 'flex-start', gap: 10,
+                            padding: '12px 14px', marginBottom: 8, cursor: (locked || submitting) ? 'not-allowed' : 'pointer',
+                            border: `1px solid ${checked ? '#4f46e5' : '#ddd'}`, borderRadius: 8,
+                            background: checked ? '#eef2ff' : '#fff',
+                          }}
+                        >
+                          <input
+                            type={multiple ? 'checkbox' : 'radio'}
+                            name={`q-${currentQuestion.question_order}`}
+                            checked={checked}
+                            disabled={locked || submitting}
+                            onChange={() => toggleQuizAnswer(currentQuestion.question_order, opt.key, multiple)}
+                            style={{ marginTop: 3 }}
+                          />
+                          <span><strong>{opt.key}.</strong> {opt.text}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                );
+              })()
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="code-editor-loading-fallback">
+                    Loading editor...
+                  </div>
+                }
+              >
+                <CodeEditor
+                  ref={editorRef}
+                  value={answers[currentQuestion.question_order] || ''}
+                  onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
+                  onCopyAttempt={handleCopyAttempt}
+                  onCutAttempt={handleCutAttempt}
+                  onPasteAttempt={handlePasteAttempt}
+                  onSuspiciousPaste={handleSuspiciousPaste}
+                  defaultLanguage={detectLanguage(
+                    currentQuestion.type,
+                    currentQuestion.module
+                  )}
+                  disabled={locked || submitting}
+                  height="550px"
+                />
+              </Suspense>
+            )}
           </div>
         </div>
 
@@ -672,6 +966,32 @@ function StudentExam() {
       </div>
 
       {/* Violation Warning Modal (Toast) */}
+      {/* Modal chặn: recorder mất state (reload) — buộc bật lại ghi màn hình mới thi tiếp */}
+      {recordingLost && !locked && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.75)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 10000
+        }}>
+          <div style={{
+            background: 'white', padding: '30px', borderRadius: '12px',
+            maxWidth: '480px', textAlign: 'center', border: '2px solid var(--danger)'
+          }}>
+            <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '22px' }}>
+              🎥 Screen recording must be restarted
+            </h3>
+            <p style={{ fontSize: '16px', lineHeight: '1.5', color: '#333', marginBottom: 20 }}>
+              Screen recording was interrupted (possibly by a page reload). You need to share
+              your <b>entire screen</b> again to continue the exam.
+            </p>
+            <button onClick={handleResumeRecording} className="btn btn-primary" style={{ width: '100%' }}>
+              Restart screen recording
+            </button>
+          </div>
+        </div>
+      )}
+
       {violationWarningModal && (
         <div style={{
           position: 'fixed',
@@ -751,6 +1071,41 @@ function StudentExam() {
               Continue Exam
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Forensic Watermark – hiển thị studentId + timestamp trong mọi ảnh chụp màn hình */}
+      {started && !locked && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            pointerEvents: 'none',
+            zIndex: 9997,
+            overflow: 'hidden',
+          }}
+        >
+          {/* 12 lát (4 cột x 3 hàng): to & rõ đủ để đọc trên video ghi màn hình 5fps,
+              nhưng thưa và mờ vừa phải để không che bài làm của thí sinh. */}
+          {Array.from({ length: 12 }).map((_, i) => (
+            <span
+              key={i}
+              style={{
+                position: 'absolute',
+                top: `${(i % 3) * 33 + 8}%`,
+                left: `${Math.floor(i / 3) * 26}%`,
+                transform: 'rotate(-25deg)',
+                opacity: 0.14,
+                fontSize: 26,
+                fontWeight: 700,
+                whiteSpace: 'nowrap',
+                color: '#000',
+                userSelect: 'none',
+              }}
+            >
+              {studentEmail || studentId} · {watermarkTime.toLocaleString('vi-VN')}
+            </span>
+          ))}
         </div>
       )}
     </div>

@@ -80,7 +80,7 @@ async function initPostgres() {
         AND conname = 'question_bank_type_check'
     `);
 
-    const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text])))`;
+    const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text, 'SingleChoice'::text, 'MultipleChoice'::text])))`;
     const existing = constraintCheck.rows[0];
 
     if (!existing) {
@@ -89,7 +89,7 @@ async function initPostgres() {
       await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
-          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
     } else if (existing.condef !== targetDef) {
       // Constraint tồn tại nhưng định nghĩa cũ → DROP rồi ADD mới
@@ -98,7 +98,7 @@ async function initPostgres() {
       await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
-          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug'))
+          CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
     } else {
       console.log('[DB] question_bank_type_check: already up-to-date, skipping');
@@ -110,8 +110,20 @@ async function initPostgres() {
     console.error('[DB] question_bank_type_check migration error:', err);
   }
 
+  // Migration: cột quiz (SingleChoice/MultipleChoice). Câu tự luận cũ để NULL.
+  // options: JSON [{"key":"A","text":"..."}], correct_answers: JSON ["A","C"], score mặc định 1.
+  const qbQuizCols = [
+    { col: 'options', def: 'TEXT' },
+    { col: 'correct_answers', def: 'TEXT' },
+    { col: 'score', def: 'REAL DEFAULT 1' },
+  ];
+  for (const { col, def } of qbQuizCols) {
+    try {
+      await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+    } catch (_) { /* already exists */ }
+  }
   console.log('[DB] question_bank ready');
-  
+
 await client.query(`
     CREATE TABLE IF NOT EXISTS batches (
       id SERIAL PRIMARY KEY,
@@ -120,9 +132,25 @@ await client.query(`
       end_time TIMESTAMP NOT NULL,
       duration INTEGER NOT NULL,
       blueprint JSONB,
+      record_enabled BOOLEAN DEFAULT false,
+      record_mode VARCHAR(16) DEFAULT 'none',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
+  try {
+    await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
+  } catch (_) { /* already exists */ }
+  // Migration: chế độ ghi màn hình 'none' | 'local' | 's3' (thay cho record_enabled bool).
+  // Chỉ admin đặt được mode khác 'none'. Backfill: batch có record_enabled=true → 's3'.
+  try {
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_mode VARCHAR(16) DEFAULT 'none'");
+    await client.query("UPDATE batches SET record_mode = 's3' WHERE record_enabled = true AND (record_mode IS NULL OR record_mode = 'none')");
+  } catch (_) { /* already exists */ }
+  // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
+  try {
+    await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
+  } catch (_) { /* already exists */ }
   
   const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
   await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
@@ -173,6 +201,7 @@ await client.query(`
       exam_started_at TIMESTAMP,
       exam_deadline TIMESTAMP,
       disconnected_at TIMESTAMP,
+      recording_password TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -182,6 +211,7 @@ await client.query(`
     { col: 'exam_started_at', def: 'TIMESTAMP' },
     { col: 'exam_deadline', def: 'TIMESTAMP' },
     { col: 'disconnected_at', def: 'TIMESTAMP' },
+    { col: 'recording_password', def: 'TEXT' },
   ];
   for (const { col, def } of colChecks) {
     try {
@@ -204,6 +234,10 @@ await client.query(`
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: thứ tự option đã xáo cho riêng SV (quiz). JSON ["C","A","F","B"]. Câu tự luận để NULL.
+  try {
+    await client.query('ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS option_order TEXT');
+  } catch (_) { /* already exists */ }
   console.log('[DB] exam_questions ready');
   
   await client.query(`
@@ -216,7 +250,24 @@ await client.query(`
     )
   `);
   console.log('[DB] violations ready');
-  
+
+  // Anti-Cheat: append-only forensic log — mỗi lần vi phạm một dòng (khác với
+  // bảng violations vốn khóa theo (student_id, type) nên chỉ đếm được số lần).
+  // content_preview chỉ có với suspicious_paste (500 ký tự đầu); focus_lost để NULL.
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS violation_events (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER,
+      type TEXT NOT NULL,
+      text_length INTEGER,
+      content_preview VARCHAR(500),
+      question_id VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] violation_events ready');
+
   await client.query(`
     CREATE TABLE IF NOT EXISTS ai_queue (
       id SERIAL PRIMARY KEY,
@@ -246,6 +297,7 @@ await client.query(`
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: thêm cột role cho DB cũ (user cũ mặc định 'admin' để không mất quyền)
   try {
     await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`);
   } catch (_) { /* already exists */ }
@@ -306,6 +358,8 @@ function initSqlite() {
         duration INTEGER NOT NULL,
         blueprint TEXT,
         practice_exam_id INTEGER,
+        record_enabled INTEGER DEFAULT 0,
+        record_mode TEXT DEFAULT 'none',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -356,6 +410,7 @@ function initSqlite() {
         exam_started_at DATETIME,
         exam_deadline DATETIME,
         disconnected_at DATETIME,
+        recording_password TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -372,6 +427,9 @@ function initSqlite() {
     }
     if (!colNames.includes('disconnected_at')) {
       sqliteDb.exec('ALTER TABLE students ADD COLUMN disconnected_at DATETIME');
+    }
+    if (!colNames.includes('recording_password')) {
+      sqliteDb.exec('ALTER TABLE students ADD COLUMN recording_password TEXT');
     }
     
     sqliteDb.exec(`
@@ -401,6 +459,20 @@ function initSqlite() {
       )
     `);
     
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS violation_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER,
+        type TEXT NOT NULL,
+        text_length INTEGER,
+        content_preview TEXT,
+        question_id TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS ai_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -434,6 +506,28 @@ function initSqlite() {
     if (!adminCols.map((c) => c.name).includes('role')) {
       sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
     }
+
+    // Migration cho SQLite DB cũ: thêm cột nếu chưa có (SQLite không có IF NOT EXISTS cho ADD COLUMN)
+    // (cột role của admin_users đã được migrate ở ngay trên)
+    const batchColNames = (sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[]).map(c => c.name);
+    if (!batchColNames.includes('record_enabled')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN record_enabled INTEGER DEFAULT 0');
+    }
+    if (!batchColNames.includes('exam_type')) {
+      sqliteDb.exec("ALTER TABLE batches ADD COLUMN exam_type TEXT DEFAULT 'essay'");
+    }
+    if (!batchColNames.includes('record_mode')) {
+      sqliteDb.exec("ALTER TABLE batches ADD COLUMN record_mode TEXT DEFAULT 'none'");
+      // Backfill: batch cũ có record_enabled=1 → 's3'
+      sqliteDb.exec("UPDATE batches SET record_mode = 's3' WHERE record_enabled = 1 AND (record_mode IS NULL OR record_mode = 'none')");
+    }
+    // Migration: cột quiz cho question_bank + option_order cho exam_questions (SQLite DB cũ)
+    const qbQuizCols = (sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[]).map(c => c.name);
+    if (!qbQuizCols.includes('options')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN options TEXT');
+    if (!qbQuizCols.includes('correct_answers')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN correct_answers TEXT');
+    if (!qbQuizCols.includes('score')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN score REAL DEFAULT 1');
+    const eqCols = (sqliteDb.prepare("PRAGMA table_info(exam_questions)").all() as { name: string }[]).map(c => c.name);
+    if (!eqCols.includes('option_order')) sqliteDb.exec('ALTER TABLE exam_questions ADD COLUMN option_order TEXT');
 
     console.log('[DB] All SQLite tables initialized');
   } catch (err) {

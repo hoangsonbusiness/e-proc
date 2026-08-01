@@ -1,13 +1,12 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
-import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
 function QuestionBank() {
-  const { isSuperAdmin } = useAuth();
   const [questions, setQuestions] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [questionGroups, setQuestionGroups] = useState<string[]>([]);
@@ -19,6 +18,7 @@ function QuestionBank() {
   // Filter & pagination
   const [selectedModule, setSelectedModule] = useState<string>('');
   const [selectedQuestionGroup, setSelectedQuestionGroup] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'essay' | 'quiz'>('all');
   const [pageSize, setPageSize] = useState<PageSize>(25);
   const [currentPage, setCurrentPage] = useState(1);
 
@@ -61,15 +61,20 @@ function QuestionBank() {
     }
   };
 
-  const handleImport = async () => {
+  const handleImport = async (mode: 'essay' | 'quiz' = 'essay') => {
     if (!file) return;
     setLoading(true);
     setMessage('');
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const res = await adminApi.importQuestions(formData);
-      setMessage(`Imported: ${res.data.imported}, Updated: ${res.data.updated}`);
+      const res = mode === 'quiz'
+        ? await adminApi.importQuizQuestions(formData)
+        : await adminApi.importQuestions(formData);
+      let msg = `Imported: ${res.data.imported}, Updated: ${res.data.updated}`;
+      if (res.data.skipped) msg += `, Skipped: ${res.data.skipped}`;
+      if (res.data.errors?.length) msg += ` — Lỗi: ${res.data.errors.join('; ')}`;
+      setMessage(msg);
       loadQuestions();
       loadModules();
       loadQuestionGroups();
@@ -105,12 +110,16 @@ function QuestionBank() {
   };
 
   // ── Derived data ──────────────────────────────────────────────────────────
+  const QUIZ_TYPES = ['SingleChoice', 'MultipleChoice'];
   const filtered = useMemo(() =>
-    questions.filter(q =>
-      (!selectedModule || q.module === selectedModule) &&
-      (!selectedQuestionGroup || q.question_group === selectedQuestionGroup)
-    ),
-    [questions, selectedModule, selectedQuestionGroup]
+    questions.filter(q => {
+      if (selectedModule && q.module !== selectedModule) return false;
+      if (selectedQuestionGroup && q.question_group !== selectedQuestionGroup) return false;
+      if (selectedCategory === 'quiz') return QUIZ_TYPES.includes(q.type);
+      if (selectedCategory === 'essay') return !QUIZ_TYPES.includes(q.type);
+      return true;
+    }),
+    [questions, selectedModule, selectedQuestionGroup, selectedCategory]
   );
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -198,14 +207,7 @@ function QuestionBank() {
         <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/practice">Practice</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
-      </div>
+      <AdminNav />
 
       {/* ── Import card ── */}
       <div className="card">
@@ -218,11 +220,17 @@ function QuestionBank() {
             onChange={e => setFile(e.target.files?.[0] || null)}
             style={{ width: 'auto' }}
           />
-          <button onClick={handleImport} disabled={!file || loading} className="btn btn-primary">
-            {loading ? 'Importing...' : 'Import'}
+          <button onClick={() => handleImport('essay')} disabled={!file || loading} className="btn btn-primary">
+            {loading ? 'Importing...' : 'Import Essay'}
+          </button>
+          <button onClick={() => handleImport('quiz')} disabled={!file || loading} className="btn btn-secondary">
+            {loading ? 'Importing...' : 'Import Quiz'}
           </button>
         </div>
-        {message && <p className={message.includes('Error') ? 'error' : 'success'}>{message}</p>}
+        <p style={{ color: '#888', fontSize: 12, marginTop: -8 }}>
+          Quiz template (single-row header): ID | Type (SingleChoice/MultipleChoice) | Level | Topic | Question Sample | Option A…F | Correct (e.g. "A" or "A,C,D") | Score
+        </p>
+        {message && <p className={message.includes('Error') || message.includes('Lỗi') ? 'error' : 'success'}>{message}</p>}
       </div>
 
       {/* ── Questions card ── */}
@@ -280,6 +288,22 @@ function QuestionBank() {
               {questionGroups.map(group => (
                 <option key={group} value={group}>{group}</option>
               ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label htmlFor="category-filter" style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>
+              Type:
+            </label>
+            <select
+              id="category-filter"
+              value={selectedCategory}
+              onChange={e => { setSelectedCategory(e.target.value as 'all' | 'essay' | 'quiz'); setCurrentPage(1); setSelectedIds(new Set()); }}
+              style={{ fontSize: 13, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', minWidth: 140 }}
+            >
+              <option value="all">All</option>
+              <option value="essay">Essay / Coding</option>
+              <option value="quiz">Quiz</option>
             </select>
           </div>
 

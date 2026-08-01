@@ -71,6 +71,9 @@ interface CodeEditorProps {
   onCopyAttempt: () => void;
   onCutAttempt: () => void;
   onPasteAttempt: () => void;
+  // Optional: phát hiện paste lớn qua Maccy/Win+V Accessibility API.
+  // Truyền preview (500 ký tự đầu) + độ dài thật để backend ghi forensic log.
+  onSuspiciousPaste?: (preview: string, textLength: number) => void;
   disabled?: boolean;
   defaultLanguage?: SupportedLanguage;
   height?: string;
@@ -86,6 +89,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       onCopyAttempt,
       onCutAttempt,
       onPasteAttempt,
+      onSuspiciousPaste,
       disabled = false,
       defaultLanguage = 'java',
       height = '400px',
@@ -798,7 +802,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       },
       // ─── Frontend: Bootstrap 5 Utility Classes ────────────────────────────
       {
-        group: '🎨 Bootstrap 5 — Utility Classes (gõ tên class)',
+        group: '🎨 Bootstrap 5 — Utility Classes (type the class name)',
         rows: [
           ['d-flex / d-grid / d-none / d-block', 'Display utilities'],
           ['justify-content-{start|end|center|between|evenly}', 'Flex justify-content'],
@@ -1117,10 +1121,47 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           }
         });
 
+        // ── [Anti-Cheat] Suspicious paste detection ───────────────────────
+        //
+        // Maccy (macOS) và Win+V (Windows clipboard history) inject text
+        // qua Accessibility API, bỏ qua keyboard intercept hoàn toàn.
+        // Monaco vẫn nhận event qua onDidChangeModelContent với text.length lớn.
+        //
+        // Threshold 300 ký tự: bắt được cả câu trả lời copy từ Notes (300–800 ký tự)
+        // vốn lọt lưới với ngưỡng 1200 cũ.
+        //
+        // ⚠️ CẢNH BÁO false positive: các snippet IntelliSense lớn trong
+        // useMonacoJavaCompletions.ts (SpringController=366 … GlobalExceptionHandler=1093)
+        // sẽ bị flag oan NẾU được gõ ra. Hiện các snippet này KHÔNG được sử dụng nên
+        // an toàn. Nếu sau này bật lại chúng, phải kèm điều kiện loại snippet
+        // (vd: check suggest widget đang mở) trước khi giữ ngưỡng 300.
+        //
+        // isFlush: bỏ qua khi resume exam (setAnswers → value prop thay đổi)
+        if (onSuspiciousPaste) {
+          let suspiciousPasteLastFired = 0;
+
+          editor.onDidChangeModelContent((e) => {
+            // Bỏ qua flush: xảy ra khi value prop được set từ bên ngoài
+            if (e.isFlush) return;
+
+            const now = Date.now();
+            // Cooldown 10s: tránh report nhiều lần từ cùng 1 paste action
+            if (now - suspiciousPasteLastFired < 10000) return;
+
+            for (const change of e.changes) {
+              if (change.text.length >= 300) {
+                suspiciousPasteLastFired = now;
+                onSuspiciousPaste(change.text.slice(0, 500), change.text.length);
+                break;
+              }
+            }
+          });
+        }
+
         // Auto-focus
         editor.focus();
       },
-      [onCopyAttempt, onCutAttempt, onPasteAttempt]
+      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste]
     );
 
     // ── Language change handler ────────────────────────────────────────────
@@ -1173,7 +1214,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
             <div className="code-editor-guide-header">
               <strong>📖 IntelliSense Prefix Reference</strong>
               <p className="code-editor-guide-desc">
-                Gõ đúng <strong>prefix</strong> bên dưới rồi nhấn <kbd>Ctrl</kbd>+<kbd>Space</kbd> để xem gợi ý.
+                Type the correct <strong>prefix</strong> below, then press <kbd>Ctrl</kbd>+<kbd>Space</kbd> to see suggestions.
                 <br />
                 <strong>Java:</strong> <code>str.</code>, <code>list.</code>, <code>ldt.</code>, <code>ScannerStdin</code>, <code>JDBC Connect</code>...
                 <br />

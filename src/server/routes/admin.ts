@@ -75,7 +75,7 @@ router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
     );
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    console.log('[Auth] Login success:', username);
+    console.log('[Auth] Login success:', username, 'role:', role);
     return res.json({ token, expiresAt, role });
   } catch (err: any) {
     console.error('[Auth] Login error:', err);
@@ -461,6 +461,150 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
   }
 });
 
+// Import ngân hàng câu hỏi QUIZ (SingleChoice / MultipleChoice) từ Excel.
+// Template MỚI (header 1 dòng): ID | Type | Level | Topic | Question Sample |
+//   Option A | Option B | Option C | Option D | Option E | Option F | Correct | Score
+// Correct: chữ cái (A) cho single; nhiều chữ cách nhau phẩy (A,C,D) cho multiple.
+// Score: điểm câu (mặc định 1). Option để trống → câu ít lựa chọn hơn.
+router.post('/questions/quiz/import', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const rawData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1 }) as any[][];
+
+    if (rawData.length < 2) {
+      return res.status(400).json({ error: 'Invalid file format' });
+    }
+
+    const header = rawData[0];
+    const colIndex: Record<string, number> = {};
+    header.forEach((col, i) => {
+      if (col) colIndex[col.toString().trim()] = i;
+    });
+
+    const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
+    const validLevels = ['Easy', 'Medium', 'Hard'];
+    const validTypes = ['SingleChoice', 'MultipleChoice'];
+    const errors: string[] = [];
+    let imported = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    const get = (row: any[], name: string) =>
+      colIndex[name] !== undefined ? row[colIndex[name]] : undefined;
+
+    for (let i = 1; i < rawData.length; i++) {
+      const row = rawData[i];
+      if (!row || row.length === 0) continue;
+
+      const id = get(row, 'ID');
+      const type = get(row, 'Type')?.toString().trim();
+      const level = get(row, 'Level')?.toString().trim();
+      const module = (get(row, 'Topic') ?? get(row, 'Module'))?.toString();
+      const question = get(row, 'Question Sample')?.toString();
+
+      if (!id || !type || !level || !module || !question) {
+        skipped++;
+        continue;
+      }
+      if (!validLevels.includes(level)) {
+        errors.push(`Invalid Level "${level}" for ID ${id}`);
+        continue;
+      }
+      if (!validTypes.includes(type)) {
+        errors.push(`Invalid Type "${type}" for ID ${id} (expected SingleChoice/MultipleChoice)`);
+        continue;
+      }
+
+      // Đọc các option A–F, bỏ qua ô trống
+      const options: { key: string; text: string }[] = [];
+      for (const key of OPTION_KEYS) {
+        const text = get(row, `Option ${key}`);
+        if (text !== undefined && text !== null && text.toString().trim() !== '') {
+          options.push({ key, text: text.toString() });
+        }
+      }
+      if (options.length < 2) {
+        errors.push(`ID ${id}: needs at least 2 options`);
+        continue;
+      }
+
+      // Correct: "A" hoặc "A,C,D" → mảng key, phải nằm trong options
+      const correctRaw = get(row, 'Correct')?.toString() || '';
+      const correct = correctRaw
+        .split(',')
+        .map((s: string) => s.trim().toUpperCase())
+        .filter((s: string) => s.length > 0);
+      const availableKeys = options.map((o) => o.key);
+      const invalidCorrect = correct.filter((c: string) => !availableKeys.includes(c));
+      if (correct.length === 0) {
+        errors.push(`ID ${id}: missing correct answer (Correct column)`);
+        continue;
+      }
+      if (invalidCorrect.length > 0) {
+        errors.push(`ID ${id}: answer "${invalidCorrect.join(',')}" is not among the options`);
+        continue;
+      }
+      if (type === 'SingleChoice' && correct.length !== 1) {
+        errors.push(`ID ${id}: SingleChoice must have exactly 1 correct answer, found ${correct.length}`);
+        continue;
+      }
+
+      const scoreRaw = get(row, 'Score');
+      const score = scoreRaw !== undefined && scoreRaw !== '' && !isNaN(Number(scoreRaw))
+        ? Number(scoreRaw)
+        : 1;
+
+      const normalizedModule = normalizeUnicode(module);
+      const optionsJson = JSON.stringify(options);
+      const correctJson = JSON.stringify(correct);
+
+      const existing = await db.query('SELECT id FROM question_bank WHERE id = $1', [id]);
+      if (existing.rows.length > 0) updated++; else imported++;
+
+      // rubric_* là NOT NULL trong schema → điền '' cho câu quiz
+      if (USE_SQLITE) {
+        await db.query(`
+          INSERT OR REPLACE INTO question_bank
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
+          VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+      } else {
+        await db.query(`
+          INSERT INTO question_bank
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
+          VALUES ($1, $2, $3, $4, $5, '', '', '', $6, $7, $8, CURRENT_TIMESTAMP)
+          ON CONFLICT (id) DO UPDATE SET
+            type = EXCLUDED.type,
+            level = EXCLUDED.level,
+            module = EXCLUDED.module,
+            question_sample = EXCLUDED.question_sample,
+            options = EXCLUDED.options,
+            correct_answers = EXCLUDED.correct_answers,
+            score = EXCLUDED.score,
+            updated_at = CURRENT_TIMESTAMP
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+      }
+    }
+
+    console.log(`[QuizImport] Imported: ${imported}, Updated: ${updated}, Skipped: ${skipped}`);
+    res.json({
+      success: true,
+      imported,
+      updated,
+      skipped,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (error: any) {
+    console.error('Quiz import error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/questions', async (req: Request, res: Response) => {
   try {
     const result = await db.query('SELECT * FROM question_bank ORDER BY module, level');
@@ -766,8 +910,9 @@ router.delete('/practice/:id', async (req: Request, res: Response) => {
 
 router.post('/batches', async (req: Request, res: Response) => {
   try {
-    const { name, start_time, end_time, duration, blueprint, practice_exam_id } = req.body;
-    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, practice_exam_id });
+    const { name, start_time, end_time, duration, blueprint, practice_exam_id, record_mode, exam_type } = req.body;
+    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, practice_exam_id, exam_type, record_mode });
+    const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     if (!name || !start_time || !end_time || !duration) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -786,8 +931,10 @@ router.post('/batches', async (req: Request, res: Response) => {
       // Support both legacy array format and new { blueprintMode, items } object format
       const { items: blueprintItems } = parseBlueprintCompat(blueprint);
       const totalQuestions = blueprintItems.reduce((sum: number, item: any) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
-      if (totalQuestions < 1 || totalQuestions > 20) {
-        return res.status(400).json({ error: 'Total questions must be between 1 and 20' });
+      // Đề quiz (trắc nghiệm) cho phép tới 100 câu; đề tự luận giữ giới hạn 20 câu như trước.
+      const maxQuestions = examType === 'quiz' ? 100 : 20;
+      if (totalQuestions < 1 || totalQuestions > maxQuestions) {
+        return res.status(400).json({ error: `Total questions must be between 1 and ${maxQuestions}` });
       }
       blueprintJson = JSON.stringify(blueprint);
       console.log('[CreateBatch] Blueprint JSON:', blueprintJson);
@@ -797,18 +944,25 @@ router.post('/batches', async (req: Request, res: Response) => {
     const endUTC = toStorageTime(end_time);
     console.log('[CreateBatch] Times (UTC stored):', { start_time: startUTC, end_time: endUTC });
 
+    // Chế độ record ('none' | 'local' | 's3') chỉ được đặt khác 'none' bởi role 'superadmin'.
+    // Admin thường tạo batch → luôn ép 'none'. record_enabled giữ đồng bộ (= mode==='s3') để tương thích ngược.
+    const RECORD_MODES = ['none', 'local', 's3'];
+    let recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
+    if (req.adminUser?.role !== 'superadmin') recordMode = 'none';
+    const recordFlag = recordMode === 's3' ? 1 : 0;
+
     const practiceExamId = isPractice ? parseInt(practice_exam_id) : null;
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id, record_enabled, record_mode, exam_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, recordFlag, recordMode, examType]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id, record_enabled, record_mode, exam_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, !!recordFlag, recordMode, examType]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -860,7 +1014,8 @@ router.get('/batches/:id', async (req: Request, res: Response) => {
 router.put('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, start_time, end_time, duration, blueprint, practice_exam_id } = req.body;
+    const { name, start_time, end_time, duration, blueprint, practice_exam_id, record_mode, exam_type } = req.body;
+    const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
@@ -869,10 +1024,28 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
     const blueprintJson = isPractice ? null : JSON.stringify(blueprint);
     const practiceExamId = isPractice ? parseInt(practice_exam_id) : null;
 
-    await db.query(`
-      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, practice_exam_id = ?
-      WHERE id = ?
-    `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, parseInt(id)]);
+    // Chế độ record: superadmin dùng giá trị client gửi; admin thường KHÔNG đổi được → giữ nguyên mode cũ trong DB.
+    const RECORD_MODES = ['none', 'local', 's3'];
+    let recordMode: string;
+    if (req.adminUser?.role === 'superadmin') {
+      recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
+    } else {
+      const cur = await db.query('SELECT record_mode FROM batches WHERE id = ?', [parseInt(id)]);
+      recordMode = cur.rows[0]?.record_mode || 'none';
+    }
+    const recordFlag = recordMode === 's3' ? 1 : 0;
+
+    if (USE_SQLITE) {
+      await db.query(`
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, practice_exam_id = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+        WHERE id = ?
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, recordFlag, recordMode, examType, parseInt(id)]);
+    } else {
+      await db.query(`
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, practice_exam_id = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+        WHERE id = ?
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, !!recordFlag, recordMode, examType, parseInt(id)]);
+    }
 
     res.json({ success: true });
   } catch (error: any) {
@@ -1211,14 +1384,41 @@ router.get('/batches/:id/results', async (req: Request, res: Response) => {
         ORDER BY eq.question_order
       `, [student.id]);
 
+      // [Anti-Cheat v2] Trả về cả tổng lẫn breakdown theo type để admin review
       const violationsResult = await db.query(`
         SELECT SUM(count) as total FROM violations WHERE student_id = ?
       `, [student.id]);
 
+      const violationsBreakdownResult = await db.query(`
+        SELECT type, count FROM violations WHERE student_id = ? ORDER BY count DESC
+      `, [student.id]);
+
+      // Chuyển array [{type, count}, ...] thành object {tab_switch: 2, suspicious_paste: 1, ...}
+      const violationsBreakdown: Record<string, number> = {};
+      for (const row of violationsBreakdownResult.rows) {
+        violationsBreakdown[row.type] = parseInt(row.count) || 0;
+      }
+
+      // Forensic log: từng lần vi phạm kèm preview (500 ký tự) để admin xem qua popup.
+      // Bọc riêng: nếu bảng chưa tồn tại (DB cũ chưa migrate) thì trả mảng rỗng
+      // thay vì làm sập cả endpoint results.
+      let violationEvents: any[] = [];
+      try {
+        const violationEventsResult = await db.query(`
+          SELECT type, text_length, content_preview, question_id, created_at
+          FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
+        `, [student.id]);
+        violationEvents = violationEventsResult.rows;
+      } catch (evErr: any) {
+        console.error('[results] violation_events query failed (non-fatal):', evErr?.message);
+      }
+
       results.push({
         student,
         questions: questionsResult.rows,
-        violations: parseInt(violationsResult.rows[0]?.total) || 0
+        violations: parseInt(violationsResult.rows[0]?.total) || 0,
+        violations_breakdown: violationsBreakdown,
+        violation_events: violationEvents,
       });
     }
 

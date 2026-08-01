@@ -1,10 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
-import { useAuth } from '../contexts/AuthContext';
+import AdminNav from '../components/AdminNav';
 
 function Results() {
-  const { isSuperAdmin } = useAuth();
   const { id } = useParams<{ id: string }>();
   const [results, setResults] = useState<any[]>([]);
   // Batch dạng Practice: kết quả là danh sách practice_submissions (1 bài làm/học viên)
@@ -16,6 +15,8 @@ function Results() {
   const [editFeedback, setEditFeedback] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Forensic popup: xem chi tiết các lần vi phạm (kèm nội dung paste) của 1 học viên
+  const [violationDetail, setViolationDetail] = useState<{ email: string; events: any[] } | null>(null);
 
   const isPractice = !!batch?.practice_exam_id;
 
@@ -118,14 +119,7 @@ function Results() {
         <Link to="/admin/batches" className="btn btn-secondary">Back to Batches</Link>
       </div>
 
-      <div className="nav">
-        <Link to="/admin/dashboard">Dashboard</Link>
-        <Link to="/admin/questions">Question Bank</Link>
-        <Link to="/admin/batches">Batches</Link>
-        <Link to="/admin/practice">Practice</Link>
-        <Link to="/admin/settings">AI Settings</Link>
-        {isSuperAdmin && <Link to="/admin/users">User Management</Link>}
-      </div>
+      <AdminNav />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <h2>Student Results ({isPractice ? practiceResults.length : results.length})</h2>
@@ -288,7 +282,21 @@ function Results() {
               <tbody>
                 {results.map(r => (
                   <tr key={r.student.id}>
-                    <td>{r.student.email}</td>
+                    <td>
+                      {r.student.email}
+                      {/* Mật khẩu giải nén video record (mode local). HV không thấy — chỉ admin. */}
+                      {r.student.recording_password && (
+                        <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-light)' }}>
+                          🔑 Decryption password:{' '}
+                          <code style={{
+                            background: '#f1f5f9', padding: '1px 5px', borderRadius: 3,
+                            fontFamily: 'monospace', userSelect: 'all', wordBreak: 'break-all',
+                          }}>
+                            {r.student.recording_password}
+                          </code>
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <span style={{
                         padding: '4px 8px',
@@ -301,10 +309,49 @@ function Results() {
                       </span>
                     </td>
                     <td>
-                      {r.violations > 0 && (
-                        <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
-                          {r.violations}
-                        </span>
+                      {r.violations > 0 ? (
+                        <div>
+                          <span style={{ color: 'var(--danger)', fontWeight: 600 }}>
+                            {r.violations} total
+                          </span>
+                          {/* Breakdown chi tiết theo type — mọi type đều lockable (badge cam) */}
+                          {r.violations_breakdown && Object.keys(r.violations_breakdown).length > 0 && (
+                            <div style={{ marginTop: 4, fontSize: 11, lineHeight: 1.6 }}>
+                              {Object.entries(r.violations_breakdown as Record<string, number>)
+                                .sort(([,a], [,b]) => b - a)
+                                .map(([type, count]) => (
+                                  <div key={type} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <span style={{
+                                      display: 'inline-block',
+                                      background: '#fee2e2',
+                                      color: '#991b1b',
+                                      borderRadius: 3,
+                                      padding: '0 4px',
+                                      fontFamily: 'monospace',
+                                      whiteSpace: 'nowrap',
+                                    }}>
+                                      🟠 {type}: <strong>{count}</strong>
+                                    </span>
+                                  </div>
+                                ))}
+                            </div>
+                          )}
+                          {/* Forensic: xem nội dung paste / thời điểm từng lần vi phạm */}
+                          {r.violation_events && r.violation_events.length > 0 && (
+                            <button
+                              onClick={() => setViolationDetail({ email: r.student.email, events: r.violation_events })}
+                              style={{
+                                marginTop: 6, fontSize: 11, cursor: 'pointer',
+                                background: 'transparent', border: '1px solid var(--danger)',
+                                color: 'var(--danger)', borderRadius: 4, padding: '2px 8px',
+                              }}
+                            >
+                              🔍 View details ({r.violation_events.length})
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <span style={{ color: 'var(--text-light)' }}>-</span>
                       )}
                     </td>
                     <td>{getAverageScore(r)}</td>
@@ -416,6 +463,53 @@ function Results() {
             </div>
           )}
         </>
+      )}
+
+      {/* Forensic popup: chi tiết từng lần vi phạm kèm nội dung paste (500 ký tự) */}
+      {violationDetail && (
+        <div
+          onClick={() => setViolationDetail(null)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--card, #fff)', borderRadius: 8, padding: 24,
+              maxWidth: 720, width: '90%', maxHeight: '80vh', overflowY: 'auto',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>Violation details — {violationDetail.email}</h3>
+              <button onClick={() => setViolationDetail(null)} className="btn" style={{ fontSize: 14 }}>✕</button>
+            </div>
+            {violationDetail.events.length === 0 ? (
+              <p style={{ color: 'var(--text-light)' }}>No detailed records.</p>
+            ) : (
+              violationDetail.events.map((ev: any, i: number) => (
+                <div key={i} style={{ marginBottom: 12, padding: 12, background: 'var(--background, #f8f8f8)', borderRadius: 6 }}>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 13, marginBottom: ev.content_preview ? 8 : 0 }}>
+                    <span><strong>🟠 {ev.type}</strong></span>
+                    <span style={{ color: 'var(--text-light)' }}>{new Date(ev.created_at).toLocaleString()}</span>
+                    {ev.text_length != null && <span>{ev.text_length} chars</span>}
+                    {ev.question_id && <span>Q: {ev.question_id}</span>}
+                  </div>
+                  {ev.content_preview && (
+                    <pre style={{
+                      margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                      fontSize: 12, fontFamily: 'monospace', background: '#1e1e1e',
+                      color: '#d4d4d4', padding: 10, borderRadius: 4, maxHeight: 200, overflow: 'auto',
+                    }}>
+                      {ev.content_preview}
+                    </pre>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

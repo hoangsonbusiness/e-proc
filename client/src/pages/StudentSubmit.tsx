@@ -6,10 +6,10 @@ function StudentSubmit() {
   }, []);
 
   return (
-    <div style={{ 
-      minHeight: '100vh', 
-      display: 'flex', 
-      alignItems: 'center', 
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      alignItems: 'center',
       justifyContent: 'center',
       background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
     }}>
@@ -17,7 +17,7 @@ function StudentSubmit() {
         <div style={{ fontSize: 64, marginBottom: 20 }}>✓</div>
         <h2 style={{ marginBottom: 10 }}>Exam Submitted</h2>
         <p style={{ color: 'var(--text-light)', marginBottom: 20 }}>
-          Your answers have been recorded. The AI is evaluating your responses.
+          Your answers have been recorded. The trainer is evaluating your responses.
         </p>
         <p style={{ color: 'var(--text-light)', fontSize: 14 }}>
           Results will be available after processing. Please check back later or contact your administrator.

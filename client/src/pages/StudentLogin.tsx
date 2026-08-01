@@ -33,7 +33,9 @@ function StudentLogin() {
             studentToken: res.data.student_token, // [C-4] JWT xác thực học viên
             email: res.data.emails[0],
             duration: res.data.duration,
-            examKind: res.data.exam_kind // 'practice' → làm bài tại /practice
+            examKind: res.data.exam_kind, // 'practice' → làm bài tại /practice
+            recordMode: res.data.record_mode || (res.data.record_enabled ? 's3' : 'none'), // 'none' | 'local' | 's3'
+            recordingPassword: res.data.recording_password // chỉ có khi mode 'local' (server cấp, HV không thấy)
           }
         });
       }
