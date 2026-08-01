@@ -4,8 +4,8 @@ import { adminApi } from '../services/api';
 interface AuthContextType {
   token: string | null;
   role: string | null;
-  isAdmin: boolean;
   isAuthenticated: boolean;
+  isSuperAdmin: boolean;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => void;
@@ -22,12 +22,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const stored = localStorage.getItem('adminToken');
     const expiresAt = localStorage.getItem('adminTokenExpiry');
+    const storedRole = localStorage.getItem('adminRole');
 
     if (stored && expiresAt) {
       // Kiểm tra token có còn hạn không
       if (new Date(expiresAt) > new Date()) {
         setToken(stored);
-        setRole(localStorage.getItem('adminRole'));
+        setRole(storedRole);
       } else {
         // Token đã hết hạn — xóa đi
         localStorage.removeItem('adminToken');
@@ -63,8 +64,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         token,
         role,
-        isAdmin: role === 'admin',
         isAuthenticated: !!token,
+        isSuperAdmin: role === 'superadmin',
         isLoading,
         login,
         logout,

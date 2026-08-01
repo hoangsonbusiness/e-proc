@@ -36,8 +36,7 @@ api.interceptors.response.use(
     if (
       error.response?.status === 401 &&
       window.location.pathname.startsWith('/admin') &&
-      !window.location.pathname.includes('/admin/login') &&
-      !window.location.pathname.includes('/admin/setup')
+      window.location.pathname !== '/admin'
     ) {
       localStorage.removeItem('adminToken');
       window.location.href = '/admin';
@@ -48,26 +47,27 @@ api.interceptors.response.use(
 
 export const adminApi = {
   // --- Auth endpoints ---
-  isInitialized: () =>
-    api.get('/admin/is-initialized'),
-
   login: (username: string, password: string) =>
     api.post('/admin/login', { username, password }),
 
   logout: () =>
     api.post('/admin/logout').finally(() => localStorage.removeItem('adminToken')),
 
-  setup: (username: string, password: string) =>
-    api.post('/admin/setup', { username, password }),
-
-  // Quản lý user (chỉ admin)
-  getUsers: () => api.get('/admin/users'),
-  createUser: (username: string, password: string, role: 'admin' | 'mod') =>
-    api.post('/admin/users', { username, password, role }),
-  deleteUser: (id: number) => api.delete(`/admin/users/${id}`),
-
   changePassword: (currentPassword: string, newPassword: string) =>
     api.put('/admin/change-password', { currentPassword, newPassword }),
+
+  // --- User management endpoints (superadmin only) ---
+  listUsers: () =>
+    api.get('/admin/users'),
+
+  createUser: (username: string, password: string, role: 'admin' | 'superadmin') =>
+    api.post('/admin/users', { username, password, role }),
+
+  updateUser: (id: number, data: { role?: 'admin' | 'superadmin'; password?: string }) =>
+    api.put(`/admin/users/${id}`, data),
+
+  deleteUser: (id: number) =>
+    api.delete(`/admin/users/${id}`),
 
   // --- Question endpoints ---
   importQuestions: (formData: FormData) =>
@@ -81,16 +81,28 @@ export const adminApi = {
   
   getModules: () =>
     api.get('/admin/questions/modules'),
-  
+
+  getQuestionGroups: () =>
+    api.get('/admin/questions/question-groups'),
+
+  getModuleGroups: () =>
+    api.get('/admin/questions/module-groups'),
+
   getModuleStats: () =>
     api.get('/admin/questions/module-stats'),
-  
+
+  getModuleGroupStats: () =>
+    api.get('/admin/questions/module-group-stats'),
+
   getTypeStats: () =>
     api.get('/admin/questions/type-stats'),
-  
+
   getModuleTypeStats: () =>
     api.get('/admin/questions/module-type-stats'),
-  
+
+  getModuleGroupTypeStats: () =>
+    api.get('/admin/questions/module-group-type-stats'),
+
   deleteQuestion: (id: string) =>
     api.delete(`/admin/questions/${id}`),
   
@@ -139,13 +151,35 @@ export const adminApi = {
   exportResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results/export`, { responseType: 'blob' }),
 
+  // --- Practice exam endpoints (quản lý riêng, import từ .docx) ---
+  importPractice: (formData: FormData) =>
+    api.post('/admin/practice/import', formData),
+
+  getPracticeExams: () =>
+    api.get('/admin/practice'),
+
+  getPracticeExam: (id: number) =>
+    api.get(`/admin/practice/${id}`),
+
+  deletePracticeExam: (id: number) =>
+    api.delete(`/admin/practice/${id}`),
+
+  getPracticeResults: (batchId: number) =>
+    api.get(`/admin/batches/${batchId}/practice-results`),
+
+  updatePracticeResult: (studentId: number, data: any) =>
+    api.put(`/admin/practice-results/${studentId}`, data),
+
+  exportPracticeResults: (batchId: number) =>
+    api.get(`/admin/batches/${batchId}/practice-results/export`, { responseType: 'blob' }),
+
   // --- AI Settings endpoints ---
   getAISettings: () =>
     api.get('/admin/settings/ai'),
-  
+
   saveAISettings: (settings: any) =>
     api.post('/admin/settings/ai', settings),
-  
+
   testAI: (settings: any) =>
     api.post('/admin/settings/ai/test', settings)
 };
@@ -184,6 +218,20 @@ export const studentApi = {
   // Xin presigned PUT URL để upload 1 phần video record thẳng lên S3
   getRecordingUploadUrl: (partIndex: number, contentType: string) =>
     api.post('/student/exam/recording-url', { partIndex, contentType }),
+
+  // --- Run code (học viên tự kiểm tra tính đúng đắn) ---
+  runCode: (language: string, code: string, stdin?: string) =>
+    api.post('/student/run', { language, code, stdin }),
+
+  // --- Practice exam (bài thi practice import từ .docx) ---
+  getPractice: () =>
+    api.get('/student/practice'),
+
+  savePracticeAnswer: (answer: string) =>
+    api.post('/student/practice/answer', { answer }),
+
+  submitPractice: () =>
+    api.post('/student/practice/submit', {}),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

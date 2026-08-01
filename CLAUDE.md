@@ -51,7 +51,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `/exam` → active exam page
   - `/submit` → submission complete page
 - Admin flow routes:
-  - `/admin`, `/admin/dashboard`, `/admin/questions`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`
+  - `/admin`, `/admin/dashboard`, `/admin/questions`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`, `/admin/users` (superadmin-only, see **Admin authentication** below)
 - API wrapper: `client/src/services/api.ts`
   - `adminApi` contains admin CRUD/reporting endpoints; attaches admin JWT via request interceptor
   - `studentApi` contains exam lifecycle endpoints and violation reporting; attaches student JWT via request interceptor (see **Student auth** section below)
@@ -74,25 +74,34 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - if `DATABASE_URL` is present, production-style PostgreSQL path is used
 - Core tables are created in the DB layer on startup:
   - `question_bank`
-  - `batches`
+  - `batches` (has nullable `practice_exam_id` — set = the batch is a Practice batch, see **Practice exams** below)
   - `students`
   - `exam_questions`
   - `violations`
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
-  - `ai_queue`
+  - `ai_queue` (has `kind` column: `'exam'` grades an `exam_questions` row, `'practice'` grades a `practice_submissions` row — for practice jobs, `exam_question_id` actually holds the `practice_submissions.id`)
   - `ai_settings`
+  - `practice_exams` / `practice_submissions` (see **Practice exams** below)
+- `question_bank` columns relevant to import/grading/export (see "Question bank: groups and HTML-safe plain text" below):
+  - `module` — topic/category (e.g. "Pointers", "OOP")
+  - `question_group` — nullable, names the question set a question belongs to (e.g. `CPP_PRINT_IOT`, `CPP_EMB_AUTOSAR`), used to disambiguate question sets that otherwise share the same `module`/`level`/`type` framework
+  - `question_sample` — original content as imported, may contain HTML markup (rendered to students via sanitized `dangerouslySetInnerHTML`)
+  - `question_plain` — nullable, HTML-stripped plain-text version of `question_sample`, auto-generated at import time; used anywhere the question text is consumed by something other than the student-facing renderer (AI grading prompts, Excel export)
   - `admin_users`
 
 ### Security model
 
 #### Admin authentication & roles
-- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`) + `role`; login response and the JWT payload both carry `role` (read from `admin_users.role`, no longer hard-coded)
+- `POST /api/admin/login` → returns JWT (`expiresIn: 24h`) **and** the account's `role` (`'admin'` | `'superadmin'`), both in the response body and inside the JWT payload (read from `admin_users.role`, no longer hard-coded)
 - Stored in `localStorage.adminToken` (+ `localStorage.adminRole`); sent as `Authorization: Bearer <token>` header
-- All `/api/admin/*` routes after `/login` and `/setup` require `authMiddleware`
-- **Roles (added 2026-07-29):** `admin_users.role` ∈ `{'admin', 'mod'}` (default `'admin'`; pre-existing users migrate to `'admin'`). `requireAdmin` middleware (`src/server/middleware/auth.ts`) gates admin-only routes with 403.
-  - **User management** (`GET/POST/DELETE /api/admin/users`) is `requireAdmin`-only. Frontend page `/admin/users` (`UserManagement.tsx`); the nav link and page are hidden/redirected for mods via `useAuth().isAdmin` — but the **backend `requireAdmin` is the real gate**, the frontend hiding is only UX.
-  - **Recording mode per batch** (`batches.record_mode` ∈ `{'none','local','s3'}`, default `'none'`; replaced the old boolean `batches.record_enabled` toggle — 2026-07-30): only `role === 'admin'` may set it to anything other than `'none'`. Enforced server-side in `POST/PUT /api/admin/batches` — on create a mod's requested mode is **forced to `'none'`**; on update a mod's request **keeps the existing DB `record_mode` unchanged** (mod can neither enable nor change it, for `local` OR `s3`). The batch form dropdown is `disabled` for mods (UX only). `record_enabled` is kept in sync (`= record_mode === 's3'`) for backward compat but `record_mode` is the source of truth. The `UserManagement.tsx` role selector labels mod as "cannot enable screen recording".
+- All `/api/admin/*` routes after `/login` require `authMiddleware`
+- **Roles:** `admin_users.role` ∈ `{'admin', 'superadmin'}`. `requireSuperAdmin` (`src/server/middleware/auth.ts`) gates privileged routes with 403.
+  - **Recording mode per batch** (`batches.record_mode` ∈ `{'none','local','s3'}`, default `'none'`; replaced the old boolean `batches.record_enabled` toggle): only `role === 'superadmin'` may set it to anything other than `'none'`. Enforced server-side in `POST/PUT /api/admin/batches` — on create a plain admin's requested mode is **forced to `'none'`**; on update it **keeps the existing DB `record_mode` unchanged** (a plain admin can neither enable nor change it, for `local` OR `s3`). The batch form dropdown is `disabled` for non-superadmins (UX only). `record_enabled` is kept in sync (`= record_mode === 's3'`) for backward compat but `record_mode` is the source of truth.
 - Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) also require admin JWT
+- **Self-service admin registration has been removed** (2026-07 security hardening): `GET /is-initialized` and `POST /setup` no longer exist. Instead:
+  - The first `admin_users` row is seeded automatically at DB startup by `seedSuperAdmin()` in `src/server/db/postgres.ts`, **only when the table is empty** — username/password default to `supperadmin` / `superadmin123#2nf` (role `superadmin`), overridable via the `SUPERADMIN_USERNAME` / `SUPERADMIN_PASSWORD` env vars. **Change this password immediately after first login** (`PUT /api/admin/change-password`) — the default lives in git history.
+  - All other admin accounts can only be created/edited/deleted by an existing `superadmin`, via `GET/POST/PUT/DELETE /api/admin/users` (`src/server/routes/admin.ts`), gated by the `requireSuperAdmin` middleware (`src/server/middleware/auth.ts`) which checks `req.adminUser.role === 'superadmin'`. Guards in place: an account cannot demote or delete itself, and the last remaining `superadmin` cannot be deleted.
+  - Frontend: `client/src/pages/UserManagement.tsx` (route `/admin/users`) is the only UI for this — gated both by `PrivateRoute`'s `requireSuperAdmin` prop (`client/src/components/PrivateRoute.tsx`) and by conditionally rendering the "User Management" nav link (`isSuperAdmin` from `AuthContext`) across all admin pages. Non-superadmin accounts never see the link and are bounced to `/admin/dashboard` if they navigate to the URL directly — though the real enforcement is server-side (`requireSuperAdmin`), since client-side gating alone is not a security boundary.
 
 #### Student authentication
 After the security hardening (2026-07), student auth works via a signed JWT rather than an unverified header:
@@ -197,9 +206,52 @@ The `violations` table is keyed by `(student_id, type)` and only stores a runnin
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
 
+### Practice exams (long-form .docx exams, separate from question_bank)
+A second exam mode, fully independent of the question-bank/blueprint pipeline:
+
+- **Data model**: `practice_exams` (id, name, `content_html` from mammoth docx→HTML conversion, `content_plain` via `stripHtml()` for the AI grading prompt) and `practice_submissions` (one row per student: answer + ai/trainer score/feedback). A batch becomes a Practice batch by having `batches.practice_exam_id` set (blueprint is stored NULL for those); one batch is either blueprint-based or practice-based, never both.
+- **Admin import**: `POST /api/admin/practice/import` (`src/server/routes/admin.ts`) accepts a `.docx` upload (multer memory storage) + optional name, converts with `mammoth.convertToHtml`, stores both HTML and stripped plain text. Managed in `client/src/pages/PracticeManagement.tsx` at `/admin/practice` (list/preview/delete; delete is blocked while any batch references the exam). Batch creation (`BatchManagement.tsx`) has a "Question Bank | Practice" tab — Practice mode swaps the blueprint UI for a practice-exam `<select>` and sends `practice_exam_id` instead of `blueprint`.
+- **Student flow**: same access-code login. `POST /student/verify` returns `exam_kind: 'practice' | 'exam'` (derived from `batches.practice_exam_id`); `StudentConfirm.tsx` routes to `/practice` instead of `/exam` accordingly. `client/src/pages/StudentPractice.tsx` renders the docx HTML (DOMPurify-sanitized) in a left panel and a single Monaco CodeEditor (one answer for the whole exam) on the right. It intentionally duplicates the anti-cheat/timer/violation logic of `StudentExam.tsx` — changes to anti-cheat behavior must be applied to BOTH files.
+- **Student API** (`src/server/routes/student.ts`): `GET /student/practice` (auto-starts on first call: sets deadline + creates the `practice_submissions` row; enforces the same 410 timeout/absent guards as `/exam/questions`), `POST /student/practice/answer` (direct DB update — no buffer, since it's a single answer, client debounces 2s), `POST /student/practice/submit`. Violations and the disconnect beacon reuse the shared `/student/violation` and `/exam/disconnect` endpoints.
+- **AI grading**: `cache.addToQueue(id, studentId, 'practice')` — queue jobs carry `kind`; practice jobs JOIN `practice_submissions`+`practice_exams` and grade the whole answer against `content_plain` holistically (no rubric columns). Results written back to `practice_submissions`.
+- **Trainer review**: `GET /api/admin/batches/:id/practice-results` + `PUT /api/admin/practice-results/:studentId`; `Results.tsx` detects `batch.practice_exam_id` and renders the practice results table/review panel instead of the per-question view. Excel export (`GET /api/admin/batches/:id/practice-results/export`, wired to the same "Export Excel" button) is a single sheet, one row per student (Email, Status, Violation Count, Answer, AI Score, AI Feedback, Trainer Score, Trainer Feedback) — different shape from the regular exam export (`.../results/export`, one sheet per student, one row per question), since a practice batch has one holistic answer per student rather than several graded questions.
+- **Students import**: `POST /batches/:id/students/import` skips blueprint validation and question assignment entirely for practice batches (students are created with access codes only). Student reset/delete and batch delete also clean up `practice_submissions`.
+- **Run code (self-check)** — "▶ Run Code" button on `/practice`, **local-first** to keep load off the t3.micro:
+  - `python`/`c`/`cpp` run **in the student's browser** (`client/src/services/localRunner.ts`): Pyodide (real CPython→WASM) for Python, JSCPP (JS interpreter, C++ *subset* — fine for junior exercises, not full g++) for C/C++. Each runtime runs in a reused Web Worker loaded from CDN (first run downloads ~5-10s, warm runs are instant); infinite loops are handled by `worker.terminate()` on timeout (60s cold / 8s warm). Zero server requests for these languages.
+  - `cobol`/`java` have no viable browser runtime → they still go through `POST /api/student/run` (`src/server/coderunner.ts`): gcc/g++/python3/cobc (tries `-free`, falls back to fixed-format)/javac. Resource guards: **strictly sequential FIFO queue** — 1 submission compiles/runs at a time; each job's temp dir (source + binary) is deleted **synchronously before the next job starts** (disk/RAM freed between jobs), queue holds up to 20 waiting submissions (a full class), 429 beyond that; stale `coderun-*` temp dirs from a previous crash are swept at server startup. Also: 1 run per student at a time, compile timeout 10s / run 5s with process-group SIGKILL, Linux ulimits (256MB vmem / 64 procs / 10MB files), output capped 64KB, **clean env** (`PATH` only — never `DATABASE_URL`/`JWT_SECRET`), only `in_progress` students. Set `ENABLE_SERVER_CODE_RUN=false` to hard-disable server-side execution (returns 503). NOT a hard sandbox (runs as app user) — internal training only; Docker/nsjail/Judge0 is the upgrade path. One-time EC2 install: `sudo apt install -y gnucobol default-jdk` (gcc/g++/python3 only needed if server-side C/C++/Python runs are ever re-enabled for fallback).
+
+### Code editor language support (student answer editor)
+- The Monaco-based answer editor is `client/src/components/CodeEditor.tsx`. `LANGUAGE_OPTIONS`/`SupportedLanguage` there is the single source of truth for which languages appear in the student-facing "Language:" dropdown; add new languages there.
+- Monaco ships `c`, `cpp`, `python`, and `csharp` as built-in languages already (`c`/`cpp` registered by its own `basic-languages/cpp/cpp.contribution.js` under two separate ids sharing one tokenizer) — no extra registration needed for any of those four.
+- Monaco has **no built-in COBOL support**. `client/src/hooks/useMonacoCobolLanguage.ts` registers a minimal custom Monarch tokenizer for it (`registerCobolLanguage()`, called once from `CodeEditor`'s `beforeMount`) — keyword list only, no IntelliSense/completions (unlike the Java completions in `useMonacoJavaCompletions.ts`). If COBOL support needs to get richer (snippets, division-aware completions), extend that file following the Java completions file as a pattern.
+- `detectLanguage(questionType, questionModule)` in `CodeEditor.tsx` picks the editor's *default* language from the question's `type`/`module` text (student can still override via the dropdown) — it matches `cobol`, `python` (`python|py|django|flask|pandas`), `csharp` (`c#|csharp|.net|dotnet|asp.net`), and C/C++ via `c\+\+|cpp|embedded|mcu|isr|autosar` (falls to `cpp`) or a standalone `c` word (falls to `c`). It still defaults to `java` when nothing matches, which is a holdover from this platform's original Java-exam use case — reconsider that default if this platform is now primarily used for C/C++ embedded question banks (see `D:\Workspaces\C_CPP\...` import files referenced elsewhere in this doc).
+
+### Two independent deployment methods — keep both, don't mix them
+This repo intentionally supports **two separate, independent deployment paths**. Neither depends on the other, and a change to one should not assume it applies to the other:
+
+1. **Vercel** (`vercel.json`) — builds `dist/server/index.js` (`@vercel/node`) and serves static assets from `client/dist/**`, with `public/` referenced as the html/asset fallback path in some historical setups. This path is defined and kept in the repo for whoever/whenever Vercel is the target, but is **not what currently serves `epoc.devfasttrack.cloud`**.
+2. **Self-hosted EC2 + nginx + pm2, via `deploy/scripts/deploy.sh`** — this is the method actually used for `epoc.devfasttrack.cloud` today, and it **does not use Vercel in any way**: no `vercel.json` step runs, no Vercel CLI/API is involved, nothing is deployed to Vercel's infrastructure. Building "via deploy.sh" means: SSH/EC2-console into the instance, `git pull`, rebuild `dist/` and `client/dist/` locally on that same box with plain `npm run build:*`, and restart via `pm2`. See below for the full flow.
+
+When troubleshooting "why doesn't my change show up," first confirm **which of the two** environments you're actually looking at (their URLs differ) — don't assume Vercel-style behavior (auto-deploy on push, `public/` as the served path) applies to the EC2/deploy.sh target, and vice versa.
+
+### Static runtime path
+- There are three frontend runtime modes that have existed in this repo's history:
+  - Vite dev mode from `client/src/**` (`npm run dev` in `client/`)
+  - `public/index.html` + `public/assets/**` — the path referenced by the Vercel deployment method (see above). Not used by the EC2/deploy.sh deployment.
+  - `client/dist/**` — built by both deployment methods, but only the EC2/deploy.sh method serves it directly (via nginx); Vercel's `vercel.json` also serves `client/dist/**` for static assets, so this path is actually shared by both.
+- For behavior changes in `StudentExam.tsx`, always confirm which runtime is actually being served before concluding a fix works. If you're testing against the EC2 deployment specifically, that means `client/dist/` (rebuilt by `deploy/scripts/deploy.sh` on the server itself, not by syncing artifacts from a dev machine) — `public/` syncing is irrelevant there. If you're testing against a Vercel deployment, `public/` may matter; check `vercel.json`'s routes.
+
+### EC2 + nginx + pm2 deployment (`deploy/scripts/deploy.sh`)
+- Production at `epoc.devfasttrack.cloud` (at the time of writing) runs on a self-hosted EC2 instance — accessed via the AWS EC2 console (EC2 Instance Connect / Session Manager), not a persistent SSH key setup.
+- Deploy flow: `deploy/scripts/deploy.sh`, run from `/opt/eaudit/app` on the instance. It does `git pull origin main`, `rm -rf dist client/dist`, rebuilds both (`npm run build:server`, `cd client && npm run build`), then `pm2 delete/start eaudit` running `dist/server/server.js`. It does **not** touch `public/`, and does **not** invoke Vercel in any way.
+- nginx config: `deploy/nginx/eaudit.conf`. `/api/*` reverse-proxies to `http://127.0.0.1:3001` (the pm2-managed Node process); everything else is served as static files from `/opt/eaudit/app/client/dist` with SPA fallback (`try_files $uri $uri/ /index.html`).
+- DB is Postgres via RDS (`DATABASE_URL` set in the EC2 instance's `.env`, not committed to the repo) — so `USE_SQLITE` is `false` on this deployment; the SQLite code paths only run in local dev.
+- **Pushing to `origin/main` does not deploy anything by itself on this path.** There is no CI/CD webhook wired up as of this writing — someone must manually re-run `deploy/scripts/deploy.sh` on the EC2 instance after a push for the change to go live. If a fix "isn't showing up," the first thing to check is whether `deploy.sh` was actually re-run after the relevant commit landed on `main` — e.g. `cd /opt/eaudit/app && git log -1 --oneline` on the instance, compared against the latest commit that should be live.
+- Practical corollary seen in this repo's history: a question-bank import can appear to "not save a field" when the real cause is that the import ran against still-deployed old code (before a deploy), writing an empty value for a newer column, and simply needs to be **re-imported** after the deploy actually lands — re-importing the same file goes through the `ON CONFLICT DO UPDATE` / `INSERT OR REPLACE` path and overwrites the stale empty value correctly (verified: this is not a query bug, `db.query()`'s handling of `question_group` is correct in both DB modes).
+
 #### Screen recording — three modes: `none` / `local` / `s3` (per-batch `record_mode`)
 
-The exam can record the candidate's full screen. Since 2026-07-30 the per-batch setting is a **3-value `record_mode`** (`batches.record_mode`, replacing the old boolean `record_enabled` — admin-only, see Admin roles):
+The exam can record the candidate's full screen. Since 2026-07-30 the per-batch setting is a **3-value `record_mode`** (`batches.record_mode`, replacing the old boolean `record_enabled` — superadmin-only, see Admin roles):
 
 - **`none`** — no recording. `StudentConfirm` skips screen-share entirely; `StudentExam` skips the `recording_stopped` handler and resume-after-reload guard.
 - **`s3`** — records and uploads **directly to AWS S3** via presigned PUT URLs during the exam (details below). The video never resides on the candidate's machine.
@@ -232,21 +284,40 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Client-side zip encryption:** `client/src/services/examRecorder.ts` uses **`@zip.js/zip.js`** (`ZipWriter` with `password`, `encryptionStrength: 3` = AES-256, `level: 0` — no recompression since webm is already compressed). Each 5-min part becomes `exam_{stamp}_part{NNN}.zip` written to the folder via File System Access API.
 - **Password provenance:** `POST /api/student/verify` generates `crypto.randomBytes(24).toString('base64url')` **once per `students` row** and stores it in `students.recording_password` (reused on subsequent `/verify` calls for that row, so resume uses the same password). It is returned to the client **only for `local` mode** (needed to encrypt) and **never displayed to the candidate**.
 - **Password scope:** keyed by `students.id`, and since a `students` row is one **(person × batch)**, the same person in different batches gets **different** passwords; all zip parts of one exam attempt share **one** password.
-- **Admin retrieval:** the password is surfaced on the **Results page** (`Results.tsx`) next to each student (`r.student.recording_password`, admin-only) so an admin can decrypt the GitLab-committed zip. It rides along in the `/batches/:id/results` payload via `SELECT s.*`.
+- **Admin retrieval:** the password is surfaced on the **Results page** (`Results.tsx`) next to each student (`r.student.recording_password`, admin view) so an admin can decrypt the GitLab-committed zip. It rides along in the `/batches/:id/results` payload via `SELECT s.*`.
 - **DB columns:** `batches.record_mode` (VARCHAR(16)/TEXT default `'none'`) and `students.recording_password` (TEXT), created + migrated in `src/server/db/postgres.ts` for both Postgres and SQLite. Migration backfills `record_mode='s3'` where the old `record_enabled` was true. **Deploy note (Vercel + Supabase):** these `ALTER TABLE`s run automatically at DB init on cold-start (idempotent, `IF NOT EXISTS` + try/catch), but to avoid a race on the first few requests after deploy, prefer running them manually in the Supabase SQL Editor **before** deploying.
-
-### Static runtime path
-- There are **three** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
-  - Vite dev mode from `client/src/**` (`npm run dev` in `client/`)
-  - static/public mode from `public/index.html` + `public/assets/**` (a separate, currently-stale build path — last known update predates the `extension_panel` feature; do not assume it's in sync with `client/dist`)
-  - **Vercel production**, per `vercel.json`: builds/serves `dist/server/index.js` (compiled from `src/**` via `npm run build:server` → `tsc`, outDir `dist`) for `/api/*`, and `client/dist/**` (via `npm run build:client`) as static assets for everything else. This is the actual production path — `public/**` and the legacy root `server/**` directory are **not** what Vercel serves, despite both existing in the repo (see "Source of truth" note above).
-- A successful `client/dist` or `dist/server` build does not affect a different runtime path unless that path's artifacts are also rebuilt/synced. All three paths can silently diverge from `src/**`/`client/src/**` at once.
-- **Vercel build cache gotcha (confirmed 2026-07-21):** a fix was correctly committed to `src/server/routes/student.ts` and `dist/server/routes/student.js` (verified present via `git show <commit>:<path>`), Vercel auto-deployed the correct commit, yet the live deployment still served the old behavior. Redeploying with **"Use existing Build Cache" = OFF** resolved it. If a change appears correctly committed and deployed from the right commit but still doesn't take effect live, try a cache-disabled redeploy before assuming the code itself is wrong.
 
 ### Queue / AI grading
 - Queue and answer-buffer orchestration live in `src/server/cache.ts`
 - AI evaluation provider settings are also read there (`ai_settings` plus env fallback)
 - The server initializes DB, cache, and queue processing on startup in `src/server/index.ts`
+- The AI grading prompt (built in `src/server/cache.ts`, inside the queue-processing job) uses `eq.question_plain` (falling back to `stripHtml(eq.question_sample)` for rows imported before this column existed) — never the raw HTML `question_sample`. Rubric fields (`rubric_must_have`/`rubric_nice_to_have`/`rubric_optional`) are still passed as-is (not HTML-stripped); they are expected to be entered as plain text via the Excel rubric columns.
+
+### Question bank: groups and HTML-safe plain text
+- Import happens via `POST /api/admin/questions/import` in `src/server/routes/admin.ts`, parsing an uploaded `.xlsx`/`.xls` with `xlsx`.
+- Excel header column for question group: `QuestionGroup` (aliases also accepted: `Question Set`, `Bộ đề`). If absent/blank, `question_group` is stored as an empty string.
+- `question_plain` is always (re)computed at import time from `question_sample` via `stripHtml()` in `src/utils/string.ts` — it is not user-supplied. `stripHtml()` converts block-level tags (`<br>`, `</p>`, `</li>`, `</tr>`, headings) to newlines, list items to `- ` prefixes, strips all remaining tags, and decodes a small set of HTML entities (`&nbsp;`, `&amp;`, etc.).
+- Frontend: `client/src/pages/QuestionBank.tsx` shows a "Question Group" column and an independent filter dropdown (combinable with the Module filter). Distinct values come from `GET /api/admin/questions/question-groups`.
+- Student-facing rendering of `question_sample` (in `client/src/pages/StudentExam.tsx`) uses `DOMPurify.sanitize(...)` before `dangerouslySetInnerHTML` — this is a separate, independent safeguard from `question_plain` and must be kept even though `question_plain` now exists.
+- `client/src/pages/Results.tsx` (trainer manual-review view) still renders `q.question_sample` as plain JSX text (React-escaped, so HTML tags show up literally to the trainer) — this was not changed and is a known display quirk, not a security issue, since it isn't `dangerouslySetInnerHTML`.
+
+### Module + question group disambiguation in exam blueprints
+- The same `module` name can exist under multiple `question_group`s (e.g. "Chapter 10: Unit Testing" imported once under `CPP_EMB_PRINT_IOT` and once under `CPP_EMB_AUTOSAR`). `module` alone is therefore not a unique selector for blueprint/exam purposes — every blueprint item now carries both `module` and `question_group`.
+- Backend endpoints for this (`src/server/routes/admin.ts`):
+  - `GET /questions/module-groups` — distinct `{ module, question_group }` combos, used to populate Module dropdowns.
+  - `GET /questions/module-group-stats` / `GET /questions/module-group-type-stats` — per-(module, question_group[, type]) counts by level, used to compute per-row "Có sẵn" availability and to validate blueprint rows.
+  - `POST /batches/:id/check-feasibility` and the question-picking logic inside `POST /batches/:id/students/import` both filter by `question_group` when a blueprint item specifies one (case-insensitive, via `LOWER(question_group) = ?`); omitting `question_group` on an item (legacy blueprints) falls back to matching on `module` alone.
+  - Question-picking for `students/import` is centralized in the `pickQuestionIds()` helper in `admin.ts` (replaces what used to be 6 near-duplicated inline query blocks for module/type/level combinations) — extend that helper rather than re-duplicating query blocks if new selection dimensions are added.
+- Frontend (`client/src/pages/BatchManagement.tsx`): Module `<select>` dropdowns (both "By Module" and "By Module + Type" blueprint modes, in both the Create and Edit batch forms) render **combo options** built from `moduleGroups`, labeled `"<module> (<question_group>)"` (or just `<module>` when there is no group). The combo is encoded as a single option value via `comboKey()`/`decodeComboKey()` (`` `${module}|||${question_group}` ``) since a native `<select>` can only carry one string value per option. Stats/availability lookups (`getStatsForModuleGroup`, `getStatsForModuleGroupType`) and blueprint validation are keyed on the `(module, question_group)` pair, not `module` alone — this matters because two combos can share a module name with different available question counts.
+- Legacy batches saved before `question_group` existed are handled in `handleEditBatch()`: blueprint items loaded from the DB are defaulted to `question_group: ''` so the combo dropdowns always have a matching option to select.
+- `client/src/services/api.ts` exposes `getModuleGroups`, `getModuleGroupStats`, `getModuleGroupTypeStats` for this. The older `getModules`/`getModuleStats`/`getModuleTypeStats` (module-only, no group) are still used by `QuestionBank.tsx`'s simpler Module filter dropdown, which is a plain list/filter UI, not a blueprint-authoring UI, so it does not need combo disambiguation.
+
+### Export filenames
+- `GET /api/admin/batches/:id/students/export` and `GET /api/admin/batches/:id/results/export` (in `src/server/routes/admin.ts`) derive the downloaded filename from the batch's `name` (looked up via `SELECT name FROM batches WHERE id = ?`), not from the batch id. Filenames are `<sanitized-batch-name>-students.xlsx` / `<sanitized-batch-name>-results.xlsx`; if the batch has no name, it falls back to `batch-<id>`.
+- Filename sanitization/encoding helpers live in `src/utils/string.ts`:
+  - `sanitizeFilename()` strips filesystem-unsafe characters and collapses whitespace to `_`.
+  - `buildContentDisposition()` emits both an ASCII-diacritics-stripped `filename=` fallback and a full UTF-8 `filename*=` (RFC 5987) value, so Vietnamese batch names with diacritics survive the download with the correct display name in modern browsers while still degrading gracefully elsewhere.
+- When testing these endpoints manually from a shell, be aware that passing non-ASCII batch names as inline `curl -d '...'` command-line arguments can get mangled by the shell/terminal encoding (observed on Windows Git Bash) before the request ever reaches the server — this is a testing-tool artifact, not an application bug. Write the JSON payload to a UTF-8 file and use `curl --data-binary @file.json` instead when verifying Unicode behavior.
 - Supported AI providers: `gemini`, `openai`, `azure`, `deepseek`, `groq`, `openrouter`, `ollama`
 - AI API keys are stored in the `ai_settings` table in the database
 
@@ -271,6 +342,9 @@ Batches support two blueprint formats for question assignment:
 | `QUEUE_PROCESS_INTERVAL` | No | `10000` | Milliseconds between AI queue processing ticks |
 | `DB_POOL_MAX` | No | `10` | PostgreSQL connection pool max size |
 | `DB_POOL_MIN` | No | `2` | PostgreSQL connection pool min size |
+| `ENABLE_SERVER_CODE_RUN` | No | enabled | Set to `'false'` to disable server-side code execution (`POST /api/student/run` returns 503). Browser-local runs (python/c/cpp) are unaffected. |
+| `SUPERADMIN_USERNAME` | No | `supperadmin` | Username seeded as the first `admin_users` row (role `superadmin`) when the table is empty. See **Admin authentication**. |
+| `SUPERADMIN_PASSWORD` | No | `superadmin123#2nf` | Password for the seeded superadmin account above. Set this explicitly in production instead of relying on the hardcoded default. |
 | `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
 | `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
@@ -282,6 +356,11 @@ Batches support two blueprint formats for question assignment:
 - The frontend build uses hashed filenames, so any manual static sync to `public/` must update `public/index.html` to the new hash.
 - There is no dedicated lint or test script in the current package files. Validation is primarily via `npx tsc --noEmit` (both backend and frontend) and manual runtime verification.
 - For frontend changes that affect actual exam behavior, verify against the runtime path being served, not just against source edits or `client/dist` output.
+- `src/server/routes/student.ts` contains a non-obvious exam-state hazard: `POST /exam/answer` currently changes student status from `in_progress` to `submitted` on the first buffered save. Any work on resume logic, anti-cheat, or submission flow should re-check this behavior before assuming the status model is correct.
+- The DB layer and route layer mix SQLite-style `?` placeholders and PostgreSQL-style `$1` placeholders depending on code path. Before changing queries, verify which runtime path (`DATABASE_URL` present vs absent) is intended. `db.query()` in `src/server/db/postgres.ts` auto-translates `?` → `$N` for the Postgres branch, so **`?` is always the safe/portable choice** for any query that can run under both DB modes (i.e. anything not already inside a `USE_SQLITE` / `else` Postgres-only branch); a stray `$1` in a shared code path (not inside an explicit non-SQLite branch) will crash under SQLite with "Too many parameter values were provided." One such bug (the duplicate-ID check in `POST /questions/import`) was found and fixed this way — if you add new shared queries, default to `?`.
+- `FileCache` in `src/server/cache.ts` initializes `dataDir`/`queueFile` as class field defaults (`path.join(process.cwd(), 'data')` / `.../data/queue.json`) so the constructor's `ensureDataDir()` has a valid path outside Vercel/production. If these fields are ever refactored, keep them initialized before `ensureDataDir()` runs — leaving them unassigned crashes `npm run dev` immediately on startup (`ERR_INVALID_ARG_TYPE` in `fs.mkdirSync`).
+- **Fixed:** `query()` in `src/server/db/postgres.ts` used to decide how to run a SQLite statement purely by checking `text.trim().toUpperCase().startsWith('SELECT')` — anything else (including `INSERT ... RETURNING id`) went through `stmt.run(...)`, which always returns `rows: []`. This silently broke any `INSERT ... RETURNING` under local SQLite dev: `POST /batches/:id/students/import` in `admin.ts` reads `studentResult.rows[0]?.id` after such an insert, got `undefined`, and `if (!studentId) continue;` skipped exam_questions assignment for every invited student (student row created, but with zero questions assigned). Fix: the SQLite branch now also routes through `.all()` when the SQL text contains `RETURNING` (case-insensitive), not just when it starts with `SELECT`. Postgres was never affected (its branch always returns real rows regardless of statement type). If similar "insert succeeded but the returned row is empty" symptoms show up again in local SQLite dev, check this function first.
+- If a frontend fix appears correct in source but has no effect in manual testing on the real deployment, check whether `deploy/scripts/deploy.sh` has actually been re-run on the EC2 instance since the fix landed on `main` (see "Actual production deployment" above) before assuming the React code itself is wrong.
 - **`USE_SQLITE` logic is inconsistent across files** — `postgres.ts` and `admin.ts` use `!process.env.DATABASE_URL`; `student.ts` uses `process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production'`. Before changing DB queries, verify which runtime path is intended.
 - The DB layer auto-converts `?` placeholders to `$1/$2/...` style when running in PostgreSQL mode (see `query()` in `postgres.ts`). Do not mix placeholder styles in a single query string.
 - If a frontend fix appears correct in source but has no effect in manual testing, check `public/index.html`, the hashed asset filename under `public/assets`, and the built bundle contents before debugging the React code further.
@@ -291,12 +370,8 @@ Batches support two blueprint formats for question assignment:
 
 ## Verification expectations
 
-- Frontend exam changes should be verified against the actual served runtime, not just via source inspection.
-- For static/public runtime, the minimum verification loop is:
-  1. `npm run build:client`
-  2. sync the new `client/dist/assets/*.js` bundle into `public/assets`
-  3. update `public/index.html` to the new hash
-  4. hard-reload the browser and retest
+- Frontend exam changes should be verified against the actual served runtime, not just via source inspection. For local manual testing, run both `npm run dev` (backend) and `cd client && npm run dev` (Vite) and exercise the real flow in a browser — this matches production's `client/dist` + Node backend split more closely than editing source and assuming it works.
+- Syncing to `public/assets` + `public/index.html` is only relevant if you've confirmed the environment you're testing against actually serves from `public/` (uncommon — see "Static runtime path" above). Don't do it by default for this project's real deployment; instead rely on `deploy/scripts/deploy.sh` rebuilding `client/dist/` on the server.
 - For anti-cheat changes, verify both browser behavior and backend recording:
   - browser-side blocking / auto-submit behavior
   - network calls to `/api/student/violation` and `/api/student/exam/submit`
@@ -320,6 +395,15 @@ Batches support two blueprint formats for question assignment:
 - `client/src/hooks/useMonacoJavaCompletions.ts` (IntelliSense snippet sizes — relevant for suspicious_paste threshold calibration)
 - `public/index.html` (if testing static runtime)
 - `public/assets/*.js` (to confirm the runtime bundle really contains the expected change)
+
+## Files worth checking together for question bank / import / export / AI grading work
+
+- `src/server/routes/admin.ts` (import parsing, `question_group`/`question_plain` population, export endpoints)
+- `src/server/db/postgres.ts` (`question_bank` schema + migrations for both SQLite and Postgres)
+- `src/server/cache.ts` (AI grading prompt construction — must use `question_plain`, not raw `question_sample`)
+- `src/utils/string.ts` (`stripHtml`, `sanitizeFilename`, `buildContentDisposition`, `normalizeUnicode`)
+- `client/src/pages/QuestionBank.tsx` (Module + Question Group filters, import UI)
+- `client/src/services/api.ts` (`adminApi.getQuestionGroups`, other question-bank endpoints)
 
 ## Notable current behavior
 

@@ -1,139 +1,218 @@
 import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 
+interface AdminUserRow {
+  id: number;
+  username: string;
+  role: 'admin' | 'superadmin';
+  created_at: string;
+}
+
 function UserManagement() {
-  const { isAdmin, isLoading } = useAuth();
-  const navigate = useNavigate();
-
-  const [users, setUsers] = useState<any[]>([]);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [role, setRole] = useState<'admin' | 'mod'>('mod');
+  const { role: currentRole } = useAuth();
+  const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState('');
 
-  // Chặn mod truy cập trang này (backend cũng chặn — đây chỉ là UX).
-  useEffect(() => {
-    if (!isLoading && !isAdmin) {
-      navigate('/admin/dashboard');
-    }
-  }, [isAdmin, isLoading, navigate]);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newRole, setNewRole] = useState<'admin' | 'superadmin'>('admin');
+  const [creating, setCreating] = useState(false);
+
+  const [resetPasswordId, setResetPasswordId] = useState<number | null>(null);
+  const [resetPasswordValue, setResetPasswordValue] = useState('');
 
   useEffect(() => {
-    if (isAdmin) loadUsers();
-  }, [isAdmin]);
+    loadUsers();
+  }, []);
 
   const loadUsers = async () => {
     try {
-      const res = await adminApi.getUsers();
+      const res = await adminApi.listUsers();
       setUsers(res.data);
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to load admin users');
     }
   };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setSaving(true);
-    try {
-      await adminApi.createUser(username.trim(), password, role);
-      setUsername('');
-      setPassword('');
-      setRole('mod');
-      await loadUsers();
-    } catch (err: any) {
-      setError(err.response?.data?.error || 'Failed to create user');
+    setSuccess('');
+
+    if (!newUsername.trim() || newPassword.length < 8) {
+      setError('Username is required and password must be at least 8 characters');
+      return;
     }
-    setSaving(false);
+
+    setCreating(true);
+    try {
+      await adminApi.createUser(newUsername.trim(), newPassword, newRole);
+      setSuccess(`Account "${newUsername.trim()}" created`);
+      setNewUsername('');
+      setNewPassword('');
+      setNewRole('admin');
+      loadUsers();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to create account');
+    } finally {
+      setCreating(false);
+    }
   };
 
-  const handleDelete = async (id: number, name: string) => {
-    if (!confirm(`Delete user "${name}"?`)) return;
+  const handleRoleChange = async (user: AdminUserRow, role: 'admin' | 'superadmin') => {
+    setError('');
+    setSuccess('');
     try {
-      await adminApi.deleteUser(id);
-      await loadUsers();
+      await adminApi.updateUser(user.id, { role });
+      setSuccess(`Updated role for "${user.username}"`);
+      loadUsers();
     } catch (err: any) {
-      alert(err.response?.data?.error || 'Failed to delete user');
+      setError(err.response?.data?.error || 'Failed to update role');
     }
   };
 
-  if (isLoading || !isAdmin) return null;
+  const handleResetPassword = async (userId: number) => {
+    if (resetPasswordValue.length < 8) {
+      setError('New password must be at least 8 characters');
+      return;
+    }
+    setError('');
+    setSuccess('');
+    try {
+      await adminApi.updateUser(userId, { password: resetPasswordValue });
+      setSuccess('Password reset successfully');
+      setResetPasswordId(null);
+      setResetPasswordValue('');
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to reset password');
+    }
+  };
+
+  const handleDelete = async (user: AdminUserRow) => {
+    if (!confirm(`Delete admin account "${user.username}"? This cannot be undone.`)) {
+      return;
+    }
+    setError('');
+    setSuccess('');
+    try {
+      await adminApi.deleteUser(user.id);
+      setSuccess(`Deleted "${user.username}"`);
+      loadUsers();
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to delete account');
+    }
+  };
 
   return (
     <div className="container">
       <div className="header">
         <h1>User Management</h1>
-        <Link to="/admin/dashboard" className="btn btn-secondary">← Dashboard</Link>
+        <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
       </div>
 
-      <div className="card" style={{ marginBottom: 24 }}>
-        <h3 style={{ marginBottom: 16 }}>Create new user</h3>
-        <form onSubmit={handleCreate} style={{ display: 'grid', gap: 12, maxWidth: 420 }}>
+      <div className="nav">
+        <Link to="/admin/dashboard">Dashboard</Link>
+        <Link to="/admin/questions">Question Bank</Link>
+        <Link to="/admin/batches">Batches</Link>
+        <Link to="/admin/practice">Practice</Link>
+        <Link to="/admin/settings">AI Settings</Link>
+        <Link to="/admin/users" className="active">User Management</Link>
+      </div>
+
+      {error && <p className="error">{error}</p>}
+      {success && <p className="success">{success}</p>}
+
+      <div className="card" style={{ maxWidth: 600, marginBottom: 24 }}>
+        <h3>Create Admin Account</h3>
+        <form onSubmit={handleCreate}>
           <div className="form-group">
             <label>Username</label>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} required />
+            <input
+              type="text"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              disabled={creating}
+            />
           </div>
           <div className="form-group">
-            <label>Password (minimum 6 characters)</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={6} />
+            <label>Password <span style={{ color: 'var(--text-light)', fontWeight: 400, fontSize: 12 }}>(min 8 characters)</span></label>
+            <input
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              disabled={creating}
+            />
           </div>
           <div className="form-group">
             <label>Role</label>
-            <select value={role} onChange={(e) => setRole(e.target.value as 'admin' | 'mod')}>
-              <option value="mod">Mod (no user management, cannot enable screen recording)</option>
-              <option value="admin">Admin (full access)</option>
+            <select value={newRole} onChange={(e) => setNewRole(e.target.value as 'admin' | 'superadmin')} disabled={creating}>
+              <option value="admin">Admin</option>
+              <option value="superadmin">Superadmin</option>
             </select>
           </div>
-          {error && <div style={{ color: 'var(--danger)', fontSize: 14 }}>{error}</div>}
-          <button type="submit" className="btn btn-primary" disabled={saving}>
-            {saving ? 'Creating...' : 'Create user'}
+          <button type="submit" className="btn btn-primary" disabled={creating}>
+            {creating ? 'Creating...' : 'Create Account'}
           </button>
         </form>
       </div>
 
       <div className="card">
-        <h3 style={{ marginBottom: 16 }}>User list</h3>
+        <h3>Admin Accounts</h3>
         <table>
           <thead>
             <tr>
-              <th>ID</th>
               <th>Username</th>
               <th>Role</th>
-              <th>Created at</th>
+              <th>Created</th>
               <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
-                <td>{u.id}</td>
-                <td>{u.username}</td>
+            {users.map((user) => (
+              <tr key={user.id}>
+                <td>{user.username}</td>
                 <td>
-                  <span style={{
-                    padding: '2px 8px', borderRadius: 4, fontSize: 12,
-                    background: u.role === 'admin' ? '#dbeafe' : '#f3f4f6',
-                    color: u.role === 'admin' ? '#1e40af' : '#374151',
-                  }}>
-                    {u.role}
-                  </span>
+                  <select
+                    value={user.role}
+                    onChange={(e) => handleRoleChange(user, e.target.value as 'admin' | 'superadmin')}
+                  >
+                    <option value="admin">Admin</option>
+                    <option value="superadmin">Superadmin</option>
+                  </select>
                 </td>
-                <td>{u.created_at ? new Date(u.created_at).toLocaleString('en-US') : '-'}</td>
-                <td>
-                  <button className="btn btn-secondary" style={{ fontSize: 12 }} onClick={() => handleDelete(u.id, u.username)}>
-                    Delete
-                  </button>
+                <td>{new Date(user.created_at).toLocaleString()}</td>
+                <td style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {resetPasswordId === user.id ? (
+                    <>
+                      <input
+                        type="password"
+                        placeholder="New password"
+                        value={resetPasswordValue}
+                        onChange={(e) => setResetPasswordValue(e.target.value)}
+                        style={{ width: 140 }}
+                      />
+                      <button className="btn btn-primary" onClick={() => handleResetPassword(user.id)}>Save</button>
+                      <button className="btn btn-secondary" onClick={() => { setResetPasswordId(null); setResetPasswordValue(''); }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button className="btn btn-secondary" onClick={() => { setResetPasswordId(user.id); setResetPasswordValue(''); }}>
+                      Reset Password
+                    </button>
+                  )}
+                  <button className="btn btn-danger" onClick={() => handleDelete(user)}>Delete</button>
                 </td>
               </tr>
             ))}
-            {users.length === 0 && (
-              <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-light)' }}>No users yet</td></tr>
-            )}
           </tbody>
         </table>
       </div>
+
+      <p style={{ color: 'var(--text-light)', fontSize: 12, marginTop: 16 }}>
+        You are signed in as: <strong>{currentRole}</strong>
+      </p>
     </div>
   );
 }

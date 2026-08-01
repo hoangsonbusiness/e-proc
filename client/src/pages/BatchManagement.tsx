@@ -31,8 +31,17 @@ type BlueprintMode = 'module' | 'type';
 const QUESTION_TYPES = ['Coding', 'Conceptual', 'Fill-in', 'Debug'] as const;
 type QuestionType = typeof QUESTION_TYPES[number];
 
+// A (module, question_group) combo shown in Module dropdowns. The same module name can
+// exist under multiple question groups (e.g. "Unit Testing" under both CPP_EMB_PRINT_IOT
+// and CPP_EMB_AUTOSAR), so module alone is not a unique selector.
+interface ModuleGroupOption {
+  module: string;
+  question_group: string; // '' when the question has no group
+}
+
 interface BlueprintItem {
   module: string;
+  question_group: string;
   easy: number;
   medium: number;
   hard: number;
@@ -40,14 +49,8 @@ interface BlueprintItem {
 
 interface BlueprintItemByType {
   module: string;
+  question_group: string;
   type: QuestionType;
-  easy: number;
-  medium: number;
-  hard: number;
-}
-
-interface ModuleStats {
-  module: string;
   easy: number;
   medium: number;
   hard: number;
@@ -60,23 +63,46 @@ interface TypeStats {
   hard: number;
 }
 
-interface ModuleTypeStats {
+interface ModuleGroupStats {
   module: string;
+  question_group: string;
+  easy: number;
+  medium: number;
+  hard: number;
+}
+
+interface ModuleGroupTypeStats {
+  module: string;
+  question_group: string;
   type: string;
   easy: number;
   medium: number;
   hard: number;
 }
 
+/** Encode a (module, question_group) pair as a single <select> option value */
+const comboKey = (module: string, group: string) => `${module}|||${group || ''}`;
+/** Decode a <select> option value back into { module, question_group } */
+const decodeComboKey = (key: string): { module: string; question_group: string } => {
+  const [module, question_group] = key.split('|||');
+  return { module, question_group: question_group || '' };
+};
+/** Human-readable label for a (module, question_group) combo, e.g. "Chapter 10: Unit Testing (CPP_EMB_PRINT_IOT)" */
+const comboLabel = (module: string, group: string) => (group ? `${module} (${group})` : module);
+
 function BatchManagement() {
-  const { isAdmin } = useAuth();
+  const { isSuperAdmin } = useAuth();
   const [batches, setBatches] = useState<any[]>([]);
-  const [modules, setModules] = useState<string[]>([]);
-  const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
+  const [moduleGroups, setModuleGroups] = useState<ModuleGroupOption[]>([]);
+  const [moduleGroupStats, setModuleGroupStats] = useState<ModuleGroupStats[]>([]);
   const [typeStats, setTypeStats] = useState<TypeStats[]>([]);
-  const [moduleTypeStats, setModuleTypeStats] = useState<ModuleTypeStats[]>([]);
+  const [moduleGroupTypeStats, setModuleGroupTypeStats] = useState<ModuleGroupTypeStats[]>([]);
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
+  // Batch dạng Question Bank (blueprint) hay Practice (1 bài thi import từ .docx)
+  const [examMode, setExamMode] = useState<'question_bank' | 'practice'>('question_bank');
+  const [practiceExams, setPracticeExams] = useState<{ id: number; name: string }[]>([]);
+  const [selectedPracticeId, setSelectedPracticeId] = useState<string>('');
   const [showForm, setShowForm] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
@@ -100,26 +126,28 @@ function BatchManagement() {
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
 
-  /** Return stats for a given module name (zeros if not found) */
-  const getStatsForModule = (moduleName: string): ModuleStats =>
-    moduleStats.find(s => s.module === moduleName) ?? { module: moduleName, easy: 0, medium: 0, hard: 0 };
+  /** Return stats for a given (module, question_group) combination (zeros if not found) */
+  const getStatsForModuleGroup = (moduleName: string, group: string): ModuleGroupStats =>
+    moduleGroupStats.find(s => s.module === moduleName && (s.question_group || '') === (group || ''))
+      ?? { module: moduleName, question_group: group || '', easy: 0, medium: 0, hard: 0 };
 
-  /** Return stats for a given (module, type) combination (zeros if not found) */
-  const getStatsForModuleType = (moduleName: string, typeName: string): ModuleTypeStats =>
-    moduleTypeStats.find(s => s.module === moduleName && s.type === typeName)
-    ?? { module: moduleName, type: typeName, easy: 0, medium: 0, hard: 0 };
+  /** Return stats for a given (module, question_group, type) combination (zeros if not found) */
+  const getStatsForModuleGroupType = (moduleName: string, group: string, typeName: string): ModuleGroupTypeStats =>
+    moduleGroupTypeStats.find(s => s.module === moduleName && (s.question_group || '') === (group || '') && s.type === typeName)
+      ?? { module: moduleName, question_group: group || '', type: typeName, easy: 0, medium: 0, hard: 0 };
 
   /** Validate blueprint (by module) against available question counts */
   const validateBlueprintAgainstStats = (blueprint: BlueprintItem[]): string[] => {
     const errors: string[] = [];
     for (const item of blueprint) {
-      const stats = getStatsForModule(item.module);
+      const stats = getStatsForModuleGroup(item.module, item.question_group);
+      const label = comboLabel(item.module, item.question_group);
       if (item.easy > stats.easy)
-        errors.push(`Module "${item.module}": Easy requires ${item.easy}, only ${stats.easy} available.`);
+        errors.push(`Module "${label}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${item.module}": Medium requires ${item.medium}, only ${stats.medium} available.`);
+        errors.push(`Module "${label}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${item.module}": Hard requires ${item.hard}, only ${stats.hard} available.`);
+        errors.push(`Module "${label}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -128,13 +156,14 @@ function BatchManagement() {
   const validateTypesBlueprintAgainstStats = (blueprint: BlueprintItemByType[]): string[] => {
     const errors: string[] = [];
     for (const item of blueprint) {
-      const stats = getStatsForModuleType(item.module, item.type);
+      const stats = getStatsForModuleGroupType(item.module, item.question_group, item.type);
+      const label = comboLabel(item.module, item.question_group);
       if (item.easy > stats.easy)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Easy requires ${item.easy}, only ${stats.easy} available.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Easy requires ${item.easy}, only ${stats.easy} available.`);
       if (item.medium > stats.medium)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Medium requires ${item.medium}, only ${stats.medium} available.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Medium requires ${item.medium}, only ${stats.medium} available.`);
       if (item.hard > stats.hard)
-        errors.push(`Module "${item.module}" / Type "${item.type}": Hard requires ${item.hard}, only ${stats.hard} available.`);
+        errors.push(`Module "${label}" / Type "${item.type}": Hard requires ${item.hard}, only ${stats.hard} available.`);
     }
     return errors;
   };
@@ -152,21 +181,23 @@ function BatchManagement() {
 
   useEffect(() => {
     loadBatches();
-    loadModules();
-    loadModuleStats();
+    loadModuleGroups();
+    loadModuleGroupStats();
     loadTypeStats();
-    loadModuleTypeStats();
+    loadModuleGroupTypeStats();
+    loadPracticeExams();
   }, []);
 
 
   useEffect(() => {
-    if (modules.length > 0 && formData.blueprint.length === 0) {
+    if (moduleGroups.length > 0 && formData.blueprint.length === 0) {
+      const first = moduleGroups[0];
       setFormData(prev => ({
         ...prev,
-        blueprint: [{ module: modules[0], easy: 0, medium: 0, hard: 0 }]
+        blueprint: [{ module: first.module, question_group: first.question_group, easy: 0, medium: 0, hard: 0 }]
       }));
     }
-  }, [modules]);
+  }, [moduleGroups]);
 
   // ─── Loaders ────────────────────────────────────────────────────────────────
 
@@ -179,23 +210,32 @@ function BatchManagement() {
     }
   };
 
-  const loadModules = async () => {
+  const loadPracticeExams = async () => {
     try {
-      const res = await adminApi.getModules();
-      console.log('[BatchManagement] Modules loaded:', res.data);
-      setModules(res.data);
+      const res = await adminApi.getPracticeExams();
+      setPracticeExams(res.data);
     } catch (error) {
-      console.error('[BatchManagement] loadModules error:', error);
+      console.error(error);
     }
   };
 
-  const loadModuleStats = async () => {
+  const loadModuleGroups = async () => {
     try {
-      const res = await adminApi.getModuleStats();
-      console.log('[BatchManagement] Module stats loaded:', res.data);
-      setModuleStats(res.data);
+      const res = await adminApi.getModuleGroups();
+      console.log('[BatchManagement] Module groups loaded:', res.data);
+      setModuleGroups(res.data);
     } catch (error) {
-      console.error('[BatchManagement] loadModuleStats error:', error);
+      console.error('[BatchManagement] loadModuleGroups error:', error);
+    }
+  };
+
+  const loadModuleGroupStats = async () => {
+    try {
+      const res = await adminApi.getModuleGroupStats();
+      console.log('[BatchManagement] Module-group stats loaded:', res.data);
+      setModuleGroupStats(res.data);
+    } catch (error) {
+      console.error('[BatchManagement] loadModuleGroupStats error:', error);
     }
   };
 
@@ -209,30 +249,37 @@ function BatchManagement() {
     }
   };
 
-  const loadModuleTypeStats = async () => {
+  const loadModuleGroupTypeStats = async () => {
     try {
-      const res = await adminApi.getModuleTypeStats();
-      console.log('[BatchManagement] Module-type stats loaded:', res.data);
-      setModuleTypeStats(res.data);
+      const res = await adminApi.getModuleGroupTypeStats();
+      console.log('[BatchManagement] Module-group-type stats loaded:', res.data);
+      setModuleGroupTypeStats(res.data);
     } catch (error) {
-      console.error('[BatchManagement] loadModuleTypeStats error:', error);
+      console.error('[BatchManagement] loadModuleGroupTypeStats error:', error);
     }
   };
 
   // ─── Blueprint helpers (Create form) ────────────────────────────────────────
 
   const addBlueprintRow = () => {
-    console.log('[BatchManagement] addBlueprintRow, modules:', modules);
+    const first = moduleGroups[0];
     setFormData(prev => ({
       ...prev,
-      blueprint: [...prev.blueprint, { module: modules[0] || '', easy: 0, medium: 0, hard: 0 }]
+      blueprint: [...prev.blueprint, { module: first?.module || '', question_group: first?.question_group || '', easy: 0, medium: 0, hard: 0 }]
     }));
   };
 
   const updateBlueprint = (index: number, field: keyof BlueprintItem, value: any) => {
     const newBlueprint = [...formData.blueprint];
-    const convertedValue = field === 'module' ? value : Number(value);
+    const convertedValue = (field === 'module' || field === 'question_group') ? value : Number(value);
     newBlueprint[index] = { ...newBlueprint[index], [field]: convertedValue };
+    setFormData(prev => ({ ...prev, blueprint: newBlueprint }));
+  };
+
+  /** Update module + question_group together, since the dropdown selects a single combo */
+  const updateBlueprintModuleGroup = (index: number, module: string, question_group: string) => {
+    const newBlueprint = [...formData.blueprint];
+    newBlueprint[index] = { ...newBlueprint[index], module, question_group };
     setFormData(prev => ({ ...prev, blueprint: newBlueprint }));
   };
 
@@ -245,15 +292,15 @@ function BatchManagement() {
 
   // ─── Blueprint helpers (By Type – Create form) ───────────────────────────────
 
-  /** (module, type) combos already used in By Type blueprint */
-  const usedModuleTypeCombos = formData.blueprintByType.map(i => `${i.module}||${i.type}`);
+  /** (module, question_group, type) combos already used in By Type blueprint */
+  const usedModuleTypeCombos = formData.blueprintByType.map(i => `${i.module}||${i.question_group}||${i.type}`);
 
-  /** Find first available (module, type) combo not yet used */
-  const getNextAvailableModuleType = (): { module: string; type: QuestionType } | null => {
-    for (const m of modules) {
+  /** Find first available (module, question_group, type) combo not yet used */
+  const getNextAvailableModuleType = (): { module: string; question_group: string; type: QuestionType } | null => {
+    for (const mg of moduleGroups) {
       for (const t of QUESTION_TYPES) {
-        if (!usedModuleTypeCombos.includes(`${m}||${t}`)) {
-          return { module: m, type: t };
+        if (!usedModuleTypeCombos.includes(`${mg.module}||${mg.question_group}||${t}`)) {
+          return { module: mg.module, question_group: mg.question_group, type: t };
         }
       }
     }
@@ -265,14 +312,26 @@ function BatchManagement() {
     if (!nextAvailableModuleType) return;
     setFormData(prev => ({
       ...prev,
-      blueprintByType: [...prev.blueprintByType, { module: nextAvailableModuleType.module, type: nextAvailableModuleType.type, easy: 0, medium: 0, hard: 0 }]
+      blueprintByType: [...prev.blueprintByType, {
+        module: nextAvailableModuleType.module,
+        question_group: nextAvailableModuleType.question_group,
+        type: nextAvailableModuleType.type,
+        easy: 0, medium: 0, hard: 0
+      }]
     }));
   };
 
   const updateTypeBlueprint = (index: number, field: keyof BlueprintItemByType, value: any) => {
     const newBlueprint = [...formData.blueprintByType];
-    const convertedValue = (field === 'module' || field === 'type') ? value : Number(value);
+    const convertedValue = (field === 'module' || field === 'question_group' || field === 'type') ? value : Number(value);
     newBlueprint[index] = { ...newBlueprint[index], [field]: convertedValue };
+    setFormData(prev => ({ ...prev, blueprintByType: newBlueprint }));
+  };
+
+  /** Update module + question_group together, since the dropdown selects a single combo */
+  const updateTypeBlueprintModuleGroup = (index: number, module: string, question_group: string) => {
+    const newBlueprint = [...formData.blueprintByType];
+    newBlueprint[index] = { ...newBlueprint[index], module, question_group };
     setFormData(prev => ({ ...prev, blueprintByType: newBlueprint }));
   };
 
@@ -292,12 +351,12 @@ function BatchManagement() {
 
   // ─── Blueprint helpers (Edit form) ───────────────────────────────────────────
 
-  const usedModuleTypeCombosEdit = ((editingBatch?.blueprintByType || []) as BlueprintItemByType[]).map(i => `${i.module}||${i.type}`);
-  const getNextAvailableModuleTypeEdit = (): { module: string; type: QuestionType } | null => {
-    for (const m of modules) {
+  const usedModuleTypeCombosEdit = ((editingBatch?.blueprintByType || []) as BlueprintItemByType[]).map(i => `${i.module}||${i.question_group}||${i.type}`);
+  const getNextAvailableModuleTypeEdit = (): { module: string; question_group: string; type: QuestionType } | null => {
+    for (const mg of moduleGroups) {
       for (const t of QUESTION_TYPES) {
-        if (!usedModuleTypeCombosEdit.includes(`${m}||${t}`)) {
-          return { module: m, type: t };
+        if (!usedModuleTypeCombosEdit.includes(`${mg.module}||${mg.question_group}||${t}`)) {
+          return { module: mg.module, question_group: mg.question_group, type: t };
         }
       }
     }
@@ -320,16 +379,21 @@ function BatchManagement() {
     let moduleItems: BlueprintItem[] = [];
     let typeItems: BlueprintItemByType[] = [];
 
+    // Older batches were saved before question_group existed — default it to '' so the
+    // combo-based dropdowns below always have a valid value to select.
+    const withGroup = <T extends { question_group?: string }>(items: T[]): T[] =>
+      items.map(it => ({ ...it, question_group: it.question_group || '' }));
+
     if (Array.isArray(rawBlueprint)) {
       // Legacy format: plain array → by module
       detectedMode = 'module';
-      moduleItems = rawBlueprint;
+      moduleItems = withGroup(rawBlueprint);
     } else if (rawBlueprint && rawBlueprint.blueprintMode) {
       detectedMode = rawBlueprint.blueprintMode;
       if (detectedMode === 'type') {
-        typeItems = rawBlueprint.items || [];
+        typeItems = withGroup(rawBlueprint.items || []);
       } else {
-        moduleItems = rawBlueprint.items || [];
+        moduleItems = withGroup(rawBlueprint.items || []);
       }
     }
 
@@ -345,6 +409,26 @@ function BatchManagement() {
 
   const handleUpdateBatch = async () => {
     if (!editingBatch) return;
+
+    // Batch dạng Practice: không có blueprint để validate
+    if (editingBatch.practice_exam_id) {
+      setLoading(true);
+      try {
+        await adminApi.updateBatch(editingBatch.id, {
+          name: editingBatch.name,
+          start_time: localToUTC(editingBatch.start_time),
+          end_time: localToUTC(editingBatch.end_time),
+          duration: editingBatch.duration,
+          practice_exam_id: editingBatch.practice_exam_id,
+        });
+        loadBatches();
+        setEditingBatch(null);
+      } catch (err: any) {
+        alert(err.response?.data?.error || err.message);
+      }
+      setLoading(false);
+      return;
+    }
 
     // Validate against question bank availability based on edit mode
     let statsErrors: string[] = [];
@@ -385,51 +469,66 @@ function BatchManagement() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('[BatchManagement] handleSubmit called, blueprintMode:', blueprintMode, 'formData:', formData);
+    console.log('[BatchManagement] handleSubmit called, examMode:', examMode, 'blueprintMode:', blueprintMode, 'formData:', formData);
     setLoading(true);
     setFeasibilityErrors([]);
 
-    // Compute total based on active mode
-    const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
-    const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
-    console.log('[BatchManagement] Total questions:', total);
-    if (total < 1 || total > 100) {
-      setFeasibilityErrors([`Total questions must be between 1 and 100. Current: ${total}`]);
-      setLoading(false);
-      return;
-    }
+    let payload: any = {
+      name: formData.name,
+      start_time: localToUTC(formData.start_time),
+      end_time: localToUTC(formData.end_time),
+      duration: formData.duration,
+      record_mode: formData.record_mode,
+      exam_type: formData.exam_type,
+    };
 
-    // Validate against question bank availability
-    let statsErrors: string[] = [];
-    if (blueprintMode === 'type') {
-      statsErrors = validateTypesBlueprintAgainstStats(formData.blueprintByType);
+    if (examMode === 'practice') {
+      // Batch dạng Practice: chỉ cần chọn 1 bài practice đã import
+      if (!selectedPracticeId) {
+        setFeasibilityErrors(['Please select a practice exam.']);
+        setLoading(false);
+        return;
+      }
+      payload.practice_exam_id = parseInt(selectedPracticeId);
     } else {
-      statsErrors = validateBlueprintAgainstStats(formData.blueprint);
-    }
-    if (statsErrors.length > 0) {
-      setFeasibilityErrors(statsErrors);
-      setLoading(false);
-      return;
-    }
+      // Compute total based on active mode
+      const activeItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
+      const total = activeItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
+      console.log('[BatchManagement] Total questions:', total);
+      // Đề trắc nghiệm (quiz) cho phép tới 100 câu; đề tự luận giữ giới hạn 20 câu như trước.
+      const maxQuestions = formData.exam_type === 'quiz' ? 100 : 20;
+      if (total < 1 || total > maxQuestions) {
+        setFeasibilityErrors([`Total questions must be between 1 and ${maxQuestions}. Current: ${total}`]);
+        setLoading(false);
+        return;
+      }
 
-    const blueprintPayload = buildBlueprintPayload(blueprintMode, formData.blueprint, formData.blueprintByType);
+      // Validate against question bank availability
+      let statsErrors: string[] = [];
+      if (blueprintMode === 'type') {
+        statsErrors = validateTypesBlueprintAgainstStats(formData.blueprintByType);
+      } else {
+        statsErrors = validateBlueprintAgainstStats(formData.blueprint);
+      }
+      if (statsErrors.length > 0) {
+        setFeasibilityErrors(statsErrors);
+        setLoading(false);
+        return;
+      }
+
+      payload.blueprint = buildBlueprintPayload(blueprintMode, formData.blueprint, formData.blueprintByType);
+    }
 
     try {
-      console.log('[BatchManagement] Submitting blueprintPayload:', JSON.stringify(blueprintPayload));
-      const res = await adminApi.createBatch({
-        name: formData.name,
-        start_time: localToUTC(formData.start_time),
-        end_time: localToUTC(formData.end_time),
-        duration: formData.duration,
-        blueprint: blueprintPayload,
-        record_mode: formData.record_mode,
-        exam_type: formData.exam_type,
-      });
+      console.log('[BatchManagement] Submitting payload:', JSON.stringify(payload));
+      const res = await adminApi.createBatch(payload);
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
       setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay' });
       setBlueprintMode('module');
+      setExamMode('question_bank');
+      setSelectedPracticeId('');
       loadBatches();
       setSelectedBatchId(batchId);
       setShowInviteForm(true);
@@ -533,9 +632,35 @@ function BatchManagement() {
     </div>
   );
 
-  /** Panel showing available question counts by module */
+  /** <select> of (module, question_group) combos, labeled "module (group)" */
+  const ModuleGroupSelect = ({
+    value,
+    onChange,
+    style,
+  }: {
+    value: { module: string; question_group: string };
+    onChange: (module: string, question_group: string) => void;
+    style?: React.CSSProperties;
+  }) => (
+    <select
+      style={{ width: '100%', padding: '8px', ...style }}
+      value={comboKey(value.module, value.question_group)}
+      onChange={e => {
+        const decoded = decodeComboKey(e.target.value);
+        onChange(decoded.module, decoded.question_group);
+      }}
+    >
+      {moduleGroups.map(mg => (
+        <option key={comboKey(mg.module, mg.question_group)} value={comboKey(mg.module, mg.question_group)}>
+          {comboLabel(mg.module, mg.question_group)}
+        </option>
+      ))}
+    </select>
+  );
+
+  /** Panel showing available question counts by module (+ question group) */
   const QuestionBankStatsPanel = () => {
-    if (moduleStats.length === 0) return null;
+    if (moduleGroupStats.length === 0) return null;
     return (
       <div style={{
         marginBottom: 20,
@@ -548,13 +673,14 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>📊</span>
           <strong style={{ color: '#1e40af', fontSize: 14 }}>Question Bank – By Module</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Available question counts by Module
+            — Available question counts by Module (and Question Group)
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ background: 'rgba(59,130,246,0.1)' }}>
               <th style={{ padding: '6px 10px', textAlign: 'left', color: '#1e3a5f' }}>Module</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', color: '#1e3a5f' }}>Question Group</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#15803d' }}>🟢 Easy</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b45309' }}>🟡 Medium</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b91c1c' }}>🔴 Hard</th>
@@ -562,9 +688,10 @@ function BatchManagement() {
             </tr>
           </thead>
           <tbody>
-            {moduleStats.map((stat, i) => (
-              <tr key={stat.module} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
+            {moduleGroupStats.map((stat, i) => (
+              <tr key={comboKey(stat.module, stat.question_group)} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
                 <td style={{ padding: '5px 10px', fontWeight: 500, color: '#1f2937' }}>{stat.module}</td>
+                <td style={{ padding: '5px 10px', color: '#4b5563' }}>{stat.question_group || '-'}</td>
                 <td style={{ padding: '5px 10px', textAlign: 'center', color: '#166534', fontWeight: 600 }}>{stat.easy}</td>
                 <td style={{ padding: '5px 10px', textAlign: 'center', color: '#92400e', fontWeight: 600 }}>{stat.medium}</td>
                 <td style={{ padding: '5px 10px', textAlign: 'center', color: '#991b1b', fontWeight: 600 }}>{stat.hard}</td>
@@ -579,15 +706,10 @@ function BatchManagement() {
     );
   };
 
-  /** Panel showing available question counts by module × type */
+  /** Panel showing available question counts by module × question group × type */
   const QuestionBankTypeStatsPanel = () => {
-    if (moduleTypeStats.length === 0) return null;
+    if (moduleGroupTypeStats.length === 0) return null;
     const typeEmoji: Record<string, string> = { Coding: '💻', Conceptual: '🧠', 'Fill-in': '✏️', Debug: '🐛' };
-    // Group by module
-    const grouped = modules.reduce<Record<string, ModuleTypeStats[]>>((acc, m) => {
-      acc[m] = moduleTypeStats.filter(s => s.module === m);
-      return acc;
-    }, {});
     return (
       <div style={{
         marginBottom: 20,
@@ -600,13 +722,14 @@ function BatchManagement() {
           <span style={{ fontSize: 18 }}>🏷</span>
           <strong style={{ color: '#6d28d9', fontSize: 14 }}>Question Bank – By Module + Type</strong>
           <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 4 }}>
-            — Available question counts by Module × Type
+            — Available question counts by Module (Question Group) × Type
           </span>
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ background: 'rgba(139,92,246,0.1)' }}>
               <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Module</th>
+              <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Question Group</th>
               <th style={{ padding: '6px 10px', textAlign: 'left', color: '#4c1d95' }}>Type</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#15803d' }}>🟢 Easy</th>
               <th style={{ padding: '6px 10px', textAlign: 'center', color: '#b45309' }}>🟡 Medium</th>
@@ -615,13 +738,21 @@ function BatchManagement() {
             </tr>
           </thead>
           <tbody>
-            {Object.entries(grouped).map(([mod, stats]) =>
-              stats.map((stat, i) => (
-                <tr key={`${mod}-${stat.type}`} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
+            {moduleGroups.map(mg => {
+              const stats = moduleGroupTypeStats.filter(
+                s => s.module === mg.module && (s.question_group || '') === (mg.question_group || '')
+              );
+              return stats.map((stat, i) => (
+                <tr key={`${comboKey(mg.module, mg.question_group)}-${stat.type}`} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.5)', borderTop: '1px solid #e5e7eb' }}>
                   {i === 0 && (
-                    <td rowSpan={stats.length} style={{ padding: '5px 10px', fontWeight: 600, color: '#1f2937', verticalAlign: 'top', borderRight: '1px solid #e5e7eb' }}>
-                      {mod}
-                    </td>
+                    <>
+                      <td rowSpan={stats.length} style={{ padding: '5px 10px', fontWeight: 600, color: '#1f2937', verticalAlign: 'top', borderRight: '1px solid #e5e7eb' }}>
+                        {mg.module}
+                      </td>
+                      <td rowSpan={stats.length} style={{ padding: '5px 10px', color: '#4b5563', verticalAlign: 'top', borderRight: '1px solid #e5e7eb' }}>
+                        {mg.question_group || '-'}
+                      </td>
+                    </>
                   )}
                   <td style={{ padding: '5px 10px', color: '#374151' }}>{typeEmoji[stat.type] || '❓'} {stat.type}</td>
                   <td style={{ padding: '5px 10px', textAlign: 'center', color: '#166534', fontWeight: 600 }}>{stat.easy}</td>
@@ -631,8 +762,8 @@ function BatchManagement() {
                     {stat.easy + stat.medium + stat.hard}
                   </td>
                 </tr>
-              ))
-            )}
+              ));
+            })}
           </tbody>
         </table>
       </div>
@@ -742,6 +873,73 @@ function BatchManagement() {
               </div>
             </div>
 
+            {/* Chế độ ghi màn hình — chỉ superadmin đổi được; admin thường thấy nhưng bị khóa.
+                Áp dụng cho cả batch Question Bank lẫn Practice. */}
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label>Screen Recording</label>
+              <select
+                value={formData.record_mode}
+                disabled={!isSuperAdmin}
+                onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
+                style={{ width: 'auto' }}
+              >
+                <option value="none">Default (No recording)</option>
+                <option value="local">Record Local (Save on student's machine, encrypted)</option>
+                <option value="s3">Record S3 (Save to AWS S3)</option>
+              </select>
+              {!isSuperAdmin && (
+                <small style={{ color: 'var(--text-light)', display: 'block' }}>Only superadmin accounts can change this setting.</small>
+              )}
+            </div>
+
+            {/* Exam Mode Tabs: Question Bank (blueprint) vs Practice (bài import từ .docx) */}
+            <div style={{ display: 'flex', gap: 0, marginTop: 20, marginBottom: 16, border: '1.5px solid #0ea5e9', borderRadius: 8, overflow: 'hidden', width: 'fit-content' }}>
+              {(['question_bank', 'practice'] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setExamMode(mode)}
+                  style={{
+                    padding: '7px 22px',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: 'none',
+                    cursor: 'pointer',
+                    background: examMode === mode ? '#0ea5e9' : '#f0f9ff',
+                    color: examMode === mode ? '#fff' : '#0ea5e9',
+                    transition: 'background 0.18s, color 0.18s',
+                  }}
+                >
+                  {mode === 'question_bank' ? '🧩 Question Bank' : '📄 Practice'}
+                </button>
+              ))}
+            </div>
+
+            {examMode === 'practice' ? (
+              <div className="form-group" style={{ maxWidth: 500 }}>
+                <label>Practice Exam</label>
+                {practiceExams.length === 0 ? (
+                  <p className="error">
+                    No practice exams imported yet. Import one at the <Link to="/admin/practice">Practice</Link> page first.
+                  </p>
+                ) : (
+                  <select
+                    value={selectedPracticeId}
+                    onChange={e => setSelectedPracticeId(e.target.value)}
+                    style={{ width: '100%', padding: 8 }}
+                  >
+                    <option value="">— Select a practice exam —</option>
+                    {practiceExams.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                )}
+                <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 6 }}>
+                  Học viên của batch này sẽ làm bài practice tại trang /practice (một bài làm duy nhất).
+                </p>
+              </div>
+            ) : (
+            <>
             {/* Loại đề: tự luận/coding (chấm AI) hoặc trắc nghiệm (chấm tự động) */}
             <div className="form-group" style={{ marginTop: 12 }}>
               <label>Exam Type</label>
@@ -755,30 +953,14 @@ function BatchManagement() {
               </select>
             </div>
 
-            {/* Chế độ ghi màn hình — chỉ admin đổi được; mod thấy nhưng bị khóa */}
-            <div className="form-group" style={{ marginTop: 12 }}>
-              <label>Screen Recording</label>
-              <select
-                value={formData.record_mode}
-                disabled={!isAdmin}
-                onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
-                style={{ width: 'auto' }}
-              >
-                <option value="none">Default (No recording)</option>
-                <option value="local">Record Local (Save on student's machine, encrypted)</option>
-                <option value="s3">Record S3 (Save to AWS S3)</option>
-              </select>
-              {!isAdmin && (
-                <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
-              )}
-            </div>
-
-            <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/100)</h4>
+            <h4 style={{ marginTop: 20, marginBottom: 10 }}>
+              Exam Blueprint (Total: {totalQuestions}/{formData.exam_type === 'quiz' ? 100 : 20})
+            </h4>
 
             {/* Blueprint Mode Toggle */}
             <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
 
-            {modules.length === 0 && blueprintMode === 'module' ? (
+            {moduleGroups.length === 0 && blueprintMode === 'module' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
             ) : typeStats.length === 0 && blueprintMode === 'type' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
@@ -800,21 +982,14 @@ function BatchManagement() {
                   </thead>
                   <tbody>
                     {formData.blueprint.map((item, index) => {
-                      const stats = getStatsForModule(item.module);
+                      const stats = getStatsForModuleGroup(item.module, item.question_group);
                       return (
                         <tr key={index}>
                           <td>
-                            <select
-                              name={`module_${index}`}
-                              id={`module_${index}`}
-                              style={{ width: '100%', padding: '8px' }}
-                              value={item.module}
-                              onChange={e => updateBlueprint(index, 'module', e.target.value)}
-                            >
-                              {modules.map(m => (
-                                <option key={m} value={m}>{m}</option>
-                              ))}
-                            </select>
+                            <ModuleGroupSelect
+                              value={item}
+                              onChange={(module, question_group) => updateBlueprintModuleGroup(index, module, question_group)}
+                            />
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
                               Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
@@ -864,23 +1039,18 @@ function BatchManagement() {
                   </thead>
                   <tbody>
                     {formData.blueprintByType.map((item, index) => {
-                      const stats = getStatsForModuleType(item.module, item.type);
+                      const stats = getStatsForModuleGroupType(item.module, item.question_group, item.type);
                       // Combos used by OTHER rows
                       const otherCombos = formData.blueprintByType
                         .filter((_, i) => i !== index)
-                        .map(i => `${i.module}||${i.type}`);
+                        .map(i => `${i.module}||${i.question_group}||${i.type}`);
                       return (
                         <tr key={index}>
-                          <td style={{ minWidth: 140 }}>
-                            <select
-                              style={{ width: '100%', padding: '8px' }}
-                              value={item.module}
-                              onChange={e => updateTypeBlueprint(index, 'module', e.target.value)}
-                            >
-                              {modules.map(m => (
-                                <option key={m} value={m}>{m}</option>
-                              ))}
-                            </select>
+                          <td style={{ minWidth: 160 }}>
+                            <ModuleGroupSelect
+                              value={item}
+                              onChange={(module, question_group) => updateTypeBlueprintModuleGroup(index, module, question_group)}
+                            />
                           </td>
                           <td style={{ minWidth: 120 }}>
                             <select
@@ -889,7 +1059,7 @@ function BatchManagement() {
                               onChange={e => updateTypeBlueprint(index, 'type', e.target.value as QuestionType)}
                             >
                               {QUESTION_TYPES.map(t => {
-                                const combo = `${item.module}||${t}`;
+                                const combo = `${item.module}||${item.question_group}||${t}`;
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
@@ -936,6 +1106,8 @@ function BatchManagement() {
                 </button>
               </>
             )}
+            </>
+            )}
 
             {/* Validation errors */}
             {(feasibilityErrors.length > 0 || createBlueprintErrors.length > 0) && (
@@ -951,11 +1123,15 @@ function BatchManagement() {
               type="submit"
               disabled={
                 loading ||
-                totalQuestions < 1 ||
-                totalQuestions > 100 ||
-                (blueprintMode === 'module' && modules.length === 0) ||
-                (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
-                createBlueprintErrors.length > 0
+                (examMode === 'practice'
+                  ? !selectedPracticeId
+                  : (
+                    totalQuestions < 1 ||
+                    totalQuestions > (formData.exam_type === 'quiz' ? 100 : 20) ||
+                    (blueprintMode === 'module' && moduleGroups.length === 0) ||
+                    (blueprintMode === 'type' && moduleGroupTypeStats.length === 0) ||
+                    createBlueprintErrors.length > 0
+                  ))
               }
               className="btn btn-primary"
               style={{ marginTop: 20 }}
@@ -1042,7 +1218,14 @@ function BatchManagement() {
             {batches.map(batch => (
               <tr key={batch.id}>
                 <td>{batch.id}</td>
-                <td>{batch.name}</td>
+                <td>
+                  {batch.name}
+                  {batch.practice_exam_id && (
+                    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#0369a1', background: '#e0f2fe', padding: '2px 8px', borderRadius: 10 }}>
+                      Practice
+                    </span>
+                  )}
+                </td>
                 <td>{formatGMT7(batch.start_time)}</td>
                 <td>{formatGMT7(batch.end_time)}</td>
                 <td>{batch.duration} min</td>
@@ -1137,6 +1320,39 @@ function BatchManagement() {
             />
           </div>
 
+          {/* Chế độ ghi màn hình — chỉ superadmin đổi được; admin thường bị khóa (backend giữ nguyên mode cũ) */}
+          <div className="form-group">
+            <label>Screen Recording</label>
+            <select
+              value={editingBatch.record_mode || 'none'}
+              disabled={!isSuperAdmin}
+              onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
+              style={{ width: 'auto' }}
+            >
+              <option value="none">Default (No recording)</option>
+              <option value="local">Record Local (Save on student's machine, encrypted)</option>
+              <option value="s3">Record S3 (Save to AWS S3)</option>
+            </select>
+            {!isSuperAdmin && (
+              <small style={{ color: 'var(--text-light)', display: 'block' }}>Only superadmin accounts can change this setting.</small>
+            )}
+          </div>
+
+          {editingBatch.practice_exam_id ? (
+            <div className="form-group" style={{ maxWidth: 500 }}>
+              <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Practice Exam</h4>
+              <select
+                value={String(editingBatch.practice_exam_id)}
+                onChange={e => setEditingBatch({ ...editingBatch, practice_exam_id: parseInt(e.target.value) })}
+                style={{ width: '100%', padding: 8 }}
+              >
+                {practiceExams.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+          <>
           {/* Exam type */}
           <div className="form-group">
             <label>Exam Type</label>
@@ -1150,31 +1366,13 @@ function BatchManagement() {
             </select>
           </div>
 
-          {/* Chế độ ghi màn hình — chỉ admin đổi được; mod bị khóa (backend giữ nguyên mode cũ) */}
-          <div className="form-group">
-            <label>Screen Recording</label>
-            <select
-              value={editingBatch.record_mode || 'none'}
-              disabled={!isAdmin}
-              onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
-              style={{ width: 'auto' }}
-            >
-              <option value="none">Default (No recording)</option>
-              <option value="local">Record Local (Save on student's machine, encrypted)</option>
-              <option value="s3">Record S3 (Save to AWS S3)</option>
-            </select>
-            {!isAdmin && (
-              <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
-            )}
-          </div>
-
           <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>
 
           {/* Blueprint Mode Toggle for Edit form */}
           <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
 
           {editBlueprintMode === 'module' ? (
-            modules.length === 0 ? (
+            moduleGroups.length === 0 ? (
               <p className="error">No modules available</p>
             ) : (
               <>
@@ -1190,22 +1388,19 @@ function BatchManagement() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(editingBatch.blueprint || []).map((item: any, index: number) => {
-                      const stats = getStatsForModule(item.module);
+                    {(editingBatch.blueprint || []).map((item: BlueprintItem, index: number) => {
+                      const stats = getStatsForModuleGroup(item.module, item.question_group || '');
                       return (
                         <tr key={index}>
                           <td>
-                            <select
-                              value={item.module}
-                              onChange={e => {
+                            <ModuleGroupSelect
+                              value={{ module: item.module, question_group: item.question_group || '' }}
+                              onChange={(module, question_group) => {
                                 const newBlueprint = [...editingBatch.blueprint];
-                                newBlueprint[index].module = e.target.value;
+                                newBlueprint[index] = { ...newBlueprint[index], module, question_group };
                                 setEditingBatch({ ...editingBatch, blueprint: newBlueprint });
                               }}
-                              style={{ width: '100%' }}
-                            >
-                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
+                            />
                             <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
                               Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
@@ -1246,7 +1441,7 @@ function BatchManagement() {
               </>
             )
           ) : (
-            moduleTypeStats.length === 0 ? (
+            moduleGroupTypeStats.length === 0 ? (
               <p className="error">No type data available</p>
             ) : (
               <>
@@ -1264,24 +1459,21 @@ function BatchManagement() {
                   </thead>
                   <tbody>
                     {((editingBatch.blueprintByType || []) as BlueprintItemByType[]).map((item, index) => {
-                      const stats = getStatsForModuleType(item.module, item.type);
+                      const stats = getStatsForModuleGroupType(item.module, item.question_group || '', item.type);
                       const otherCombos = ((editingBatch.blueprintByType || []) as BlueprintItemByType[])
                         .filter((_, i) => i !== index)
-                        .map(i => `${i.module}||${i.type}`);
+                        .map(i => `${i.module}||${i.question_group}||${i.type}`);
                       return (
                         <tr key={index}>
-                          <td style={{ minWidth: 140 }}>
-                            <select
-                              value={item.module}
-                              onChange={e => {
+                          <td style={{ minWidth: 160 }}>
+                            <ModuleGroupSelect
+                              value={{ module: item.module, question_group: item.question_group || '' }}
+                              onChange={(module, question_group) => {
                                 const nb = [...editingBatch.blueprintByType];
-                                nb[index].module = e.target.value;
+                                nb[index] = { ...nb[index], module, question_group };
                                 setEditingBatch({ ...editingBatch, blueprintByType: nb });
                               }}
-                              style={{ width: '100%' }}
-                            >
-                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
+                            />
                           </td>
                           <td style={{ minWidth: 120 }}>
                             <select
@@ -1294,7 +1486,7 @@ function BatchManagement() {
                               style={{ width: '100%' }}
                             >
                               {QUESTION_TYPES.map(t => {
-                                const combo = `${item.module}||${t}`;
+                                const combo = `${item.module}||${item.question_group}||${t}`;
                                 const isUsed = otherCombos.includes(combo);
                                 return (
                                   <option key={t} value={t} disabled={isUsed}>
@@ -1353,13 +1545,19 @@ function BatchManagement() {
               ))}
             </div>
           )}
+          </>
+          )}
 
           <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            {editBlueprintMode === 'module' ? (
+            {!editingBatch.practice_exam_id && (editBlueprintMode === 'module' ? (
               <button
                 onClick={() => setEditingBatch({
                   ...editingBatch,
-                  blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
+                  blueprint: [...(editingBatch.blueprint || []), {
+                    module: moduleGroups[0]?.module || '',
+                    question_group: moduleGroups[0]?.question_group || '',
+                    easy: 0, medium: 0, hard: 0
+                  }]
                 })}
                 className="btn btn-secondary"
               >
@@ -1373,7 +1571,12 @@ function BatchManagement() {
                     ...editingBatch,
                     blueprintByType: [
                       ...(editingBatch.blueprintByType || []),
-                      { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                      {
+                        module: nextAvailableModuleTypeEdit.module,
+                        question_group: nextAvailableModuleTypeEdit.question_group,
+                        type: nextAvailableModuleTypeEdit.type,
+                        easy: 0, medium: 0, hard: 0
+                      }
                     ]
                   });
                 }}
@@ -1383,11 +1586,11 @@ function BatchManagement() {
               >
                 + Add Module / Type
               </button>
-            )}
+            ))}
 
             <button
               onClick={handleUpdateBatch}
-              disabled={loading || editBlueprintErrors.length > 0}
+              disabled={loading || (!editingBatch.practice_exam_id && editBlueprintErrors.length > 0)}
               className="btn btn-primary"
             >
               {loading ? 'Saving...' : 'Save Changes'}

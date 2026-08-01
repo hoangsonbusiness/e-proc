@@ -13,6 +13,7 @@ function StudentConfirm() {
   const studentToken = location.state?.studentToken; // [C-4]
   const email = location.state?.email;
   const duration = location.state?.duration;
+  const examKind = location.state?.examKind; // 'practice' → làm bài tại /practice
   const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
   const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
 
@@ -69,7 +70,7 @@ function StudentConfirm() {
       console.log('Fullscreen not supported or denied');
     }
 
-    navigate('/exam');
+    navigate(examKind === 'practice' ? '/practice' : '/exam');
   };
 
   return (

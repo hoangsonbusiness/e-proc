@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
 
@@ -46,7 +47,9 @@ async function initPostgres() {
       type TEXT NOT NULL CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug')),
       level TEXT NOT NULL CHECK(level IN ('Easy', 'Medium', 'Hard')),
       module TEXT NOT NULL,
+      question_group TEXT,
       question_sample TEXT NOT NULL,
+      question_plain TEXT,
       rubric_must_have TEXT NOT NULL,
       rubric_nice_to_have TEXT NOT NULL,
       rubric_optional TEXT NOT NULL,
@@ -54,6 +57,16 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: thêm cột question_group cho DB cũ chưa có
+  try {
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_group TEXT`);
+  } catch (_) { /* already exists */ }
+
+  // Migration: thêm cột question_plain (nội dung câu hỏi không có HTML) cho DB cũ chưa có
+  try {
+    await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS question_plain TEXT`);
+  } catch (_) { /* already exists */ }
 
   // Migration: cập nhật CHECK constraint type cho DB cũ
   // Dùng transaction atomic: check exists → chỉ drop+add nếu constraint chưa đúng
@@ -141,7 +154,42 @@ await client.query(`
   
   const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
   await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
+
+  // Migration: batch dạng Practice trỏ tới 1 bài practice đã import (NULL = batch thi thường theo blueprint)
+  try {
+    await client.query(`ALTER TABLE batches ADD COLUMN IF NOT EXISTS practice_exam_id INTEGER`);
+  } catch (_) { /* already exists */ }
   console.log('[DB] batches ready');
+
+  // Bài thi Practice: import từ file .docx, quản lý độc lập với question_bank
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS practice_exams (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      content_html TEXT NOT NULL,
+      content_plain TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] practice_exams ready');
+
+  // Bài làm practice: 1 học viên = 1 bài làm duy nhất cho batch practice của mình
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS practice_submissions (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      practice_exam_id INTEGER NOT NULL,
+      answer TEXT,
+      ai_score FLOAT,
+      ai_feedback TEXT,
+      trainer_score FLOAT,
+      trainer_feedback TEXT,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  console.log('[DB] practice_submissions ready');
   
   await client.query(`
     CREATE TABLE IF NOT EXISTS students (
@@ -232,6 +280,11 @@ await client.query(`
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // Migration: phân biệt job chấm exam_questions vs practice_submissions
+  // (kind='practice' thì exam_question_id thực chất là practice_submissions.id)
+  try {
+    await client.query(`ALTER TABLE ai_queue ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'exam'`);
+  } catch (_) { /* already exists */ }
   console.log('[DB] ai_queue ready');
   
   await client.query(`
@@ -239,14 +292,14 @@ await client.query(`
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
-      role TEXT DEFAULT 'admin',
+      role TEXT NOT NULL DEFAULT 'admin',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
   // Migration: thêm cột role cho DB cũ (user cũ mặc định 'admin' để không mất quyền)
   try {
-    await client.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'");
+    await client.query(`ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`);
   } catch (_) { /* already exists */ }
   console.log('[DB] admin_users ready');
 
@@ -275,7 +328,9 @@ function initSqlite() {
         type TEXT NOT NULL,
         level TEXT NOT NULL,
         module TEXT NOT NULL,
+        question_group TEXT,
         question_sample TEXT NOT NULL,
+        question_plain TEXT,
         rubric_must_have TEXT NOT NULL,
         rubric_nice_to_have TEXT NOT NULL,
         rubric_optional TEXT NOT NULL,
@@ -283,7 +338,17 @@ function initSqlite() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+
+    // Migration: thêm cột mới nếu chưa tồn tại (cho SQLite DB cũ)
+    const qbCols = sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[];
+    const qbColNames = qbCols.map((c) => c.name);
+    if (!qbColNames.includes('question_group')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_group TEXT');
+    }
+    if (!qbColNames.includes('question_plain')) {
+      sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN question_plain TEXT');
+    }
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS batches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -292,12 +357,49 @@ function initSqlite() {
         end_time DATETIME NOT NULL,
         duration INTEGER NOT NULL,
         blueprint TEXT,
+        practice_exam_id INTEGER,
         record_enabled INTEGER DEFAULT 0,
         record_mode TEXT DEFAULT 'none',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+
+    // Migration: batch dạng Practice (NULL = batch thi thường theo blueprint)
+    const batchCols = sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[];
+    if (!batchCols.map((c) => c.name).includes('practice_exam_id')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN practice_exam_id INTEGER');
+    }
+
+    // Bài thi Practice: import từ file .docx, quản lý độc lập với question_bank
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS practice_exams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        content_html TEXT NOT NULL,
+        content_plain TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Bài làm practice: 1 học viên = 1 bài làm duy nhất cho batch practice của mình
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS practice_submissions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        practice_exam_id INTEGER NOT NULL,
+        answer TEXT,
+        ai_score REAL,
+        ai_feedback TEXT,
+        trainer_score REAL,
+        trainer_feedback TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS students (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,44 +481,51 @@ function initSqlite() {
         status TEXT DEFAULT 'pending',
         attempts INTEGER DEFAULT 0,
         error_message TEXT,
+        kind TEXT DEFAULT 'exam',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    
+    // Migration: phân biệt job chấm exam_questions vs practice_submissions
+    const aiQueueCols = sqliteDb.prepare("PRAGMA table_info(ai_queue)").all() as { name: string }[];
+    if (!aiQueueCols.map((c) => c.name).includes('kind')) {
+      sqliteDb.exec("ALTER TABLE ai_queue ADD COLUMN kind TEXT DEFAULT 'exam'");
+    }
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS admin_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        role TEXT DEFAULT 'admin',
+        role TEXT NOT NULL DEFAULT 'admin',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[];
+    if (!adminCols.map((c) => c.name).includes('role')) {
+      sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
+    }
 
     // Migration cho SQLite DB cũ: thêm cột nếu chưa có (SQLite không có IF NOT EXISTS cho ADD COLUMN)
-    const batchCols = (sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[]).map(c => c.name);
-    if (!batchCols.includes('record_enabled')) {
+    // (cột role của admin_users đã được migrate ở ngay trên)
+    const batchColNames = (sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[]).map(c => c.name);
+    if (!batchColNames.includes('record_enabled')) {
       sqliteDb.exec('ALTER TABLE batches ADD COLUMN record_enabled INTEGER DEFAULT 0');
     }
-    if (!batchCols.includes('exam_type')) {
+    if (!batchColNames.includes('exam_type')) {
       sqliteDb.exec("ALTER TABLE batches ADD COLUMN exam_type TEXT DEFAULT 'essay'");
     }
-    if (!batchCols.includes('record_mode')) {
+    if (!batchColNames.includes('record_mode')) {
       sqliteDb.exec("ALTER TABLE batches ADD COLUMN record_mode TEXT DEFAULT 'none'");
       // Backfill: batch cũ có record_enabled=1 → 's3'
       sqliteDb.exec("UPDATE batches SET record_mode = 's3' WHERE record_enabled = 1 AND (record_mode IS NULL OR record_mode = 'none')");
     }
-    const adminCols = (sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[]).map(c => c.name);
-    if (!adminCols.includes('role')) {
-      sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
-    }
     // Migration: cột quiz cho question_bank + option_order cho exam_questions (SQLite DB cũ)
-    const qbCols = (sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[]).map(c => c.name);
-    if (!qbCols.includes('options')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN options TEXT');
-    if (!qbCols.includes('correct_answers')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN correct_answers TEXT');
-    if (!qbCols.includes('score')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN score REAL DEFAULT 1');
+    const qbQuizCols = (sqliteDb.prepare("PRAGMA table_info(question_bank)").all() as { name: string }[]).map(c => c.name);
+    if (!qbQuizCols.includes('options')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN options TEXT');
+    if (!qbQuizCols.includes('correct_answers')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN correct_answers TEXT');
+    if (!qbQuizCols.includes('score')) sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN score REAL DEFAULT 1');
     const eqCols = (sqliteDb.prepare("PRAGMA table_info(exam_questions)").all() as { name: string }[]).map(c => c.name);
     if (!eqCols.includes('option_order')) sqliteDb.exec('ALTER TABLE exam_questions ADD COLUMN option_order TEXT');
 
@@ -427,12 +536,31 @@ function initSqlite() {
   }
 }
 
+// Seed tài khoản superadmin đầu tiên — chỉ chạy khi bảng admin_users đang trống,
+// thay cho form đăng ký admin tự phục vụ (đã bị gỡ bỏ vì lý do bảo mật).
+async function seedSuperAdmin() {
+  const existing = await query('SELECT COUNT(*) as count FROM admin_users');
+  const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
+  if (count > 0) return;
+
+  const username = process.env.SUPERADMIN_USERNAME || 'supperadmin';
+  const password = process.env.SUPERADMIN_PASSWORD || 'superadmin123#2nf';
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  await query(
+    'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
+    [username, passwordHash, 'superadmin']
+  );
+  console.log('[DB] Seeded initial superadmin account:', username);
+}
+
 export async function initDatabase() {
   if (USE_SQLITE) {
     initSqlite();
   } else {
     await initPostgres();
   }
+  await seedSuperAdmin();
 }
 
 interface DbResult {
@@ -445,7 +573,8 @@ export async function query(text: string, params?: any[]): Promise<DbResult> {
   if (USE_SQLITE && sqliteDb) {
     try {
       const stmt = sqliteDb.prepare(text);
-      if (text.trim().toUpperCase().startsWith('SELECT')) {
+      const upperText = text.trim().toUpperCase();
+      if (upperText.startsWith('SELECT') || upperText.includes('RETURNING')) {
         return { rows: stmt.all(...(params || [])), rowCount: 0 };
       } else {
         const result = stmt.run(...(params || []));

@@ -4,10 +4,11 @@ import { ReactNode } from 'react';
 
 interface PrivateRouteProps {
   children: ReactNode;
+  requireSuperAdmin?: boolean;
 }
 
-function PrivateRoute({ children }: PrivateRouteProps) {
-  const { isAuthenticated, isLoading } = useAuth();
+function PrivateRoute({ children, requireSuperAdmin = false }: PrivateRouteProps) {
+  const { isAuthenticated, isSuperAdmin, isLoading } = useAuth();
 
   // Chờ AuthContext kiểm tra localStorage xong trước khi redirect
   if (isLoading) {
@@ -26,6 +27,10 @@ function PrivateRoute({ children }: PrivateRouteProps) {
 
   if (!isAuthenticated) {
     return <Navigate to="/admin" replace />;
+  }
+
+  if (requireSuperAdmin && !isSuperAdmin) {
+    return <Navigate to="/admin/dashboard" replace />;
   }
 
   return <>{children}</>;

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
 function AdminLogin() {
@@ -60,12 +60,6 @@ function AdminLogin() {
             {loading ? 'Logging in...' : 'Login'}
           </button>
         </form>
-        <p style={{ marginTop: 16, fontSize: 12, color: 'var(--text-light)', textAlign: 'center' }}>
-          First time?{' '}
-          <Link to="/admin/setup" style={{ color: 'var(--primary)' }}>
-            Set up admin account
-          </Link>
-        </p>
       </div>
     </div>
   );

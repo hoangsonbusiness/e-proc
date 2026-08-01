@@ -9,6 +9,7 @@ type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 function QuestionBank() {
   const [questions, setQuestions] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
+  const [questionGroups, setQuestionGroups] = useState<string[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
@@ -16,6 +17,7 @@ function QuestionBank() {
 
   // Filter & pagination
   const [selectedModule, setSelectedModule] = useState<string>('');
+  const [selectedQuestionGroup, setSelectedQuestionGroup] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'essay' | 'quiz'>('all');
   const [pageSize, setPageSize] = useState<PageSize>(25);
   const [currentPage, setCurrentPage] = useState(1);
@@ -27,6 +29,7 @@ function QuestionBank() {
   useEffect(() => {
     loadQuestions();
     loadModules();
+    loadQuestionGroups();
   }, []);
 
 
@@ -49,6 +52,15 @@ function QuestionBank() {
     }
   };
 
+  const loadQuestionGroups = async () => {
+    try {
+      const res = await adminApi.getQuestionGroups();
+      setQuestionGroups(res.data);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
   const handleImport = async (mode: 'essay' | 'quiz' = 'essay') => {
     if (!file) return;
     setLoading(true);
@@ -65,6 +77,7 @@ function QuestionBank() {
       setMessage(msg);
       loadQuestions();
       loadModules();
+      loadQuestionGroups();
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
     } catch (error: any) {
@@ -101,11 +114,12 @@ function QuestionBank() {
   const filtered = useMemo(() =>
     questions.filter(q => {
       if (selectedModule && q.module !== selectedModule) return false;
+      if (selectedQuestionGroup && q.question_group !== selectedQuestionGroup) return false;
       if (selectedCategory === 'quiz') return QUIZ_TYPES.includes(q.type);
       if (selectedCategory === 'essay') return !QUIZ_TYPES.includes(q.type);
       return true;
     }),
-    [questions, selectedModule, selectedCategory]
+    [questions, selectedModule, selectedQuestionGroup, selectedCategory]
   );
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -122,6 +136,12 @@ function QuestionBank() {
   // ── Handlers ─────────────────────────────────────────────────────────────
   const handleModuleChange = (mod: string) => {
     setSelectedModule(mod);
+    setCurrentPage(1);
+    setSelectedIds(new Set());
+  };
+
+  const handleQuestionGroupChange = (group: string) => {
+    setSelectedQuestionGroup(group);
     setCurrentPage(1);
     setSelectedIds(new Set());
   };
@@ -256,6 +276,23 @@ function QuestionBank() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>
+              Filter by Question Group:
+            </label>
+            <select
+              id="question-group-filter"
+              value={selectedQuestionGroup}
+              onChange={e => handleQuestionGroupChange(e.target.value)}
+              style={{ fontSize: 13, padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer', minWidth: 160 }}
+            >
+              <option value="">All Question Groups</option>
+              {questionGroups.map(group => (
+                <option key={group} value={group}>{group}</option>
+              ))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label htmlFor="category-filter" style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>
               Type:
             </label>
             <select
@@ -306,6 +343,7 @@ function QuestionBank() {
               <th>Type</th>
               <th>Level</th>
               <th>Module</th>
+              <th>Question Group</th>
               <th>Question</th>
               <th>Actions</th>
             </tr>
@@ -330,6 +368,7 @@ function QuestionBank() {
                   <span style={levelStyle(q.level)}>{q.level}</span>
                 </td>
                 <td>{q.module}</td>
+                <td>{q.question_group || '-'}</td>
                 <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {q.question_sample}
                 </td>
@@ -346,7 +385,7 @@ function QuestionBank() {
             ))}
             {paginated.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-light)', padding: '24px 0' }}>
+                <td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-light)', padding: '24px 0' }}>
                   {questions.length === 0 ? 'No questions yet. Import from Excel.' : 'No questions match the selected filter.'}
                 </td>
               </tr>

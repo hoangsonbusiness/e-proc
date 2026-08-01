@@ -1,13 +1,14 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import * as XLSX from 'xlsx';
+import mammoth from 'mammoth';
 import db from '../db/postgres.js';
-import { normalizeUnicode } from '../../utils/string.js';
+import { normalizeUnicode, stripHtml, sanitizeFilename, buildContentDisposition } from '../../utils/string.js';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
-import { authMiddleware, requireAdmin } from '../middleware/auth.js';
+import { authMiddleware, requireSuperAdmin } from '../middleware/auth.js';
 
 dotenv.config();
 
@@ -27,64 +28,13 @@ const loginRateLimit = rateLimit({
   legacyHeaders: false,
 });
 
-// [C-5] Rate limit cho setup: 5 lần/giờ — chỉ dùng một lần trong vòng đời app
-const setupRateLimit = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 giờ
-  max: 5,
-  message: { error: 'Too many setup attempts. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // =============================================
 // AUTH ROUTES (không require JWT)
 // =============================================
-
-// GET /api/admin/is-initialized — Kiểm tra xem admin đã được tạo chưa
-router.get('/is-initialized', async (req: Request, res: Response) => {
-  try {
-    const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
-    const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
-    return res.json({ initialized: count > 0 });
-  } catch (err: any) {
-    console.error('[Auth] is-initialized error:', err);
-    return res.status(500).json({ error: 'Failed to check initialization status' });
-  }
-});
-
-// POST /api/admin/setup — Tạo admin lần đầu (chỉ hoạt động khi bảng trống)
-router.post('/setup', setupRateLimit, async (req: Request, res: Response) => {
-
-  try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
-    }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
-    }
-
-    // Kiểm tra xem đã có admin chưa
-    const existing = await db.query('SELECT COUNT(*) as count FROM admin_users');
-    const count = Number(existing.rows[0]?.count ?? existing.rows[0]?.COUNT ?? 0);
-    if (count > 0) {
-      return res.status(403).json({ error: 'Admin already initialized. Use change-password to update credentials.' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    await db.query(
-      'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
-      [username.trim(), passwordHash]
-    );
-
-    console.log('[Auth] Admin user created:', username);
-    return res.status(201).json({ success: true, message: 'Admin account created successfully' });
-  } catch (err: any) {
-    console.error('[Auth] Setup error:', err);
-    return res.status(500).json({ error: 'Failed to create admin account' });
-  }
-});
+// Lưu ý: chức năng tự đăng ký admin (/is-initialized, /setup) đã bị gỡ bỏ vì lý
+// do bảo mật. Tài khoản superadmin đầu tiên được seed tự động khi admin_users
+// còn trống (xem seedSuperAdmin() trong src/server/db/postgres.ts); các tài
+// khoản admin khác chỉ được tạo bởi superadmin qua /api/admin/users.
 
 // POST /api/admin/login — Đăng nhập, nhận JWT
 router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
@@ -143,65 +93,6 @@ router.post('/logout', (req: Request, res: Response) => {
 // =============================================
 router.use(authMiddleware);
 
-// ── Quản lý user (chỉ admin) ─────────────────────────────────────────────
-
-// GET /api/admin/users — liệt kê user (chỉ admin)
-router.get('/users', requireAdmin, async (_req: Request, res: Response) => {
-  try {
-    const result = await db.query(
-      'SELECT id, username, role, created_at FROM admin_users ORDER BY id ASC'
-    );
-    return res.json(result.rows);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/admin/users — tạo user với role 'admin' hoặc 'mod' (chỉ admin)
-router.post('/users', requireAdmin, async (req: Request, res: Response) => {
-  try {
-    const { username, password, role } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
-    }
-    if (role !== 'admin' && role !== 'mod') {
-      return res.status(400).json({ error: 'Role must be "admin" or "mod"' });
-    }
-    if (String(password).length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
-    }
-
-    const existing = await db.query('SELECT id FROM admin_users WHERE username = ?', [username.trim()]);
-    if (existing.rows.length > 0) {
-      return res.status(409).json({ error: 'Username already exists' });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    await db.query(
-      'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
-      [username.trim(), passwordHash, role]
-    );
-    console.log('[Auth] User created:', username, 'role:', role);
-    return res.status(201).json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// DELETE /api/admin/users/:id — xóa user (chỉ admin; không cho tự xóa chính mình)
-router.delete('/users/:id', requireAdmin, async (req: Request, res: Response) => {
-  try {
-    const targetId = parseInt(req.params.id);
-    if (req.adminUser?.id === targetId) {
-      return res.status(400).json({ error: 'Cannot delete your own account' });
-    }
-    await db.query('DELETE FROM admin_users WHERE id = ?', [targetId]);
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
 // PUT /api/admin/change-password — Đổi password (require JWT)
 router.put('/change-password', async (req: Request, res: Response) => {
   try {
@@ -240,6 +131,129 @@ router.put('/change-password', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Auth] Change password error:', err);
     return res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
+// =============================================
+// USER MANAGEMENT — Chỉ superadmin (require JWT + role superadmin)
+// =============================================
+
+// GET /api/admin/users — Danh sách tài khoản admin (không trả password_hash)
+router.get('/users', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(
+      'SELECT id, username, role, created_at, updated_at FROM admin_users ORDER BY created_at ASC'
+    );
+    return res.json(result.rows);
+  } catch (err: any) {
+    console.error('[Users] List error:', err);
+    return res.status(500).json({ error: 'Failed to list admin users' });
+  }
+});
+
+// POST /api/admin/users — Tạo tài khoản admin mới
+router.post('/users', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { username, password, role } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    if (role !== 'admin' && role !== 'superadmin') {
+      return res.status(400).json({ error: "role must be 'admin' or 'superadmin'" });
+    }
+
+    const existing = await db.query('SELECT id FROM admin_users WHERE username = ?', [username.trim()]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await db.query(
+      'INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)',
+      [username.trim(), passwordHash, role]
+    );
+
+    console.log('[Users] Created admin user:', username, 'role:', role, 'by:', req.adminUser!.username);
+    return res.status(201).json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Create error:', err);
+    return res.status(500).json({ error: 'Failed to create admin user' });
+  }
+});
+
+// PUT /api/admin/users/:id — Đổi role và/hoặc reset password của một tài khoản admin
+router.put('/users/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { role, password } = req.body;
+
+    const existing = await db.query('SELECT * FROM admin_users WHERE id = ?', [id]);
+    const target = existing.rows[0];
+    if (!target) {
+      return res.status(404).json({ error: 'Admin user not found' });
+    }
+
+    if (role !== undefined) {
+      if (role !== 'admin' && role !== 'superadmin') {
+        return res.status(400).json({ error: "role must be 'admin' or 'superadmin'" });
+      }
+      // Không cho phép tự hạ quyền chính mình xuống 'admin' — tránh tự khoá bản thân
+      if (Number(id) === req.adminUser!.id && role !== 'superadmin') {
+        return res.status(400).json({ error: 'You cannot demote your own account' });
+      }
+      await db.query('UPDATE admin_users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [role, id]);
+    }
+
+    if (password !== undefined) {
+      if (password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters' });
+      }
+      const passwordHash = await bcrypt.hash(password, 10);
+      await db.query('UPDATE admin_users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [passwordHash, id]);
+    }
+
+    console.log('[Users] Updated admin user:', target.username, 'by:', req.adminUser!.username);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Update error:', err);
+    return res.status(500).json({ error: 'Failed to update admin user' });
+  }
+});
+
+// DELETE /api/admin/users/:id — Xoá tài khoản admin
+router.delete('/users/:id', requireSuperAdmin, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    if (Number(id) === req.adminUser!.id) {
+      return res.status(400).json({ error: 'You cannot delete your own account' });
+    }
+
+    const existing = await db.query('SELECT * FROM admin_users WHERE id = ?', [id]);
+    const target = existing.rows[0];
+    if (!target) {
+      return res.status(404).json({ error: 'Admin user not found' });
+    }
+
+    // Không cho xoá superadmin cuối cùng — tránh khoá toàn bộ hệ thống quản trị
+    if (target.role === 'superadmin') {
+      const superAdmins = await db.query("SELECT COUNT(*) as count FROM admin_users WHERE role = 'superadmin'");
+      const count = Number(superAdmins.rows[0]?.count ?? superAdmins.rows[0]?.COUNT ?? 0);
+      if (count <= 1) {
+        return res.status(400).json({ error: 'Cannot delete the last remaining superadmin' });
+      }
+    }
+
+    await db.query('DELETE FROM admin_users WHERE id = ?', [id]);
+    console.log('[Users] Deleted admin user:', target.username, 'by:', req.adminUser!.username);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('[Users] Delete error:', err);
+    return res.status(500).json({ error: 'Failed to delete admin user' });
   }
 });
 
@@ -369,7 +383,9 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       const level = colIndex['Level'] !== undefined ? row[colIndex['Level']] : row[2];
       const module = colIndex['Topic'] !== undefined ? row[colIndex['Topic']] : (colIndex['Module'] !== undefined ? row[colIndex['Module']] : row[3]);
       const question = colIndex['Question Sample'] !== undefined ? row[colIndex['Question Sample']] : row[4];
-      
+      const questionGroupRaw = colIndex['QuestionGroup'] ?? colIndex['Question Set'] ?? colIndex['Bộ đề'];
+      const questionGroup = (questionGroupRaw !== undefined ? row[questionGroupRaw]?.toString().trim() : '') || '';
+
       const rubricMustHave = row[rubricMustHaveCol]?.toString() || '';
       const rubricNice = row[rubricNiceCol]?.toString() || '';
       const rubricOpt = row[rubricOptCol]?.toString() || '';
@@ -392,9 +408,10 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       }
 
       const normalizedModule = normalizeUnicode(module.toString());
+      const questionPlain = stripHtml(question.toString());
 
-      const existing = await db.query('SELECT id FROM question_bank WHERE id = $1', [id]);
-      
+      const existing = await db.query('SELECT id FROM question_bank WHERE id = ?', [id]);
+
       if (existing.rows.length > 0) {
         updated++;
       } else {
@@ -403,27 +420,29 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
 
       if (USE_SQLITE) {
         await db.query(`
-          INSERT OR REPLACE INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+          INSERT OR REPLACE INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
       } else {
         const pgQuery = `
-          INSERT INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+          INSERT INTO question_bank
+          (id, type, level, module, question_group, question_sample, question_plain, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
             module = EXCLUDED.module,
+            question_group = EXCLUDED.question_group,
             question_sample = EXCLUDED.question_sample,
+            question_plain = EXCLUDED.question_plain,
             rubric_must_have = EXCLUDED.rubric_must_have,
             rubric_nice_to_have = EXCLUDED.rubric_nice_to_have,
             rubric_optional = EXCLUDED.rubric_optional,
             updated_at = CURRENT_TIMESTAMP
         `;
         console.log('[Import] PG Query:', pgQuery);
-        await db.query(pgQuery, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+        await db.query(pgQuery, [id, type, level, normalizedModule, questionGroup, question, questionPlain, rubricMustHave, rubricNice, rubricOpt]);
       }
     }
 
@@ -604,6 +623,37 @@ router.get('/questions/modules', async (req: Request, res: Response) => {
   }
 });
 
+router.get('/questions/question-groups', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT DISTINCT question_group FROM question_bank
+      WHERE question_group IS NOT NULL AND question_group != ''
+      ORDER BY question_group
+    `);
+    res.json(result.rows.map((r: any) => r.question_group));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Distinct (module, question_group) combos — used to disambiguate modules that
+// exist under multiple question groups (e.g. "Unit Testing" in both CPP_EMB_PRINT_IOT
+// and CPP_EMB_AUTOSAR) when building exam blueprints.
+router.get('/questions/module-groups', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT DISTINCT module, question_group FROM question_bank
+      ORDER BY module, question_group
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Returns question counts per module broken down by difficulty level
 router.get('/questions/module-stats', async (req: Request, res: Response) => {
   try {
@@ -619,6 +669,32 @@ router.get('/questions/module-stats', async (req: Request, res: Response) => {
     `);
     res.json(result.rows.map((r: any) => ({
       module: r.module,
+      easy:   Number(r.easy)   || 0,
+      medium: Number(r.medium) || 0,
+      hard:   Number(r.hard)   || 0,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Returns question counts per (module, question_group) combination broken down by difficulty level
+router.get('/questions/module-group-stats', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        module,
+        question_group,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module, question_group
+      ORDER BY module, question_group
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
       easy:   Number(r.easy)   || 0,
       medium: Number(r.medium) || 0,
       hard:   Number(r.hard)   || 0,
@@ -678,6 +754,34 @@ router.get('/questions/module-type-stats', async (req: Request, res: Response) =
   }
 });
 
+// Returns question counts per (module, question_group, type) combination broken down by difficulty level
+router.get('/questions/module-group-type-stats', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        module,
+        question_group,
+        type,
+        SUM(CASE WHEN LOWER(level) = 'easy'   THEN 1 ELSE 0 END) AS easy,
+        SUM(CASE WHEN LOWER(level) = 'medium' THEN 1 ELSE 0 END) AS medium,
+        SUM(CASE WHEN LOWER(level) = 'hard'   THEN 1 ELSE 0 END) AS hard
+      FROM question_bank
+      GROUP BY module, question_group, type
+      ORDER BY module, question_group, type
+    `);
+    res.json(result.rows.map((r: any) => ({
+      module: r.module,
+      question_group: r.question_group || '',
+      type:   r.type,
+      easy:   Number(r.easy)   || 0,
+      medium: Number(r.medium) || 0,
+      hard:   Number(r.hard)   || 0,
+    })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 /**
  * Parse blueprint supporting both formats:
  *  - Legacy (array): [{ module, easy, medium, hard }]
@@ -723,48 +827,142 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
   }
 });
 
+// =============================================
+// PRACTICE EXAMS — Quản lý riêng, import từ .docx
+// =============================================
+
+// POST /api/admin/practice/import — Upload file .docx + tên bài, convert sang HTML
+router.post('/practice/import', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    const name = (req.body.name || '').toString().trim() || req.file.originalname.replace(/\.docx?$/i, '');
+
+    if (!/\.docx$/i.test(req.file.originalname)) {
+      return res.status(400).json({ error: 'Only .docx files are supported' });
+    }
+
+    const conversion = await mammoth.convertToHtml({ buffer: req.file.buffer });
+    const contentHtml = conversion.value;
+    if (!contentHtml || contentHtml.trim().length === 0) {
+      return res.status(400).json({ error: 'Could not extract any content from the .docx file' });
+    }
+    const contentPlain = stripHtml(contentHtml);
+
+    const result = await db.query(
+      `INSERT INTO practice_exams (name, content_html, content_plain) VALUES (?, ?, ?) RETURNING id`,
+      [name, contentHtml, contentPlain]
+    );
+    const id = result.rows[0]?.id ?? result.lastInsertRowid;
+
+    console.log('[Practice] Imported:', name, 'id:', id, 'html length:', contentHtml.length);
+    res.status(201).json({ success: true, id, name, warnings: conversion.messages?.map((m: any) => m.message) });
+  } catch (error: any) {
+    console.error('[Practice] Import error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/practice — Danh sách bài practice (kèm số batch đang dùng)
+router.get('/practice', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query(`
+      SELECT p.id, p.name, p.created_at,
+             (SELECT COUNT(*) FROM batches b WHERE b.practice_exam_id = p.id) as batches_count
+      FROM practice_exams p
+      ORDER BY p.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/practice/:id — Chi tiết (kèm content_html để preview)
+router.get('/practice/:id', async (req: Request, res: Response) => {
+  try {
+    const result = await db.query('SELECT * FROM practice_exams WHERE id = ?', [parseInt(req.params.id)]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Practice exam not found' });
+    }
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/practice/:id — Chặn xoá nếu còn batch đang tham chiếu
+router.delete('/practice/:id', async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const used = await db.query('SELECT COUNT(*) as count FROM batches WHERE practice_exam_id = ?', [id]);
+    const count = Number(used.rows[0]?.count ?? used.rows[0]?.COUNT ?? 0);
+    if (count > 0) {
+      return res.status(400).json({ error: `Practice exam is used by ${count} batch(es). Delete those batches first.` });
+    }
+    await db.query('DELETE FROM practice_exams WHERE id = ?', [id]);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.post('/batches', async (req: Request, res: Response) => {
   try {
-    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
-    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
+    const { name, start_time, end_time, duration, blueprint, practice_exam_id, record_mode, exam_type } = req.body;
+    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, practice_exam_id, exam_type, record_mode });
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     if (!name || !start_time || !end_time || !duration) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Support both legacy array format and new { blueprintMode, items } object format
-    const { items: blueprintItems } = parseBlueprintCompat(blueprint);
-    const totalQuestions = blueprintItems.reduce((sum: number, item: any) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
-    if (totalQuestions < 1 || totalQuestions > 100) {
-      return res.status(400).json({ error: 'Total questions must be between 1 and 100' });
+    const isPractice = practice_exam_id !== undefined && practice_exam_id !== null && practice_exam_id !== '';
+    let blueprintJson: string | null = null;
+
+    if (isPractice) {
+      // Batch dạng Practice: không dùng blueprint; xác nhận bài practice tồn tại
+      const pe = await db.query('SELECT id FROM practice_exams WHERE id = ?', [parseInt(practice_exam_id)]);
+      if (pe.rows.length === 0) {
+        return res.status(400).json({ error: 'Practice exam not found' });
+      }
+    } else {
+      // Support both legacy array format and new { blueprintMode, items } object format
+      const { items: blueprintItems } = parseBlueprintCompat(blueprint);
+      const totalQuestions = blueprintItems.reduce((sum: number, item: any) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
+      // Đề quiz (trắc nghiệm) cho phép tới 100 câu; đề tự luận giữ giới hạn 20 câu như trước.
+      const maxQuestions = examType === 'quiz' ? 100 : 20;
+      if (totalQuestions < 1 || totalQuestions > maxQuestions) {
+        return res.status(400).json({ error: `Total questions must be between 1 and ${maxQuestions}` });
+      }
+      blueprintJson = JSON.stringify(blueprint);
+      console.log('[CreateBatch] Blueprint JSON:', blueprintJson);
     }
 
-    const blueprintJson = JSON.stringify(blueprint);
-    console.log('[CreateBatch] Blueprint JSON:', blueprintJson);
-    
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
     console.log('[CreateBatch] Times (UTC stored):', { start_time: startUTC, end_time: endUTC });
-    
-    // Chế độ record ('none' | 'local' | 's3') chỉ được đặt khác 'none' bởi role 'admin'.
-    // Mod tạo batch → luôn ép 'none'. record_enabled giữ đồng bộ (= mode==='s3') để tương thích ngược.
+
+    // Chế độ record ('none' | 'local' | 's3') chỉ được đặt khác 'none' bởi role 'superadmin'.
+    // Admin thường tạo batch → luôn ép 'none'. record_enabled giữ đồng bộ (= mode==='s3') để tương thích ngược.
     const RECORD_MODES = ['none', 'local', 's3'];
     let recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
-    if (req.adminUser?.role !== 'admin') recordMode = 'none';
+    if (req.adminUser?.role !== 'superadmin') recordMode = 'none';
     const recordFlag = recordMode === 's3' ? 1 : 0;
 
+    const practiceExamId = isPractice ? parseInt(practice_exam_id) : null;
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id, record_enabled, record_mode, exam_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, recordFlag, recordMode, examType]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, practice_exam_id, record_enabled, record_mode, exam_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, !!recordFlag, recordMode, examType]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -816,16 +1014,20 @@ router.get('/batches/:id', async (req: Request, res: Response) => {
 router.put('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+    const { name, start_time, end_time, duration, blueprint, practice_exam_id, record_mode, exam_type } = req.body;
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
 
-    // Chế độ record: admin dùng giá trị client gửi; mod KHÔNG đổi được → giữ nguyên mode cũ trong DB.
+    const isPractice = practice_exam_id !== undefined && practice_exam_id !== null && practice_exam_id !== '';
+    const blueprintJson = isPractice ? null : JSON.stringify(blueprint);
+    const practiceExamId = isPractice ? parseInt(practice_exam_id) : null;
+
+    // Chế độ record: superadmin dùng giá trị client gửi; admin thường KHÔNG đổi được → giữ nguyên mode cũ trong DB.
     const RECORD_MODES = ['none', 'local', 's3'];
     let recordMode: string;
-    if (req.adminUser?.role === 'admin') {
+    if (req.adminUser?.role === 'superadmin') {
       recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
     } else {
       const cur = await db.query('SELECT record_mode FROM batches WHERE id = ?', [parseInt(id)]);
@@ -835,14 +1037,14 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
 
     if (USE_SQLITE) {
       await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, practice_exam_id = ?, record_enabled = ?, record_mode = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, recordMode, examType, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, recordFlag, recordMode, examType, parseInt(id)]);
     } else {
       await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, practice_exam_id = ?, record_enabled = ?, record_mode = ?, exam_type = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, recordMode, examType, parseInt(id)]);
+      `, [name, startUTC, endUTC, duration, blueprintJson, practiceExamId, !!recordFlag, recordMode, examType, parseInt(id)]);
     }
 
     res.json({ success: true });
@@ -856,8 +1058,9 @@ router.delete('/batches/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const batchId = parseInt(id);
     
-    // Delete cascade: exam_questions -> students -> batch
+    // Delete cascade: exam_questions/practice_submissions -> students -> batch
     await db.query('DELETE FROM exam_questions WHERE student_id IN (SELECT id FROM students WHERE batch_id = ?)', [batchId]);
+    await db.query('DELETE FROM practice_submissions WHERE student_id IN (SELECT id FROM students WHERE batch_id = ?)', [batchId]);
     await db.query('DELETE FROM violations WHERE student_id IN (SELECT id FROM students WHERE batch_id = ?)', [batchId]);
     await db.query('DELETE FROM students WHERE batch_id = ?', [batchId]);
     await db.query('DELETE FROM batches WHERE id = ?', [batchId]);
@@ -877,14 +1080,22 @@ router.post('/batches/:id/check-feasibility', async (req: Request, res: Response
       for (const level of ['Easy', 'Medium', 'Hard'] as const) {
         const count = item[level.toLowerCase() as 'easy' | 'medium' | 'hard'];
         if (count > 0) {
+          const conditions = ['module = ?', 'level = ?'];
+          const params: any[] = [item.module, level];
+          if (item.question_group) {
+            conditions.push('question_group = ?');
+            params.push(item.question_group);
+          }
+
           const result = await db.query(`
             SELECT COUNT(*) as count FROM question_bank
-            WHERE module = ? AND level = ?
-          `, [item.module, level]);
+            WHERE ${conditions.join(' AND ')}
+          `, params);
 
+          const label = item.question_group ? `${item.module} (${item.question_group})` : item.module;
           const available = parseInt(result.rows[0].count);
           if (available < count) {
-            errors.push(`Module ${item.module} Level ${level} has only ${available} questions, need ${count}`);
+            errors.push(`Module ${label} Level ${level} has only ${available} questions, need ${count}`);
           }
         }
       }
@@ -895,6 +1106,30 @@ router.post('/batches/:id/check-feasibility', async (req: Request, res: Response
     res.status(500).json({ error: error.message });
   }
 });
+
+/** Randomly pick `count` question IDs matching module/level (+ optional type, question_group). */
+async function pickQuestionIds(opts: { module: string; level: string; type?: string; questionGroup?: string; count: number }): Promise<string[]> {
+  const { module, level, type, questionGroup, count } = opts;
+  if (count <= 0) return [];
+
+  const conditions = ['LOWER(module) = ?', 'LOWER(level) = ?'];
+  const params: any[] = [module.toLowerCase().trim(), level.toLowerCase().trim()];
+  if (type) {
+    conditions.push('LOWER(type) = ?');
+    params.push(type.toLowerCase().trim());
+  }
+  if (questionGroup) {
+    conditions.push('LOWER(question_group) = ?');
+    params.push(questionGroup.toLowerCase().trim());
+  }
+  params.push(count);
+
+  const r = await db.query(
+    `SELECT id FROM question_bank WHERE ${conditions.join(' AND ')} ORDER BY RANDOM() LIMIT ?`,
+    params
+  );
+  return r.rows.map((q: any) => q.id);
+}
 
 router.post('/batches/:id/students/import', async (req: Request, res: Response) => {
   try {
@@ -922,34 +1157,44 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
     const students: {email: string; code: string}[] = [];
     
     console.log('Fetching batch...');
-    const batchResult = await db.query('SELECT id, blueprint FROM batches WHERE id = ?', [batchId]);
+    const batchResult = await db.query('SELECT id, blueprint, practice_exam_id FROM batches WHERE id = ?', [batchId]);
     const batch = batchResult.rows[0];
     console.log('Batch found:', batch ? 'yes' : 'no');
-    console.log('Batch blueprint:', batch?.blueprint);
-    
-    if (!batch || !batch.blueprint) {
-      console.log('[Import Students] ERROR: Batch has no blueprint');
-      return res.status(400).json({ error: 'Batch has no blueprint' });
+    console.log('Batch blueprint:', batch?.blueprint, 'practice_exam_id:', batch?.practice_exam_id);
+
+    if (!batch) {
+      return res.status(404).json({ error: 'Batch not found' });
     }
-    
-    let blueprint;
-    try {
-      if (typeof batch.blueprint === 'string') {
-        blueprint = JSON.parse(batch.blueprint);
-      } else {
-        blueprint = batch.blueprint;
+
+    // Batch dạng Practice: không gán câu hỏi từ question_bank — học viên làm bài
+    // practice gắn với batch, chỉ cần tạo student + access code.
+    const isPracticeBatch = batch.practice_exam_id !== null && batch.practice_exam_id !== undefined;
+
+    let blueprint: any = [];
+    if (!isPracticeBatch) {
+      if (!batch.blueprint) {
+        console.log('[Import Students] ERROR: Batch has no blueprint');
+        return res.status(400).json({ error: 'Batch has no blueprint' });
       }
-    } catch (e) {
-      console.log('[Import Students] JSON parse error:', e);
-      blueprint = [];
-    }
-    
-    console.log('Parsed blueprint:', JSON.stringify(blueprint));
-    
-    // Support both legacy array and new { blueprintMode, items } formats
-    const { items: parsedBlueprintItems } = parseBlueprintCompat(blueprint);
-    if (!parsedBlueprintItems || parsedBlueprintItems.length === 0) {
-      return res.status(400).json({ error: 'Blueprint is empty' });
+
+      try {
+        if (typeof batch.blueprint === 'string') {
+          blueprint = JSON.parse(batch.blueprint);
+        } else {
+          blueprint = batch.blueprint;
+        }
+      } catch (e) {
+        console.log('[Import Students] JSON parse error:', e);
+        blueprint = [];
+      }
+
+      console.log('Parsed blueprint:', JSON.stringify(blueprint));
+
+      // Support both legacy array and new { blueprintMode, items } formats
+      const { items: parsedBlueprintItems } = parseBlueprintCompat(blueprint);
+      if (!parsedBlueprintItems || parsedBlueprintItems.length === 0) {
+        return res.status(400).json({ error: 'Blueprint is empty' });
+      }
     }
     
     const existingResult = await db.query(
@@ -993,9 +1238,15 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
       
       const studentId = studentResult.rows[0]?.id;
       console.log('Student created:', studentId);
-      
+
       if (!studentId) continue;
-      
+
+      // Batch dạng Practice: không gán câu hỏi từ question_bank
+      if (isPracticeBatch) {
+        students.push({ email: email.trim(), code });
+        continue;
+      }
+
       const questionIds: string[] = [];
 
       // Parse blueprint supporting both legacy (array) and new ({ blueprintMode, items }) formats
@@ -1006,48 +1257,16 @@ router.post('/batches/:id/students/import', async (req: Request, res: Response) 
         const easy   = item.easy   || 0;
         const medium = item.medium || 0;
         const hard   = item.hard   || 0;
+        const module = item.module || '';
+        const questionGroup = item.question_group || '';
+        const type = blueprintMode === 'type' ? (item.type || '') : undefined;
 
-        if (blueprintMode === 'type') {
-          // By Module + Type: query WHERE module = ? AND type = ? AND level = ?
-          const moduleName = (item.module || '').toLowerCase().trim();
-          const typeName   = (item.type   || '').toLowerCase().trim();
-          console.log(`Processing by module+type: ${item.module}/${item.type}, easy=${easy}, medium=${medium}, hard=${hard}`);
+        console.log(`Processing ${blueprintMode === 'type' ? `${module}/${type}` : module}${questionGroup ? ` (${questionGroup})` : ''}, easy=${easy}, medium=${medium}, hard=${hard}`);
 
-          if (easy > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'easy', easy]);
-            console.log(`  Module+Type Easy: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (medium > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'medium', medium]);
-            console.log(`  Module+Type Medium: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (hard > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(type) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, typeName, 'hard', hard]);
-            console.log(`  Module+Type Hard: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-        } else {
-          // Default: By Module only
-          const moduleName = (item.module || '').toLowerCase().trim();
-          console.log(`Processing by module: ${item.module} -> ${moduleName}, easy=${easy}, medium=${medium}, hard=${hard}`);
-
-          if (easy > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'easy', easy]);
-            console.log(`  Module Easy: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (medium > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'medium', medium]);
-            console.log(`  Module Medium: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
-          if (hard > 0) {
-            const r = await db.query('SELECT id FROM question_bank WHERE LOWER(module) = ? AND LOWER(level) = ? ORDER BY RANDOM() LIMIT ?', [moduleName, 'hard', hard]);
-            console.log(`  Module Hard: found ${r.rows.length}`);
-            r.rows.forEach((q: any) => questionIds.push(q.id));
-          }
+        for (const [level, count] of [['easy', easy], ['medium', medium], ['hard', hard]] as const) {
+          const ids = await pickQuestionIds({ module, level, type, questionGroup, count });
+          console.log(`  ${level}: found ${ids.length}`);
+          questionIds.push(...ids);
         }
       }
       
@@ -1087,6 +1306,7 @@ router.delete('/students/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(id)]);
+    await db.query('DELETE FROM practice_submissions WHERE student_id = ?', [parseInt(id)]);
     await db.query('DELETE FROM violations WHERE student_id = ?', [parseInt(id)]);
     await db.query('DELETE FROM students WHERE id = ?', [parseInt(id)]);
     res.json({ success: true });
@@ -1098,11 +1318,17 @@ router.delete('/students/:id', async (req: Request, res: Response) => {
 router.get('/batches/:id/students/export', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [parseInt(id)]);
+    const batchId = parseInt(id);
+
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-students`;
+
+    const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [batchId]);
     const students = result.rows;
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=students-${id}.xlsx`);
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
 
     const workbook = XLSX.utils.book_new();
     const sheet = XLSX.utils.json_to_sheet(students);
@@ -1125,7 +1351,8 @@ router.post('/students/:studentId/reset', async (req: Request, res: Response) =>
     `, [parseInt(studentId)]);
     
     await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
-    
+    await db.query('DELETE FROM practice_submissions WHERE student_id = ?', [parseInt(studentId)]);
+
     res.json({ success: true, message: 'Student exam reset successfully' });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1210,11 +1437,94 @@ router.put('/results/:studentId', async (req: Request, res: Response) => {
 
     for (const q of questionsResult.rows) {
       await db.query(`
-        UPDATE exam_questions 
+        UPDATE exam_questions
         SET trainer_score = ?, trainer_feedback = ?
         WHERE id = ?
       `, [trainer_score, trainer_feedback, q.id]);
     }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/batches/:id/practice-results — Kết quả batch dạng Practice
+router.get('/batches/:id/practice-results', async (req: Request, res: Response) => {
+  try {
+    const batchId = parseInt(req.params.id);
+
+    const result = await db.query(`
+      SELECT s.id as student_id, s.email, s.status, s.exam_started_at,
+             ps.id as submission_id, ps.answer, ps.ai_score, ps.ai_feedback,
+             ps.trainer_score, ps.trainer_feedback,
+             (SELECT SUM(v.count) FROM violations v WHERE v.student_id = s.id) as violations
+      FROM students s
+      LEFT JOIN practice_submissions ps ON ps.student_id = s.id
+      WHERE s.batch_id = ?
+      ORDER BY s.email
+    `, [batchId]);
+
+    res.json(result.rows.map((r: any) => ({ ...r, violations: parseInt(r.violations) || 0 })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/batches/:id/practice-results/export — Xuất Excel kết quả batch Practice
+router.get('/batches/:id/practice-results/export', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const batchId = parseInt(id);
+
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-practice-results`;
+
+    const result = await db.query(`
+      SELECT s.email, s.status,
+             ps.answer, ps.ai_score, ps.ai_feedback, ps.trainer_score, ps.trainer_feedback,
+             (SELECT SUM(v.count) FROM violations v WHERE v.student_id = s.id) as violations
+      FROM students s
+      LEFT JOIN practice_submissions ps ON ps.student_id = s.id
+      WHERE s.batch_id = ?
+      ORDER BY s.email
+    `, [batchId]);
+
+    const data = result.rows.map((r: any) => ({
+      Email: r.email,
+      Status: r.status,
+      'Violation Count': parseInt(r.violations) || 0,
+      Answer: r.answer || '',
+      'AI Score': r.ai_score ?? 0,
+      'AI Feedback': r.ai_feedback || '',
+      'Trainer Score': r.trainer_score ?? r.ai_score ?? 0,
+      'Trainer Feedback': r.trainer_feedback || '',
+    }));
+
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(workbook, sheet, 'Practice Results');
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
+    res.send(XLSX.write(workbook, { type: 'buffer' }));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/practice-results/:studentId — Trainer chấm/ghi đè điểm bài practice
+router.put('/practice-results/:studentId', async (req: Request, res: Response) => {
+  try {
+    const { studentId } = req.params;
+    const { trainer_score, trainer_feedback } = req.body;
+
+    await db.query(`
+      UPDATE practice_submissions
+      SET trainer_score = ?, trainer_feedback = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE student_id = ?
+    `, [trainer_score, trainer_feedback, parseInt(studentId)]);
 
     res.json({ success: true });
   } catch (error: any) {
@@ -1227,13 +1537,17 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
     const { id } = req.params;
     const batchId = parseInt(id);
 
+    const batchResult = await db.query('SELECT name FROM batches WHERE id = ?', [batchId]);
+    const batchName = batchResult.rows[0]?.name;
+    const filenameBase = `${sanitizeFilename(batchName || `batch-${id}`)}-results`;
+
     const studentsResult = await db.query('SELECT id, email FROM students WHERE batch_id = ?', [batchId]);
 
     const workbook = XLSX.utils.book_new();
 
     for (const student of studentsResult.rows) {
       const questionsResult = await db.query(`
-        SELECT eq.*, q.type, q.level, q.module, q.question_sample, 
+        SELECT eq.*, q.type, q.level, q.module, q.question_sample, q.question_plain,
           q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
         FROM exam_questions eq
         JOIN question_bank q ON eq.question_id = q.id
@@ -1250,7 +1564,7 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
         Type: q.type,
         Level: q.level,
         Module: q.module,
-        Question: q.question_sample,
+        Question: q.question_plain || stripHtml(q.question_sample),
         Answer: q.answer || '',
         'Rubric Must-have': q.rubric_must_have,
         'Rubric Nice-to-have': q.rubric_nice_to_have,
@@ -1268,7 +1582,7 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
     }
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=results-${id}.xlsx`);
+    res.setHeader('Content-Disposition', buildContentDisposition(filenameBase, 'xlsx'));
     res.send(XLSX.write(workbook, { type: 'buffer' }));
   } catch (error: any) {
     res.status(500).json({ error: error.message });

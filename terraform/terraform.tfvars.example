@@ -1,0 +1,33 @@
+# =============================================================================
+# Example terraform.tfvars — Copy to terraform.tfvars and fill in values
+# DO NOT commit terraform.tfvars to git!
+# =============================================================================
+
+# AWS Region (Singapore for low latency from Vietnam)
+aws_region = "ap-southeast-1"
+
+# Domain
+domain_name   = "devfatstrack.cloud"
+app_subdomain = "" # Leave empty for root domain, or "eaudit" for eaudit.devfatstrack.cloud
+
+# EC2
+instance_type       = "t3.micro"
+ssh_public_key_path = "~/.ssh/id_rsa.pub"
+allowed_ssh_cidr    = "0.0.0.0/0" # TODO: Restrict to your IP, e.g. "1.2.3.4/32"
+
+# RDS PostgreSQL
+db_instance_class = "db.t3.micro" # Free Tier eligible
+db_name           = "eaudit"
+db_username       = "eaudit_admin"
+db_password       = "YourStrongPassword123!" # Min 8 chars, change this!
+
+# AI API Key (Google Gemini)
+# Get from: https://aistudio.google.com/app/apikey
+gemini_api_key = "your-gemini-api-key"
+
+# Session Secret (random string, at least 32 chars)
+session_secret = "change-this-to-a-random-string-at-least-32-chars"
+
+# App Config
+node_env = "production"
+app_port = 3001
