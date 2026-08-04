@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
 function QuestionBank() {
+  const { isAdmin, userId } = useAuth();
   const [questions, setQuestions] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [file, setFile] = useState<File | null>(null);
@@ -90,11 +92,18 @@ function QuestionBank() {
     try {
       await adminApi.deleteQuestions(Array.from(selectedIds));
       loadQuestions();
+      setSelectedIds(new Set());
     } catch (error: any) {
       alert('Error: ' + (error.response?.data?.error || error.message));
     }
     setBulkDeleting(false);
   };
+
+  /** Mod chỉ được xóa question mình upload; admin xóa tất cả */
+  const canDeleteQuestion = (q: any) => isAdmin || q.uploaded_by === userId;
+
+  /** Với mod: chỉ cho chọn checkbox những question của mình */
+  const isSelectable = (q: any) => isAdmin || q.uploaded_by === userId;
 
   // ── Derived data ──────────────────────────────────────────────────────────
   const QUIZ_TYPES = ['SingleChoice', 'MultipleChoice'];
@@ -115,9 +124,14 @@ function QuestionBank() {
     [filtered, currentPage, pageSize]
   );
 
+  // Chỉ những question mod có quyền select (mình upload hoặc admin)
+  const selectablePageIds = useMemo(() =>
+    paginated.filter((q: any) => isSelectable(q)).map((q: any) => q.id as string),
+    [paginated, isAdmin, userId]
+  );
   const pageIds = useMemo(() => paginated.map((q: any) => q.id as string), [paginated]);
-  const allPageSelected = pageIds.length > 0 && pageIds.every(id => selectedIds.has(id));
-  const somePageSelected = pageIds.some(id => selectedIds.has(id));
+  const allPageSelected = selectablePageIds.length > 0 && selectablePageIds.every(id => selectedIds.has(id));
+  const somePageSelected = selectablePageIds.some(id => selectedIds.has(id));
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   const handleModuleChange = (mod: string) => {
@@ -132,7 +146,8 @@ function QuestionBank() {
     setSelectedIds(new Set());
   };
 
-  const toggleSelectId = (id: string) => {
+  const toggleSelectId = (id: string, q: any) => {
+    if (!isSelectable(q)) return; // mod không được chọn question người khác
     setSelectedIds(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -144,13 +159,13 @@ function QuestionBank() {
     if (allPageSelected) {
       setSelectedIds(prev => {
         const next = new Set(prev);
-        pageIds.forEach(id => next.delete(id));
+        selectablePageIds.forEach(id => next.delete(id));
         return next;
       });
     } else {
       setSelectedIds(prev => {
         const next = new Set(prev);
-        pageIds.forEach(id => next.add(id));
+        selectablePageIds.forEach(id => next.add(id));
         return next;
       });
     }
@@ -298,7 +313,7 @@ function QuestionBank() {
                   checked={allPageSelected}
                   ref={el => { if (el) el.indeterminate = somePageSelected && !allPageSelected; }}
                   onChange={toggleSelectAll}
-                  disabled={pageIds.length === 0}
+                  disabled={selectablePageIds.length === 0}
                   style={{ cursor: 'pointer', width: 15, height: 15 }}
                 />
               </th>
@@ -311,39 +326,48 @@ function QuestionBank() {
             </tr>
           </thead>
           <tbody>
-            {paginated.map((q: any) => (
-              <tr
-                key={q.id}
-                style={{ background: selectedIds.has(q.id) ? 'rgba(99,102,241,0.07)' : undefined }}
-              >
-                <td style={{ textAlign: 'center' }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(q.id)}
-                    onChange={() => toggleSelectId(q.id)}
-                    style={{ cursor: 'pointer', width: 15, height: 15 }}
-                  />
-                </td>
-                <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{q.id}</td>
-                <td>{q.type}</td>
-                <td>
-                  <span style={levelStyle(q.level)}>{q.level}</span>
-                </td>
-                <td>{q.module}</td>
-                <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {q.question_sample}
-                </td>
-                <td>
-                  <button
-                    onClick={() => handleDelete(q.id)}
-                    className="btn btn-danger"
-                    style={{ fontSize: 12, padding: '4px 10px' }}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {paginated.map((q: any) => {
+              const deletable = canDeleteQuestion(q);
+              const selectable = isSelectable(q);
+              return (
+                <tr
+                  key={q.id}
+                  style={{ background: selectedIds.has(q.id) ? 'rgba(99,102,241,0.07)' : undefined }}
+                >
+                  <td style={{ textAlign: 'center' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(q.id)}
+                      onChange={() => toggleSelectId(q.id, q)}
+                      disabled={!selectable}
+                      style={{ cursor: selectable ? 'pointer' : 'not-allowed', width: 15, height: 15, opacity: selectable ? 1 : 0.35 }}
+                    />
+                  </td>
+                  <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{q.id}</td>
+                  <td>{q.type}</td>
+                  <td>
+                    <span style={levelStyle(q.level)}>{q.level}</span>
+                  </td>
+                  <td>{q.module}</td>
+                  <td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {q.question_sample}
+                  </td>
+                  <td>
+                    {deletable ? (
+                      <button
+                        onClick={() => handleDelete(q.id)}
+                        className="btn btn-danger"
+                        style={{ fontSize: 12, padding: '4px 10px' }}
+                      >
+                        Delete
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 11, color: '#9ca3af' }}>—</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
             {paginated.length === 0 && (
               <tr>
                 <td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-light)', padding: '24px 0' }}>

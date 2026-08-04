@@ -4,6 +4,7 @@ import { adminApi } from '../services/api';
 interface AuthContextType {
   token: string | null;
   role: string | null;
+  userId: number | null;
   isAdmin: boolean;
   isAuthenticated: boolean;
   isLoading: boolean;
@@ -16,6 +17,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
+  const [userId, setUserId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   // Restore session từ localStorage khi app mount
@@ -28,11 +30,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (new Date(expiresAt) > new Date()) {
         setToken(stored);
         setRole(localStorage.getItem('adminRole'));
+        const storedUserId = localStorage.getItem('adminUserId');
+        setUserId(storedUserId ? parseInt(storedUserId) : null);
       } else {
         // Token đã hết hạn — xóa đi
         localStorage.removeItem('adminToken');
         localStorage.removeItem('adminTokenExpiry');
         localStorage.removeItem('adminRole');
+        localStorage.removeItem('adminUserId');
       }
     }
     setIsLoading(false);
@@ -40,13 +45,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (username: string, password: string) => {
     const res = await adminApi.login(username, password);
-    const { token: newToken, expiresAt, role: newRole } = res.data;
+    const { token: newToken, expiresAt, role: newRole, userId: newUserId } = res.data;
 
     localStorage.setItem('adminToken', newToken);
     localStorage.setItem('adminTokenExpiry', expiresAt);
     localStorage.setItem('adminRole', newRole || 'admin');
+    if (newUserId !== undefined && newUserId !== null) {
+      localStorage.setItem('adminUserId', String(newUserId));
+    }
     setToken(newToken);
     setRole(newRole || 'admin');
+    setUserId(newUserId ?? null);
   };
 
   const logout = () => {
@@ -54,8 +63,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem('adminToken');
     localStorage.removeItem('adminTokenExpiry');
     localStorage.removeItem('adminRole');
+    localStorage.removeItem('adminUserId');
     setToken(null);
     setRole(null);
+    setUserId(null);
   };
 
   return (
@@ -63,6 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         token,
         role,
+        userId,
         isAdmin: role === 'admin',
         isAuthenticated: !!token,
         isLoading,

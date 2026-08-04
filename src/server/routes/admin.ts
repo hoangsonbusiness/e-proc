@@ -126,7 +126,7 @@ router.post('/login', loginRateLimit, async (req: Request, res: Response) => {
 
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     console.log('[Auth] Login success:', username, 'role:', role);
-    return res.json({ token, expiresAt, role });
+    return res.json({ token, expiresAt, role, userId: user.id });
   } catch (err: any) {
     console.error('[Auth] Login error:', err);
     return res.status(500).json({ error: 'Login failed' });
@@ -404,14 +404,14 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
       if (USE_SQLITE) {
         await db.query(`
           INSERT OR REPLACE INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at, uploaded_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+        `, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt, req.adminUser?.id ?? null]);
       } else {
         const pgQuery = `
           INSERT INTO question_bank 
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, updated_at, uploaded_by)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, $9)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
@@ -420,10 +420,11 @@ router.post('/questions/import', upload.single('file'), async (req: Request, res
             rubric_must_have = EXCLUDED.rubric_must_have,
             rubric_nice_to_have = EXCLUDED.rubric_nice_to_have,
             rubric_optional = EXCLUDED.rubric_optional,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = CURRENT_TIMESTAMP,
+            uploaded_by = EXCLUDED.uploaded_by
         `;
         console.log('[Import] PG Query:', pgQuery);
-        await db.query(pgQuery, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt]);
+        await db.query(pgQuery, [id, type, level, normalizedModule, question, rubricMustHave, rubricNice, rubricOpt, req.adminUser?.id ?? null]);
       }
     }
 
@@ -551,14 +552,14 @@ router.post('/questions/quiz/import', upload.single('file'), async (req: Request
       if (USE_SQLITE) {
         await db.query(`
           INSERT OR REPLACE INTO question_bank
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
-          VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, datetime('now'))
-        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at, uploaded_by)
+          VALUES (?, ?, ?, ?, ?, '', '', '', ?, ?, ?, datetime('now'), ?)
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score, req.adminUser?.id ?? null]);
       } else {
         await db.query(`
           INSERT INTO question_bank
-          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at)
-          VALUES ($1, $2, $3, $4, $5, '', '', '', $6, $7, $8, CURRENT_TIMESTAMP)
+          (id, type, level, module, question_sample, rubric_must_have, rubric_nice_to_have, rubric_optional, options, correct_answers, score, updated_at, uploaded_by)
+          VALUES ($1, $2, $3, $4, $5, '', '', '', $6, $7, $8, CURRENT_TIMESTAMP, $9)
           ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
             level = EXCLUDED.level,
@@ -567,8 +568,9 @@ router.post('/questions/quiz/import', upload.single('file'), async (req: Request
             options = EXCLUDED.options,
             correct_answers = EXCLUDED.correct_answers,
             score = EXCLUDED.score,
-            updated_at = CURRENT_TIMESTAMP
-        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score]);
+            updated_at = CURRENT_TIMESTAMP,
+            uploaded_by = EXCLUDED.uploaded_by
+        `, [id, type, level, normalizedModule, question, optionsJson, correctJson, score, req.adminUser?.id ?? null]);
       }
     }
 
@@ -700,6 +702,33 @@ router.post('/questions/bulk-delete', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'No question IDs provided' });
     }
 
+    // Kiểm tra quyền: mod chỉ được xóa question của mình
+    if (req.adminUser?.role !== 'admin') {
+      const userId = req.adminUser?.id;
+      if (USE_SQLITE) {
+        const placeholders = ids.map(() => '?').join(', ');
+        const owned = await db.query(
+          `SELECT id FROM question_bank WHERE id IN (${placeholders}) AND uploaded_by = ?`,
+          [...ids, userId]
+        );
+        const ownedIds = new Set(owned.rows.map((r: any) => r.id));
+        const forbidden = ids.filter(id => !ownedIds.has(id));
+        if (forbidden.length > 0) {
+          return res.status(403).json({ error: 'Forbidden: You can only delete questions you uploaded' });
+        }
+      } else {
+        const owned = await db.query(
+          `SELECT id FROM question_bank WHERE id = ANY($1::text[]) AND uploaded_by = $2`,
+          [ids, userId]
+        );
+        const ownedIds = new Set(owned.rows.map((r: any) => r.id));
+        const forbidden = ids.filter(id => !ownedIds.has(id));
+        if (forbidden.length > 0) {
+          return res.status(403).json({ error: 'Forbidden: You can only delete questions you uploaded' });
+        }
+      }
+    }
+
     if (USE_SQLITE) {
       const placeholders = ids.map(() => '?').join(', ');
       await db.query(`DELETE FROM question_bank WHERE id IN (${placeholders})`, ids);
@@ -716,6 +745,13 @@ router.post('/questions/bulk-delete', async (req: Request, res: Response) => {
 router.delete('/questions/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    // Kiểm tra quyền: mod chỉ được xóa question của mình
+    if (req.adminUser?.role !== 'admin') {
+      const own = await db.query('SELECT uploaded_by FROM question_bank WHERE id = ?', [id]);
+      if (!own.rows[0] || own.rows[0].uploaded_by !== req.adminUser?.id) {
+        return res.status(403).json({ error: 'Forbidden: You can only delete questions you uploaded' });
+      }
+    }
     await db.query('DELETE FROM question_bank WHERE id = ?', [id]);
     res.json({ success: true });
   } catch (error: any) {
@@ -754,17 +790,20 @@ router.post('/batches', async (req: Request, res: Response) => {
     if (req.adminUser?.role !== 'admin') recordMode = 'none';
     const recordFlag = recordMode === 's3' ? 1 : 0;
 
+    // Lưu người tạo batch
+    const createdBy = req.adminUser?.id ?? null;
+
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, createdBy]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, createdBy]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -819,6 +858,14 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
     const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
+    // Kiểm tra quyền: mod chỉ được sửa batch của mình
+    if (req.adminUser?.role !== 'admin') {
+      const own = await db.query('SELECT created_by FROM batches WHERE id = ?', [parseInt(id)]);
+      if (!own.rows[0] || own.rows[0].created_by !== req.adminUser?.id) {
+        return res.status(403).json({ error: 'Forbidden: You can only edit batches you created' });
+      }
+    }
+
     const startUTC = toStorageTime(start_time);
     const endUTC = toStorageTime(end_time);
 
@@ -855,6 +902,14 @@ router.delete('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const batchId = parseInt(id);
+
+    // Kiểm tra quyền: mod chỉ được xóa batch của mình
+    if (req.adminUser?.role !== 'admin') {
+      const own = await db.query('SELECT created_by FROM batches WHERE id = ?', [batchId]);
+      if (!own.rows[0] || own.rows[0].created_by !== req.adminUser?.id) {
+        return res.status(403).json({ error: 'Forbidden: You can only delete batches you created' });
+      }
+    }
     
     // Delete cascade: exam_questions -> students -> batch
     await db.query('DELETE FROM exam_questions WHERE student_id IN (SELECT id FROM students WHERE batch_id = ?)', [batchId]);

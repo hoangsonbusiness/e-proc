@@ -95,6 +95,11 @@ async function initPostgres() {
         }
         catch (_) { /* already exists */ }
     }
+    // Migration: người upload question (FK → admin_users). Question cũ để NULL.
+    try {
+        await client.query('ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS uploaded_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
+    }
+    catch (_) { /* already exists */ }
     console.log('[DB] question_bank ready');
     await client.query(`
     CREATE TABLE IF NOT EXISTS batches (
@@ -124,6 +129,11 @@ async function initPostgres() {
     // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
     try {
         await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
+    }
+    catch (_) { /* already exists */ }
+    // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
+    try {
+        await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
     }
     catch (_) { /* already exists */ }
     const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
@@ -376,6 +386,9 @@ function initSqlite() {
             // Backfill: batch cũ có record_enabled=1 → 's3'
             sqliteDb.exec("UPDATE batches SET record_mode = 's3' WHERE record_enabled = 1 AND (record_mode IS NULL OR record_mode = 'none')");
         }
+        if (!batchCols.includes('created_by')) {
+            sqliteDb.exec('ALTER TABLE batches ADD COLUMN created_by INTEGER');
+        }
         const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all().map(c => c.name);
         if (!adminCols.includes('role')) {
             sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
@@ -388,6 +401,8 @@ function initSqlite() {
             sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN correct_answers TEXT');
         if (!qbCols.includes('score'))
             sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN score REAL DEFAULT 1');
+        if (!qbCols.includes('uploaded_by'))
+            sqliteDb.exec('ALTER TABLE question_bank ADD COLUMN uploaded_by INTEGER');
         const eqCols = sqliteDb.prepare("PRAGMA table_info(exam_questions)").all().map(c => c.name);
         if (!eqCols.includes('option_order'))
             sqliteDb.exec('ALTER TABLE exam_questions ADD COLUMN option_order TEXT');

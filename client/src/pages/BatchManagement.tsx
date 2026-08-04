@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+
+const BATCH_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+type BatchPageSize = typeof BATCH_PAGE_SIZE_OPTIONS[number];
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -69,12 +72,15 @@ interface ModuleTypeStats {
 }
 
 function BatchManagement() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, userId } = useAuth();
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
   const [typeStats, setTypeStats] = useState<TypeStats[]>([]);
   const [moduleTypeStats, setModuleTypeStats] = useState<ModuleTypeStats[]>([]);
+  // Pagination
+  const [batchPageSize, setBatchPageSize] = useState<BatchPageSize>(10);
+  const [batchCurrentPage, setBatchCurrentPage] = useState(1);
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
   const [showForm, setShowForm] = useState(false);
@@ -499,6 +505,36 @@ function BatchManagement() {
   const editBlueprintErrors = editBlueprintMode === 'type'
     ? validateTypesBlueprintAgainstStats((editingBatch?.blueprintByType || []) as BlueprintItemByType[])
     : validateBlueprintAgainstStats(editingBatch?.blueprint || []);
+
+  // ─── Batch pagination derived state ──────────────────────────────────────────
+
+  const batchTotalPages = Math.max(1, Math.ceil(batches.length / batchPageSize));
+
+  const paginatedBatches = useMemo(() =>
+    batches.slice((batchCurrentPage - 1) * batchPageSize, batchCurrentPage * batchPageSize),
+    [batches, batchCurrentPage, batchPageSize]
+  );
+
+  const handleBatchPageSizeChange = (size: BatchPageSize) => {
+    setBatchPageSize(size);
+    setBatchCurrentPage(1);
+  };
+
+  const getBatchPageNumbers = () => {
+    const delta = 2;
+    const range: (number | '...')[] = [];
+    const left = Math.max(2, batchCurrentPage - delta);
+    const right = Math.min(batchTotalPages - 1, batchCurrentPage + delta);
+    range.push(1);
+    if (left > 2) range.push('...');
+    for (let i = left; i <= right; i++) range.push(i);
+    if (right < batchTotalPages - 1) range.push('...');
+    if (batchTotalPages > 1) range.push(batchTotalPages);
+    return range;
+  };
+
+  /** Mod chỉ được CRUD batch của mình; admin được tất cả */
+  const canEditBatch = (batch: any) => isAdmin || batch.created_by === userId;
 
   // ─── Sub-components ─────────────────────────────────────────────────────────
 
@@ -1027,6 +1063,27 @@ function BatchManagement() {
 
       {/* ── Batches Table ──────────────────────────────────────────────── */}
       <div className="card">
+        {/* Header: title + page-size selector */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h3 style={{ margin: 0 }}>
+            Batches&nbsp;
+            <span style={{ color: 'var(--text-light)', fontWeight: 400, fontSize: 15 }}>({batches.length} total)</span>
+          </h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>Show:</label>
+            <select
+              id="batch-page-size"
+              value={batchPageSize}
+              onChange={e => handleBatchPageSizeChange(Number(e.target.value) as BatchPageSize)}
+              style={{ fontSize: 13, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer' }}
+            >
+              {BATCH_PAGE_SIZE_OPTIONS.map(s => (
+                <option key={s} value={s}>{s} / page</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
         <table>
           <thead>
             <tr>
@@ -1039,55 +1096,108 @@ function BatchManagement() {
             </tr>
           </thead>
           <tbody>
-            {batches.map(batch => (
-              <tr key={batch.id}>
-                <td>{batch.id}</td>
-                <td>{batch.name}</td>
-                <td>{formatGMT7(batch.start_time)}</td>
-                <td>{formatGMT7(batch.end_time)}</td>
-                <td>{batch.duration} min</td>
-                <td>
-                  <button
-                    onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
-                    className="btn btn-primary"
-                    style={{ marginRight: 5, fontSize: 12 }}
-                  >
-                    Invite
-                  </button>
-                  <Link to={`/admin/batches/${batch.id}/students`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
-                    Students
-                  </Link>
-                  <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
-                    Results
-                  </Link>
-                  <button
-                    onClick={() => handleEditBatch(batch)}
-                    className="btn btn-secondary"
-                    style={{ marginRight: 5, fontSize: 12 }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (confirm('Delete this batch? All students and exam data will be lost.')) {
-                        adminApi.deleteBatch(batch.id).then(() => {
-                          setBatches(batches.filter(b => b.id !== batch.id));
-                        });
-                      }
-                    }}
-                    className="btn btn-danger"
-                    style={{ fontSize: 12 }}
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
+            {paginatedBatches.map(batch => {
+              const editable = canEditBatch(batch);
+              return (
+                <tr key={batch.id}>
+                  <td>{batch.id}</td>
+                  <td>
+                    {batch.name}
+                    {!editable && (
+                      <span style={{
+                        marginLeft: 8, fontSize: 10, padding: '2px 6px',
+                        borderRadius: 4, background: '#f3f4f6', color: '#6b7280', verticalAlign: 'middle',
+                      }}>view only</span>
+                    )}
+                  </td>
+                  <td>{formatGMT7(batch.start_time)}</td>
+                  <td>{formatGMT7(batch.end_time)}</td>
+                  <td>{batch.duration} min</td>
+                  <td>
+                    {editable && (
+                      <button
+                        onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
+                        className="btn btn-primary"
+                        style={{ marginRight: 5, fontSize: 12 }}
+                      >
+                        Invite
+                      </button>
+                    )}
+                    <Link to={`/admin/batches/${batch.id}/students`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
+                      Students
+                    </Link>
+                    <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
+                      Results
+                    </Link>
+                    {editable && (
+                      <>
+                        <button
+                          onClick={() => handleEditBatch(batch)}
+                          className="btn btn-secondary"
+                          style={{ marginRight: 5, fontSize: 12 }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (confirm('Delete this batch? All students and exam data will be lost.')) {
+                              adminApi.deleteBatch(batch.id).then(() => {
+                                setBatches(prev => prev.filter(b => b.id !== batch.id));
+                              });
+                            }
+                          }}
+                          className="btn btn-danger"
+                          style={{ fontSize: 12 }}
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
             {batches.length === 0 && (
               <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-light)' }}>No batches yet</td></tr>
             )}
           </tbody>
         </table>
+
+        {/* Pagination controls */}
+        {batchTotalPages > 1 && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, flexWrap: 'wrap', gap: 8 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-light)' }}>
+              Page {batchCurrentPage} of {batchTotalPages}&nbsp;·&nbsp;
+              {(batchCurrentPage - 1) * batchPageSize + 1}–{Math.min(batchCurrentPage * batchPageSize, batches.length)} of {batches.length}
+            </span>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              <button
+                onClick={() => setBatchCurrentPage(p => Math.max(1, p - 1))}
+                disabled={batchCurrentPage === 1}
+                className="btn btn-secondary"
+                style={{ fontSize: 13, padding: '4px 10px' }}
+              >←</button>
+              {getBatchPageNumbers().map((p, i) =>
+                p === '...' ? (
+                  <span key={`el-${i}`} style={{ padding: '0 6px', color: 'var(--text-light)' }}>…</span>
+                ) : (
+                  <button
+                    key={p}
+                    onClick={() => setBatchCurrentPage(p as number)}
+                    className={`btn ${batchCurrentPage === p ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 13, padding: '4px 10px', minWidth: 34 }}
+                  >{p}</button>
+                )
+              )}
+              <button
+                onClick={() => setBatchCurrentPage(p => Math.min(batchTotalPages, p + 1))}
+                disabled={batchCurrentPage === batchTotalPages}
+                className="btn btn-secondary"
+                style={{ fontSize: 13, padding: '4px 10px' }}
+              >→</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Edit Batch Form ────────────────────────────────────────────── */}

@@ -1,13 +1,20 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
 
+const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+type PageSize = typeof PAGE_SIZE_OPTIONS[number];
+
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
   const { logout } = useAuth();
+
+  // Phân trang
+  const [pageSize, setPageSize] = useState<PageSize>(10);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Đổi mật khẩu (admin & mod đều dùng được — backend dùng id từ token)
   const [showChangePw, setShowChangePw] = useState(false);
@@ -59,6 +66,33 @@ function AdminDashboard() {
     } catch (error) {
       console.error(error);
     }
+  };
+
+  // ── Pagination ──────────────────────────────────────────────────────────
+  const totalPages = Math.max(1, Math.ceil(batches.length / pageSize));
+
+  const paginatedBatches = useMemo(() =>
+    batches.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [batches, currentPage, pageSize]
+  );
+
+  const handlePageSizeChange = (size: PageSize) => {
+    setPageSize(size);
+    setCurrentPage(1);
+  };
+
+  const getPageNumbers = () => {
+    const delta = 2;
+    const range: (number | '...')[] = [];
+    const left = Math.max(2, currentPage - delta);
+    const right = Math.min(totalPages - 1, currentPage + delta);
+
+    range.push(1);
+    if (left > 2) range.push('...');
+    for (let i = left; i <= right; i++) range.push(i);
+    if (right < totalPages - 1) range.push('...');
+    if (totalPages > 1) range.push(totalPages);
+    return range;
   };
 
   return (
@@ -125,7 +159,29 @@ function AdminDashboard() {
       <AdminNav />
 
       <div className="card">
-        <h3>Recent Batches</h3>
+        {/* Header + page size */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h3 style={{ margin: 0 }}>
+            Recent Batches&nbsp;
+            <span style={{ color: 'var(--text-light)', fontWeight: 400, fontSize: 15 }}>
+              ({batches.length} total)
+            </span>
+          </h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>Show:</label>
+            <select
+              id="dashboard-page-size"
+              value={pageSize}
+              onChange={e => handlePageSizeChange(Number(e.target.value) as PageSize)}
+              style={{ fontSize: 13, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer' }}
+            >
+              {PAGE_SIZE_OPTIONS.map(s => (
+                <option key={s} value={s}>{s} / page</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
         <table>
           <thead>
             <tr>
@@ -135,7 +191,7 @@ function AdminDashboard() {
             </tr>
           </thead>
           <tbody>
-            {batches.map(batch => (
+            {paginatedBatches.map(batch => (
               <tr key={batch.id}>
                 <td>{batch.name}</td>
                 <td>{batch.duration} min</td>
@@ -154,6 +210,48 @@ function AdminDashboard() {
             )}
           </tbody>
         </table>
+
+        {/* Pagination controls */}
+        {totalPages > 1 && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, flexWrap: 'wrap', gap: 8 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-light)' }}>
+              Page {currentPage} of {totalPages}&nbsp;·&nbsp;
+              {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, batches.length)} of {batches.length}
+            </span>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              <button
+                onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                disabled={currentPage === 1}
+                className="btn btn-secondary"
+                style={{ fontSize: 13, padding: '4px 10px' }}
+              >
+                ←
+              </button>
+              {getPageNumbers().map((p, i) =>
+                p === '...' ? (
+                  <span key={`ellipsis-${i}`} style={{ padding: '0 6px', color: 'var(--text-light)' }}>…</span>
+                ) : (
+                  <button
+                    key={p}
+                    onClick={() => setCurrentPage(p as number)}
+                    className={`btn ${currentPage === p ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 13, padding: '4px 10px', minWidth: 34 }}
+                  >
+                    {p}
+                  </button>
+                )
+              )}
+              <button
+                onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                disabled={currentPage === totalPages}
+                className="btn btn-secondary"
+                style={{ fontSize: 13, padding: '4px 10px' }}
+              >
+                →
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
