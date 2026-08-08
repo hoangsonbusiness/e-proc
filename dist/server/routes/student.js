@@ -8,7 +8,8 @@ import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import { createRecordingUploadUrl, inspectRecordingObject, isS3Configured } from '../services/s3.js';
 import rateLimit from 'express-rate-limit';
 import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTracker.js';
-import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError } from '../services/examGuard.js';
+import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError, ExamGuardError } from '../services/examGuard.js';
+import { parseBlueprintCompat } from '../services/blueprint.js';
 dotenv.config();
 const USE_SQLITE = process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production';
 const router = Router();
@@ -117,24 +118,35 @@ async function startExamAtomically(studentId) {
             return { success: true, questions_count: existingCount, resume: true };
         }
         await tx.query('DELETE FROM exam_questions WHERE student_id = ?', [studentId]);
-        const blueprint = locked.blueprint
-            ? (typeof locked.blueprint === 'string' ? JSON.parse(locked.blueprint) : locked.blueprint)
-            : [];
+        const { blueprintMode, items: blueprintItems } = parseBlueprintCompat(locked.blueprint);
+        if (blueprintItems.length === 0) {
+            throw new ExamGuardError(422, 'invalid_blueprint', 'Exam blueprint is empty or invalid');
+        }
         const examType = locked.exam_type === 'quiz' ? 'quiz' : 'essay';
         const typeFilterSql = examType === 'quiz'
             ? `AND type IN ('SingleChoice', 'MultipleChoice')`
             : `AND type NOT IN ('SingleChoice', 'MultipleChoice')`;
         const picked = [];
-        for (const item of blueprint) {
+        for (const item of blueprintItems) {
+            if (!item || typeof item.module !== 'string' || !item.module.trim()) {
+                throw new ExamGuardError(422, 'invalid_blueprint', 'Exam blueprint contains an invalid module');
+            }
+            if (blueprintMode === 'type' && (typeof item.type !== 'string' || !item.type.trim())) {
+                throw new ExamGuardError(422, 'invalid_blueprint', 'Exam blueprint contains an invalid question type');
+            }
             for (const level of ['Easy', 'Medium', 'Hard']) {
                 const count = Number(item[level.toLowerCase()] || 0);
                 if (count <= 0)
                     continue;
+                const blueprintTypeSql = blueprintMode === 'type' ? 'AND LOWER(type) = LOWER(?)' : '';
+                const queryParams = blueprintMode === 'type'
+                    ? [item.module.trim(), level, item.type.trim(), count]
+                    : [item.module.trim(), level, count];
                 const available = await tx.query(`
           SELECT id, type, options FROM question_bank
-          WHERE module = ? AND level = ? ${typeFilterSql}
+          WHERE LOWER(module) = LOWER(?) AND LOWER(level) = LOWER(?) ${blueprintTypeSql} ${typeFilterSql}
           ORDER BY RANDOM() LIMIT ?
-        `, [item.module, level, count]);
+        `, queryParams);
                 for (const q of available.rows)
                     picked.push({ id: q.id, type: q.type, options: q.options ?? null });
             }
@@ -334,9 +346,7 @@ router.post('/exam/start', studentAuthMiddleware, async (req, res) => {
         }
         const batchResult = await db.query('SELECT blueprint, exam_type FROM batches WHERE id = ?', [student.batch_id]);
         const batch = batchResult.rows[0];
-        const blueprint = batch?.blueprint
-            ? (typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : batch.blueprint)
-            : [];
+        const { blueprintMode, items: blueprintItems } = parseBlueprintCompat(batch?.blueprint);
         const examType = batch?.exam_type === 'quiz' ? 'quiz' : 'essay';
         // Batch quiz chỉ lấy câu trắc nghiệm; batch essay chỉ lấy câu tự luận/coding.
         // Tránh lôi nhầm câu khác loại khi một module chứa lẫn cả hai (blueprint mode 'module').
@@ -345,16 +355,20 @@ router.post('/exam/start', studentAuthMiddleware, async (req, res) => {
             : `AND type NOT IN ('SingleChoice', 'MultipleChoice')`;
         // Mỗi câu kèm type + options (để sinh thứ tự đáp án xáo cho câu quiz)
         const picked = [];
-        for (const item of blueprint) {
+        for (const item of blueprintItems) {
             for (const level of ['Easy', 'Medium', 'Hard']) {
                 const count = item[level.toLowerCase()];
                 if (count > 0) {
+                    const blueprintTypeSql = blueprintMode === 'type' ? 'AND LOWER(type) = LOWER(?)' : '';
+                    const queryParams = blueprintMode === 'type'
+                        ? [item.module, level, item.type, count]
+                        : [item.module, level, count];
                     const availableResult = await db.query(`
             SELECT id, type, options FROM question_bank
-            WHERE module = ? AND level = ? ${typeFilterSql}
+            WHERE LOWER(module) = LOWER(?) AND LOWER(level) = LOWER(?) ${blueprintTypeSql} ${typeFilterSql}
             ORDER BY RANDOM()
             LIMIT ?
-          `, [item.module, level, count]);
+          `, queryParams);
                     for (const q of availableResult.rows) {
                         picked.push({ id: q.id, type: q.type, options: q.options ?? null });
                     }

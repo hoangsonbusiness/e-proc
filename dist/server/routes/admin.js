@@ -9,6 +9,7 @@ import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import crypto from 'crypto';
+import { parseBlueprintCompat } from '../services/blueprint.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
@@ -225,7 +226,8 @@ router.get('/test-blueprint/:id', async (req, res) => {
         // Check question_bank
         const modulesResult = await db.query('SELECT DISTINCT module FROM question_bank');
         console.log('Available modules:', modulesResult.rows.map(r => r.module));
-        for (const item of blueprint || []) {
+        const { items: blueprintItems } = parseBlueprintCompat(blueprint);
+        for (const item of blueprintItems) {
             const easy = item.easy || 0;
             const medium = item.medium || 0;
             const hard = item.hard || 0;
@@ -594,20 +596,6 @@ router.get('/questions/module-type-stats', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-/**
- * Parse blueprint supporting both formats:
- *  - Legacy (array): [{ module, easy, medium, hard }]
- *  - New (object):   { blueprintMode: 'module'|'type', items: [...] }
- */
-function parseBlueprintCompat(raw) {
-    if (Array.isArray(raw)) {
-        return { blueprintMode: 'module', items: raw };
-    }
-    if (raw && typeof raw === 'object' && raw.blueprintMode) {
-        return { blueprintMode: raw.blueprintMode || 'module', items: raw.items || [] };
-    }
-    return { blueprintMode: 'module', items: [] };
-}
 router.post('/questions/bulk-delete', async (req, res) => {
     try {
         const { ids } = req.body;
@@ -820,14 +808,19 @@ router.post('/batches/:id/check-feasibility', async (req, res) => {
     try {
         const { blueprint } = req.body;
         const errors = [];
-        for (const item of blueprint) {
+        const { blueprintMode, items: blueprintItems } = parseBlueprintCompat(blueprint);
+        for (const item of blueprintItems) {
             for (const level of ['Easy', 'Medium', 'Hard']) {
                 const count = item[level.toLowerCase()];
                 if (count > 0) {
+                    const typeSql = blueprintMode === 'type' ? 'AND LOWER(type) = LOWER(?)' : '';
+                    const params = blueprintMode === 'type'
+                        ? [item.module, level, item.type]
+                        : [item.module, level];
                     const result = await db.query(`
             SELECT COUNT(*) as count FROM question_bank
-            WHERE module = ? AND level = ?
-          `, [item.module, level]);
+            WHERE LOWER(module) = LOWER(?) AND LOWER(level) = LOWER(?) ${typeSql}
+          `, params);
                     const available = parseInt(result.rows[0].count);
                     if (available < count) {
                         errors.push(`Module ${item.module} Level ${level} has only ${available} questions, need ${count}`);
