@@ -40,6 +40,8 @@ function StudentExam() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState<{ [key: number]: string }>({});
   const [timeLeft, setTimeLeft] = useState(0);
+  // The initial zero is only a placeholder until the server returns the deadline.
+  const [timerReady, setTimerReady] = useState(false);
   const [violationCount, setViolationCount] = useState(0);
   const [locked, setLocked] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -605,11 +607,11 @@ function StudentExam() {
   }, [clearFullscreenExitTimeout]);
 
   useEffect(() => {
-    if (started && !locked) {
+    if (started && timerReady && !loading && !locked && !submitting) {
       const timer = setInterval(() => {
         setTimeLeft(prev => {
           if (prev <= 1) {
-            handleSubmit();
+            void handleSubmit(true);
             return 0;
           }
           return prev - 1;
@@ -617,7 +619,7 @@ function StudentExam() {
       }, 1000);
       return () => clearInterval(timer);
     }
-  }, [handleSubmit, locked, started]);
+  }, [handleSubmit, loading, locked, started, submitting, timerReady]);
 
   useEffect(() => {
     return () => {
@@ -648,9 +650,10 @@ function StudentExam() {
       setAnswers(savedAnswers);
 
       // Set timer từ server (ưu tiên server, fallback sang localStorage)
-      if (serverTimeRemaining !== null && serverTimeRemaining > 0) {
+      if (serverTimeRemaining !== null) {
         const wasAlreadyStarted = timeLeft > 0;
-        setTimeLeft(serverTimeRemaining);
+        setTimeLeft(Math.max(0, serverTimeRemaining));
+        setTimerReady(true);
         // Nếu đây là resume (đã có timeLeft trước đó khác với giá trị mặc định)
         // và thời gian còn lại khác với duration đầy đủ → hiện thông báo resume
         const fullDuration = parseInt(localStorage.getItem('duration') || '30') * 60;
@@ -661,6 +664,7 @@ function StudentExam() {
         // Fallback: server chưa có deadline (DB cũ chưa migrate)
         const duration = parseInt(localStorage.getItem('duration') || '30');
         setTimeLeft(duration * 60);
+        setTimerReady(true);
       }
 
       setLoading(false);
