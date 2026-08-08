@@ -189,6 +189,9 @@ export const studentApi = {
   completeRecordingPart: (partIndex: number, byteSize: number) =>
     api.post('/student/exam/recording-complete', { partIndex, byteSize }),
 
+  finalizeRecording: (finalPartIndex: number) =>
+    api.post('/student/exam/recording-finalize', { finalPartIndex }),
+
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý
   disconnect: () => {

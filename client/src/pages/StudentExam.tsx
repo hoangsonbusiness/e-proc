@@ -73,6 +73,7 @@ function StudentExam() {
   const submittingRef = useRef(false);
   const lastViolationTimeRef = useRef<number>(0);
   const currentQuestionIdRef = useRef<string | undefined>(undefined);
+  const answersRef = useRef<{ [key: number]: string }>({});
   const navigate = useNavigate();
 
   // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
@@ -155,6 +156,10 @@ function StudentExam() {
   }, [submitting]);
 
   useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
+  useEffect(() => {
     currentQuestionIdRef.current = questions[currentIndex]?.id;
   }, [questions, currentIndex]);
 
@@ -182,6 +187,23 @@ function StudentExam() {
     if (!force && !confirm('Are you sure you want to submit?')) return;
 
     setSubmitting(true);
+
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    try {
+      await Promise.all(
+        Object.entries(answersRef.current).map(([order, answer]) => studentApi.saveAnswer(Number(order), answer))
+      );
+    } catch (saveError) {
+      console.error('[exam] final answer flush failed:', saveError);
+      if (!force) {
+        alert('Your latest answer could not be saved. Please check the connection and submit again.');
+        setSubmitting(false);
+        return;
+      }
+    }
 
     // Dừng ghi màn hình và lưu nốt file cuối TRƯỚC khi submit — bao trọn mọi đường
     // (thủ công / cheating / timeout). Bọc try/catch để lỗi ghi file không chặn submit.
@@ -741,7 +763,7 @@ function StudentExam() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       studentApi.saveAnswer(order, text).catch(console.error); // [C-4] token tự động
-    }, 2000);
+    }, 5000);
   }, []);
 
   // Chọn/bỏ chọn đáp án trắc nghiệm. answer được lưu dưới dạng JSON mảng key, VD ["A","C"].

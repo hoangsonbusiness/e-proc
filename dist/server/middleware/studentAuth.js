@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import db from '../db/postgres.js';
 /**
  * [C-4] Student Auth Middleware
  *
@@ -6,7 +7,7 @@ import jwt from 'jsonwebtoken';
  * Không tin tưởng x-student-id header do client tự khai báo.
  * Sau khi verify thành công, đính kèm payload vào req.studentPayload.
  */
-export function studentAuthMiddleware(req, res, next) {
+export async function studentAuthMiddleware(req, res, next) {
     // sendBeacon (POST /exam/disconnect) có thể gửi token trong body thay vì header
     const authHeader = req.headers['authorization'];
     const bodyToken = req.body?.student_token;
@@ -25,6 +26,13 @@ export function studentAuthMiddleware(req, res, next) {
         const payload = jwt.verify(rawToken, secret);
         if (!payload.studentId || !payload.batchId) {
             return res.status(401).json({ error: 'Unauthorized: Invalid student token payload' });
+        }
+        if (!payload.jti) {
+            return res.status(401).json({ error: 'Unauthorized: Missing session identifier', reason: 'session_revoked' });
+        }
+        const active = await db.query('SELECT active_jti FROM students WHERE id = ?', [payload.studentId]);
+        if (!active.rows[0] || active.rows[0].active_jti !== payload.jti) {
+            return res.status(401).json({ error: 'Unauthorized: This exam session is no longer active', reason: 'session_revoked' });
         }
         req.studentPayload = payload;
         next();

@@ -20,8 +20,8 @@ const { Pool } = pg;
 async function initPostgres() {
   console.log('[DB] Attempting PostgreSQL connection...');
   
-  const poolMax = parseInt(process.env.DB_POOL_MAX || '10');
-  const poolMin = parseInt(process.env.DB_POOL_MIN || '2');
+  const poolMax = parseInt(process.env.DB_POOL_MAX || '2');
+  const poolMin = parseInt(process.env.DB_POOL_MIN || '0');
   
   pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -156,12 +156,18 @@ await client.query(`
       id SERIAL PRIMARY KEY,
       batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
       email TEXT NOT NULL,
-      access_code VARCHAR(6) NOT NULL,
+      access_code VARCHAR(8) NOT NULL,
       status TEXT DEFAULT 'pending',
       exam_started_at TIMESTAMP,
       exam_deadline TIMESTAMP,
       disconnected_at TIMESTAMP,
       recording_password TEXT,
+      submitted_at TIMESTAMP,
+      submit_reason TEXT,
+      active_jti TEXT,
+      recording_finalized_at TIMESTAMP,
+      recording_final_part_index INTEGER,
+      recording_incomplete BOOLEAN DEFAULT FALSE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -172,6 +178,12 @@ await client.query(`
     { col: 'exam_deadline', def: 'TIMESTAMP' },
     { col: 'disconnected_at', def: 'TIMESTAMP' },
     { col: 'recording_password', def: 'TEXT' },
+    { col: 'submitted_at', def: 'TIMESTAMP' },
+    { col: 'submit_reason', def: 'TEXT' },
+    { col: 'active_jti', def: 'TEXT' },
+    { col: 'recording_finalized_at', def: 'TIMESTAMP' },
+    { col: 'recording_final_part_index', def: 'INTEGER' },
+    { col: 'recording_incomplete', def: 'BOOLEAN DEFAULT FALSE' },
   ];
   for (const { col, def } of colChecks) {
     try {
@@ -241,9 +253,11 @@ await client.query(`
       object_key TEXT NOT NULL,
       byte_size INTEGER,
       uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      is_final BOOLEAN DEFAULT FALSE,
       UNIQUE(student_id, part_index)
     )
   `);
+  await client.query('ALTER TABLE recording_parts ADD COLUMN IF NOT EXISTS is_final BOOLEAN DEFAULT FALSE');
 
   // Anti-Cheat: theo dõi phiên thi để phát hiện dùng đồng thời nhiều client/IP.
   // Mỗi cặp (student × jti × ip) một dòng; đổi IP tạo dòng mới. last_seen cập nhật mỗi request.
@@ -354,6 +368,12 @@ function initSqlite() {
         exam_deadline DATETIME,
         disconnected_at DATETIME,
         recording_password TEXT,
+        submitted_at DATETIME,
+        submit_reason TEXT,
+        active_jti TEXT,
+        recording_finalized_at DATETIME,
+        recording_final_part_index INTEGER,
+        recording_incomplete INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -373,6 +393,14 @@ function initSqlite() {
     }
     if (!colNames.includes('recording_password')) {
       sqliteDb.exec('ALTER TABLE students ADD COLUMN recording_password TEXT');
+    }
+    const studentAdds: Array<[string, string]> = [
+      ['submitted_at', 'DATETIME'], ['submit_reason', 'TEXT'], ['active_jti', 'TEXT'],
+      ['recording_finalized_at', 'DATETIME'], ['recording_final_part_index', 'INTEGER'],
+      ['recording_incomplete', 'INTEGER DEFAULT 0'],
+    ];
+    for (const [name, def] of studentAdds) {
+      if (!colNames.includes(name)) sqliteDb.exec(`ALTER TABLE students ADD COLUMN ${name} ${def}`);
     }
     
     sqliteDb.exec(`
@@ -430,10 +458,13 @@ function initSqlite() {
         object_key TEXT NOT NULL,
         byte_size INTEGER,
         uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        is_final INTEGER DEFAULT 0,
         UNIQUE(student_id, part_index),
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
       )
     `);
+    const recordingPartCols = (sqliteDb.prepare("PRAGMA table_info(recording_parts)").all() as { name: string }[]).map(c => c.name);
+    if (!recordingPartCols.includes('is_final')) sqliteDb.exec('ALTER TABLE recording_parts ADD COLUMN is_final INTEGER DEFAULT 0');
 
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_sessions (
@@ -525,6 +556,16 @@ interface DbResult {
   lastInsertRowid?: number | bigint;
 }
 
+export interface DbExecutor {
+  query(text: string, params?: any[]): Promise<DbResult>;
+}
+
+function postgresText(text: string, params?: any[]): string {
+  if (!params?.length || text.includes('$1')) return text;
+  let paramIndex = 1;
+  return text.replace(/\?/g, () => '$' + paramIndex++);
+}
+
 export async function query(text: string, params?: any[]): Promise<DbResult> {
   if (USE_SQLITE && sqliteDb) {
     try {
@@ -543,9 +584,7 @@ export async function query(text: string, params?: any[]): Promise<DbResult> {
   
   if (pgPool) {
     if (params && params.length > 0) {
-      let paramIndex = 1;
-      const pgText = text.replace(/\?/g, () => '$' + paramIndex++);
-      const result = await pgPool.query(pgText, params);
+      const result = await pgPool.query(postgresText(text, params), params);
       return { rows: result.rows, rowCount: result.rowCount || 0, lastInsertRowid: undefined };
     }
     const result = await pgPool.query(text);
@@ -555,9 +594,45 @@ export async function query(text: string, params?: any[]): Promise<DbResult> {
   throw new Error('No database connection available');
 }
 
+/** Run all statements on one physical connection. Required for row locks and atomic exam state changes. */
+export async function withTransaction<T>(work: (tx: DbExecutor) => Promise<T>): Promise<T> {
+  if (USE_SQLITE && sqliteDb) {
+    sqliteDb.exec('BEGIN IMMEDIATE');
+    const tx: DbExecutor = { query };
+    try {
+      const result = await work(tx);
+      sqliteDb.exec('COMMIT');
+      return result;
+    } catch (error) {
+      sqliteDb.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  if (!pgPool) throw new Error('No database connection available');
+  const client = await pgPool.connect();
+  const tx: DbExecutor = {
+    query: async (text: string, params?: any[]) => {
+      const result = await client.query(postgresText(text, params), params);
+      return { rows: result.rows, rowCount: result.rowCount || 0 };
+    },
+  };
+  try {
+    await client.query('BEGIN');
+    const result = await work(tx);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export function getPool() {
   if (USE_SQLITE) return sqliteDb;
   return pgPool;
 }
 
-export default { initDatabase, query, getPool };
+export default { initDatabase, query, withTransaction, getPool };

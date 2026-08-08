@@ -276,8 +276,8 @@ class FileCache {
   }
 
   addToQueue(examQuestionId: number, studentId: number): string {
-    // Use smaller ID to avoid PostgreSQL integer overflow
-    const dbId = Date.now() % 10000000;
+    // Deterministic id makes submission/finalization retries idempotent.
+    const dbId = examQuestionId;
     const id = `job_${dbId}`;
     const job: QueueJob = {
       id,

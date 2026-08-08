@@ -308,10 +308,10 @@ Batches support two blueprint formats for question assignment:
 | `SESSION_SECRET` | No | `'secret'` | Express session secret. **Set this in production.** |
 | `SKIP_TIME_CHECK` | No | — | Set to `'true'` to bypass exam time-window validation in any mode |
 | `GEMINI_API_KEY` | No | — | Fallback AI key if `ai_settings` table is empty |
-| `ANSWER_FLUSH_INTERVAL` | No | `5000` | Milliseconds between answer buffer flushes |
+| `ANSWER_FLUSH_INTERVAL` | Legacy | `5000` | The exam answer endpoint now persists directly; retained only for the unused legacy buffer code. |
 | `QUEUE_PROCESS_INTERVAL` | No | `10000` | Milliseconds between AI queue processing ticks |
-| `DB_POOL_MAX` | No | `10` | PostgreSQL connection pool max size |
-| `DB_POOL_MIN` | No | `2` | PostgreSQL connection pool min size |
+| `DB_POOL_MAX` | No | `2` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
+| `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
 | `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
 | `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
@@ -352,6 +352,7 @@ Batches support two blueprint formats for question assignment:
   - Requests without token return 401
 - Before deploying the 2026-08-08 schema changes to Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually and confirm its verification query returns both expected rows.
 - Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
+- Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and AI queue jobs are preserved. Atomic start + the unique question-order index prevent new start races, while deterministic AI queue primary ids and existence checks make new enqueue retries idempotent without forcing destructive cleanup. Confirm the final verification queries return six student columns and two unique indexes.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -369,6 +370,14 @@ Batches support two blueprint formats for question assignment:
 - `public/assets/*.js` (to confirm the runtime bundle really contains the expected change)
 
 ## Notable current behavior
+
+- **Free-tier integrity hardening (2026-08-10):** no periodic heartbeat, Realtime channel, challenge table, or append-only activity stream was added. Existing exam requests remain the only session activity source, avoiding recurring Vercel invocations and Supabase writes.
+- A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.
+- Exam start now runs through a single-connection transaction with a student row lock. The deadline is `min(started_at + duration, batch.end_time)` and resume never extends it. A unique index on `(student_id, question_order)` is supplied by the 2026-08-10 migration; historical duplicate question assignments are not destructively rewritten.
+- Essay answers debounce for 5 seconds and all current answers are flushed before manual submit. The backend persists answers directly with an atomic `status='in_progress' AND exam_deadline > CURRENT_TIMESTAMP` condition; it no longer relies on the process-local answer buffer for exam writes.
+- Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome; deterministic AI queue ids avoid duplicate grading jobs on retries.
+- S3 recording remains direct browser-to-S3. `stopAndSave()` serializes/awaits outstanding part uploads, then calls `/exam/recording-finalize` once with the last part index. The backend requires a contiguous `0..finalPartIndex` set before setting `recording_finalized_at`. Manual S3 submit returns `409 recording_incomplete` until finalized; forced/timeout submit proceeds and sets `recording_incomplete=true`. An incomplete forced submission gets a 15-minute recording-only grace window for URL/complete/finalize calls so the browser can upload its last buffered part after the backend lock; answers/questions remain blocked.
+- Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
 
 - Clipboard attempts are counted as violations. Clipboard interception is handled inside the Monaco CodeEditor component (not via DOM events on the wrapper), because Monaco stops DOM event propagation internally.
 - Fullscreen must activate successfully on Confirm before `/exam` is entered. During an active exam, event + watchdog reconciliation records `fullscreen_exit` after 5 seconds outside fullscreen and a second event after another 5 seconds, which reaches the normal two-violation lock threshold and triggers client auto-submit.

@@ -60,14 +60,14 @@ function StudentLogin() {
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-2 text-center">
-                Enter your 6-character access code
+                Enter your 6- or 8-character access code
               </label>
               <input 
                 type="text" 
                 value={accessCode}
                 onChange={e => setAccessCode(e.target.value.toUpperCase())}
-                placeholder="XXXXXX"
-                maxLength={6}
+                placeholder="XXXXXXXX"
+                maxLength={8}
                 className="block w-full text-center text-3xl tracking-[0.5em] font-mono uppercase bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:ring-blue-500 rounded-xl py-4 transition-colors placeholder:text-slate-300"
               />
             </div>
@@ -78,7 +78,7 @@ function StudentLogin() {
             )}
             <button 
               type="submit" 
-              disabled={loading || accessCode.length !== 6}
+              disabled={loading || ![6, 8].includes(accessCode.length)}
               className="w-full bg-blue-600 text-white font-medium text-lg py-3 rounded-xl hover:bg-blue-700 focus:ring-4 focus:ring-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-500/30"
             >
               {loading ? 'Verifying...' : 'Begin Assessment'}

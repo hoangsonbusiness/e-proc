@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
+import crypto from 'crypto';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
@@ -853,8 +854,8 @@ router.post('/batches/:id/students/import', async (req, res) => {
         const generateCode = () => {
             const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
             let code = '';
-            for (let i = 0; i < 6; i++) {
-                code += chars.charAt(Math.floor(Math.random() * chars.length));
+            for (let i = 0; i < 8; i++) {
+                code += chars.charAt(crypto.randomInt(chars.length));
             }
             return code;
         };
@@ -910,12 +911,26 @@ router.post('/batches/:id/students/import', async (req, res) => {
             console.log('[Import] Skipped duplicate emails:', skippedEmails);
         }
         for (const email of validEmails) {
-            const code = generateCode();
-            const studentResult = await db.query(`
-        INSERT INTO students (batch_id, email, access_code, status)
-        VALUES (?, ?, ?, 'pending')
-        RETURNING id
-      `, [batchId, email.trim(), code]);
+            let code = '';
+            let studentResult = null;
+            for (let attempt = 0; attempt < 5; attempt++) {
+                code = generateCode();
+                try {
+                    studentResult = await db.query(`
+            INSERT INTO students (batch_id, email, access_code, status)
+            VALUES (?, ?, ?, 'pending')
+            RETURNING id
+          `, [batchId, email.trim(), code]);
+                    break;
+                }
+                catch (error) {
+                    const uniqueCollision = error?.code === '23505' || String(error?.message || '').includes('UNIQUE constraint failed');
+                    if (!uniqueCollision || attempt === 4)
+                        throw error;
+                }
+            }
+            if (!studentResult)
+                throw new Error('Could not generate a unique access code');
             const studentId = studentResult.rows[0]?.id;
             console.log('Student created:', studentId);
             if (!studentId)
@@ -1033,7 +1048,9 @@ router.post('/students/:studentId/reset', async (req, res) => {
         const { studentId } = req.params;
         await db.query(`
       UPDATE students 
-      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL
+      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL,
+          submitted_at = NULL, submit_reason = NULL, active_jti = NULL,
+          recording_finalized_at = NULL, recording_final_part_index = NULL, recording_incomplete = FALSE
       WHERE id = ?
     `, [parseInt(studentId)]);
         await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
