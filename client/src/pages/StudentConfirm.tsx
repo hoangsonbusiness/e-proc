@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import * as examRecorder from '../services/examRecorder';
+import { UserCheck, AlertTriangle } from 'lucide-react';
 
 function StudentConfirm() {
   const [loading, setLoading] = useState(false);
@@ -73,70 +74,72 @@ function StudentConfirm() {
   };
 
   return (
-    <div style={{ 
-      minHeight: '100vh', 
-      display: 'flex', 
-      alignItems: 'center', 
-      justifyContent: 'center',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
-    }}>
-      <div className="card" style={{ maxWidth: 400, width: '100%' }}>
-        <h2 style={{ textAlign: 'center', marginBottom: 10 }}>Confirm Information</h2>
-        
-        <div style={{ 
-          background: 'var(--background)', 
-          padding: 20, 
-          borderRadius: 8,
-          marginBottom: 20 
-        }}>
-          <p style={{ color: 'var(--text-light)', fontSize: 14, marginBottom: 8 }}>
-            Registered email:
-          </p>
-          <p style={{ fontSize: 18, fontWeight: 'bold' }}>
-            {email}
-          </p>
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+        <div className="bg-slate-900 px-6 py-6 text-center border-b border-slate-800">
+          <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-emerald-500/10 text-emerald-400 mb-3">
+            <UserCheck size={24} />
+          </div>
+          <h2 className="text-xl font-bold text-white">Confirm Information</h2>
         </div>
-
-        <p style={{ color: 'var(--text-light)', fontSize: 14, marginBottom: 12 }}>
-          Please confirm your email before starting the exam.
-        </p>
-
-        {recordMode !== 'none' && (
-          <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
-            ⚠️ This exam <b>requires screen recording</b>. When you start, you will be asked to
-            {recordMode === 'local' && <> choose a <b>folder to save the video</b> and</>} share your <b>Entire Screen</b>.
-            {recordMode === 'local'
-              ? <> The video is saved to the folder you choose. After the exam, commit this folder to GitLab as instructed.</>
-              : <> The video is uploaded automatically to the system during the exam.</>}
-            <br />Please use <b>Google Chrome</b> or <b>Microsoft Edge</b>. If you stop sharing during the exam, it will be locked.
+        
+        <div className="p-8">
+          <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 mb-6 text-center">
+            <p className="text-slate-500 text-sm mb-1 uppercase tracking-wider font-semibold">
+              Registered email
+            </p>
+            <p className="text-lg font-bold text-slate-900 break-all">
+              {email}
+            </p>
           </div>
-        )}
 
-        {error && (
-          <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: 12, marginBottom: 16, fontSize: 13, color: '#991b1b' }}>
-            {error}
+          <p className="text-slate-500 text-sm mb-6 text-center">
+            Please confirm your email before starting the assessment.
+          </p>
+
+          {recordMode !== 'none' && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-sm text-amber-800 shadow-sm">
+              <div className="flex gap-2 mb-2">
+                <AlertTriangle className="text-amber-600 shrink-0" size={18} />
+                <span className="font-semibold text-amber-900">Screen Recording Required</span>
+              </div>
+              <p className="ml-6 leading-relaxed opacity-90">
+                When you start, you will be asked to
+                {recordMode === 'local' && <> choose a <b>folder to save the video</b> and</>} share your <b>Entire Screen</b>.
+                {recordMode === 'local'
+                  ? <> The video is saved to the folder you choose. After the exam, commit this folder to GitLab as instructed.</>
+                  : <> The video is uploaded automatically to the system during the exam.</>}
+                <br /><br />Please use <b>Google Chrome</b> or <b>Microsoft Edge</b>. If you stop sharing during the exam, it will be locked.
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-xl mb-6 text-sm font-medium text-center">
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-3">
+            <button
+              onClick={handleStartExam}
+              disabled={loading}
+              className="w-full bg-blue-600 text-white font-medium text-base py-3 rounded-xl hover:bg-blue-700 focus:ring-4 focus:ring-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              {loading ? 'Preparing screen recording...' : 'Start Exam'}
+            </button>
+
+            <button 
+              onClick={() => {
+                localStorage.clear();
+                navigate('/');
+              }}
+              className="w-full bg-white text-slate-700 border-2 border-slate-200 font-medium text-base py-3 rounded-xl hover:bg-slate-50 focus:ring-4 focus:ring-slate-100 transition-all"
+            >
+              Cancel
+            </button>
           </div>
-        )}
-
-        <button
-          onClick={handleStartExam}
-          disabled={loading}
-          className="btn btn-primary"
-          style={{ width: '100%', marginTop: 8 }}
-        >
-          {loading ? 'Preparing screen recording...' : 'Start Exam'}
-        </button>
-
-        <button 
-          onClick={() => {
-            localStorage.clear();
-            navigate('/');
-          }}
-          className="btn btn-secondary" 
-          style={{ width: '100%', marginTop: 10 }}
-        >
-          Cancel
-        </button>
+        </div>
       </div>
     </div>
   );

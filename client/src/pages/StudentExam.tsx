@@ -741,19 +741,31 @@ function StudentExam() {
 
   if (loading) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <p>Loading exam...</p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-slate-600 font-medium">Loading your exam...</p>
+        </div>
       </div>
     );
   }
 
   if (locked) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <div className="card" style={{ textAlign: 'center' }}>
-          <h2 style={{ color: 'var(--danger)' }}>Exam Locked</h2>
-          <p>You have violated exam rules multiple times.</p>
-          <p>Please contact your administrator.</p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="bg-white rounded-2xl shadow-xl border border-red-200 p-8 max-w-md w-full text-center">
+          <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-red-600 mb-3">Exam Locked</h2>
+          <p className="text-slate-600 mb-6 leading-relaxed">
+            You have violated exam rules multiple times. Your session has been terminated.
+          </p>
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm text-slate-500">
+            Please contact your administrator for assistance.
+          </div>
         </div>
       </div>
     );
@@ -779,12 +791,12 @@ function StudentExam() {
     };
     const { icon, title, message } = blockedMessages[blockedReason];
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: 'var(--background)' }}>
-        <div className="card" style={{ textAlign: 'center', maxWidth: 480 }}>
-          <div style={{ fontSize: 64, marginBottom: 16 }}>{icon}</div>
-          <h2 style={{ color: 'var(--danger)', marginBottom: 12 }}>{title}</h2>
-          <p style={{ lineHeight: 1.6, color: 'var(--text)' }}>{message}</p>
-          <p style={{ marginTop: 20, color: 'var(--text-light)', fontSize: 14 }}>Please contact your administrator if you believe this is an error.</p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-lg w-full text-center">
+          <div className="text-6xl mb-6">{icon}</div>
+          <h2 className="text-2xl font-bold text-slate-900 mb-3">{title}</h2>
+          <p className="text-slate-600 mb-8 leading-relaxed text-lg">{message}</p>
+          <p className="text-sm text-slate-400">Please contact your administrator if you believe this is an error.</p>
         </div>
       </div>
     );
@@ -794,56 +806,90 @@ function StudentExam() {
 
   if (!currentQuestion) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <p className="loading">Loading questions...</p>
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-slate-600 font-medium">Loading questions...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--background)', userSelect: 'none' }}>
-      <div className="exam-timer" style={{ background: timeLeft < 300 ? 'var(--danger)' : 'var(--primary)' }}>
-        {formatTime(timeLeft)}
-      </div>
-
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '20px 32px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <div>
-            <h2>Question {currentIndex + 1} of {questions.length}</h2>
-            {/* <p style={{ color: 'var(--text-light)', fontSize: 14 }}>
-              {currentQuestion.module} - {currentQuestion.level} - {currentQuestion.type}
-            </p> */}
+    <div className="min-h-screen bg-slate-50 select-none pb-20">
+      {/* Sticky Header with Timer */}
+      <div className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-sm">
+        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-lg font-mono tracking-wider ${
+              timeLeft < 300 
+                ? 'bg-red-100 text-red-700 border border-red-200 animate-pulse' 
+                : 'bg-slate-900 text-white shadow-md'
+            }`}>
+              <svg className="w-5 h-5 opacity-80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              {formatTime(timeLeft)}
+            </div>
           </div>
           <button
             onClick={() => handleSubmit()}
             disabled={submitting}
-            className="btn btn-primary"
+            className="inline-flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50"
           >
             {submitting ? 'Submitting...' : 'Submit Exam'}
           </button>
         </div>
+      </div>
+
+      <div className="max-w-4xl mx-auto px-6 pt-8 pb-12">
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-sm font-bold text-blue-600 tracking-wider uppercase">Question</span>
+            <span className="bg-slate-200 text-slate-700 py-1 px-3 rounded-full text-sm font-bold">
+              {currentIndex + 1} <span className="opacity-50 font-normal mx-1">of</span> {questions.length}
+            </span>
+          </div>
+        </div>
 
         {violationCount > 0 && (
-          <div className="violation-warning">
-            Warning: {violationCount} violation(s) recorded. After 2 violations, your exam will be locked.
+          <div className="mb-6 p-4 bg-orange-50 border border-orange-200 rounded-xl flex items-start gap-3 text-orange-800">
+            <svg className="w-5 h-5 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div>
+              <p className="font-bold text-sm">Warning: {violationCount} violation(s) recorded.</p>
+              <p className="text-sm opacity-90">After 2 violations, your exam will be locked automatically.</p>
+            </div>
           </div>
         )}
 
         {clipboardWarning && (
-          <div className="violation-warning" style={{ marginTop: 12, marginBottom: 12 }}>
+          <div className="mb-6 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm font-medium flex items-center gap-2 animate-pulse">
+            <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+            </svg>
             {clipboardWarning}
           </div>
         )}
 
-        <div className="card">
-          <div
-            className="question-content"
-            dangerouslySetInnerHTML={{
-              __html: sanitizeQuestion(currentQuestion.question_sample)
-            }}
-          />
-          <div className="form-group">
-            <label>Your Answer:</label>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-8">
+          <div className="p-8 border-b border-slate-100 bg-slate-50/30">
+            <div
+              className="prose prose-slate max-w-none prose-pre:bg-slate-800 prose-pre:text-slate-50"
+              dangerouslySetInnerHTML={{
+                __html: sanitizeQuestion(currentQuestion.question_sample)
+              }}
+            />
+          </div>
+          <div className="p-8">
+            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-6 flex items-center gap-2">
+              <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Your Answer
+            </h3>
+            
             {(currentQuestion.type === 'SingleChoice' || currentQuestion.type === 'MultipleChoice') ? (
               (() => {
                 const multiple = currentQuestion.type === 'MultipleChoice';
@@ -853,212 +899,235 @@ function StudentExam() {
                   selected = raw ? JSON.parse(raw) : [];
                 } catch (_) { selected = []; }
                 return (
-                  <div className="quiz-options">
-                    <p style={{ color: '#666', fontSize: 13, marginBottom: 10 }}>
+                  <div className="space-y-4">
+                    <p className="text-slate-500 text-sm bg-slate-50 p-3 rounded-lg border border-slate-100 flex items-center gap-2">
+                      <svg className="w-4 h-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
                       {multiple ? 'Select all correct answers (multiple choices allowed)' : 'Select one answer'}
                     </p>
-                    {(currentQuestion.options || []).map((opt) => {
-                      const checked = selected.includes(opt.key);
-                      return (
-                        <label
-                          key={opt.key}
-                          style={{
-                            display: 'flex', alignItems: 'flex-start', gap: 10,
-                            padding: '12px 14px', marginBottom: 8, cursor: (locked || submitting) ? 'not-allowed' : 'pointer',
-                            border: `1px solid ${checked ? '#4f46e5' : '#ddd'}`, borderRadius: 8,
-                            background: checked ? '#eef2ff' : '#fff',
-                          }}
-                        >
-                          <input
-                            type={multiple ? 'checkbox' : 'radio'}
-                            name={`q-${currentQuestion.question_order}`}
-                            checked={checked}
-                            disabled={locked || submitting}
-                            onChange={() => toggleQuizAnswer(currentQuestion.question_order, opt.key, multiple)}
-                            style={{ marginTop: 3 }}
-                          />
-                          <span><strong>{opt.key}.</strong> {opt.text}</span>
-                        </label>
-                      );
-                    })}
+                    <div className="grid gap-3">
+                      {(currentQuestion.options || []).map((opt) => {
+                        const checked = selected.includes(opt.key);
+                        return (
+                          <label
+                            key={opt.key}
+                            className={`flex items-start gap-4 p-4 rounded-xl border-2 transition-all cursor-pointer ${
+                              (locked || submitting) ? 'opacity-70 cursor-not-allowed' : 'hover:border-blue-300'
+                            } ${
+                              checked 
+                                ? 'border-blue-600 bg-blue-50/50' 
+                                : 'border-slate-200 bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center h-6 pt-0.5">
+                              <input
+                                type={multiple ? 'checkbox' : 'radio'}
+                                name={`q-${currentQuestion.question_order}`}
+                                checked={checked}
+                                disabled={locked || submitting}
+                                onChange={() => toggleQuizAnswer(currentQuestion.question_order, opt.key, multiple)}
+                                className={`w-5 h-5 text-blue-600 border-slate-300 focus:ring-blue-500 ${
+                                  multiple ? 'rounded' : 'rounded-full'
+                                }`}
+                              />
+                            </div>
+                            <div className="flex-1">
+                              <span className={`inline-flex items-center justify-center w-6 h-6 rounded-md mr-3 text-sm font-bold ${
+                                checked ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'
+                              }`}>
+                                {opt.key}
+                              </span>
+                              <span className={`text-base ${checked ? 'text-slate-900 font-medium' : 'text-slate-700'}`}>
+                                {opt.text}
+                              </span>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
                   </div>
                 );
               })()
             ) : (
-              <Suspense
-                fallback={
-                  <div className="code-editor-loading-fallback">
-                    Loading editor...
-                  </div>
-                }
-              >
-                <CodeEditor
-                  ref={editorRef}
-                  value={answers[currentQuestion.question_order] || ''}
-                  onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
-                  onCopyAttempt={handleCopyAttempt}
-                  onCutAttempt={handleCutAttempt}
-                  onPasteAttempt={handlePasteAttempt}
-                  onSuspiciousPaste={handleSuspiciousPaste}
-                  defaultLanguage={detectLanguage(
-                    currentQuestion.type,
-                    currentQuestion.module
-                  )}
-                  disabled={locked || submitting}
-                  height="550px"
-                />
-              </Suspense>
+              <div className="rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-50">
+                <Suspense
+                  fallback={
+                    <div className="h-[550px] flex items-center justify-center text-slate-500 bg-slate-50">
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-6 h-6 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin"></div>
+                        <span>Initializing code editor...</span>
+                      </div>
+                    </div>
+                  }
+                >
+                  <CodeEditor
+                    ref={editorRef}
+                    value={answers[currentQuestion.question_order] || ''}
+                    onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
+                    onCopyAttempt={handleCopyAttempt}
+                    onCutAttempt={handleCutAttempt}
+                    onPasteAttempt={handlePasteAttempt}
+                    onSuspiciousPaste={handleSuspiciousPaste}
+                    defaultLanguage={detectLanguage(
+                      currentQuestion.type,
+                      currentQuestion.module
+                    )}
+                    disabled={locked || submitting}
+                    height="550px"
+                  />
+                </Suspense>
+              </div>
             )}
           </div>
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 20 }}>
-          <button
-            onClick={() => {
-              if (currentIndex > 0) {
-                setCurrentIndex(currentIndex - 1);
-              }
-            }}
-            disabled={currentIndex === 0}
-            className="btn btn-secondary"
-          >
-            Previous
-          </button>
-          <div style={{ display: 'flex', gap: 5 }}>
-            {questions.map((_, idx) => (
+        {/* Fixed Bottom Navigation */}
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 p-4 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+          <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+            <button
+              onClick={() => {
+                if (currentIndex > 0) {
+                  setCurrentIndex(currentIndex - 1);
+                }
+              }}
+              disabled={currentIndex === 0}
+              className="hidden md:inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-slate-300 font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors disabled:opacity-50"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              Previous
+            </button>
+            
+            <div className="flex-1 overflow-x-auto pb-2 md:pb-0 hide-scrollbar flex justify-center w-full">
+              <div className="flex gap-2 mx-auto">
+                {questions.map((_, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => setCurrentIndex(idx)}
+                    className={`flex-shrink-0 w-10 h-10 rounded-lg text-sm font-bold transition-all ${
+                      idx === currentIndex 
+                        ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-600 ring-offset-2 scale-110' 
+                        : answers[questions[idx].question_order] 
+                          ? 'bg-emerald-100 text-emerald-700 border border-emerald-200 hover:bg-emerald-200' 
+                          : 'bg-white border border-slate-300 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {idx + 1}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex w-full md:w-auto gap-2 justify-between">
               <button
-                key={idx}
-                onClick={() => setCurrentIndex(idx)}
-                style={{
-                  width: 32,
-                  height: 32,
-                  border: 'none',
-                  borderRadius: 4,
-                  background: idx === currentIndex ? 'var(--primary)' : answers[questions[idx].question_order] ? 'var(--success)' : 'var(--border)',
-                  color: idx === currentIndex ? 'white' : 'var(--text)',
-                  cursor: 'pointer'
+                onClick={() => {
+                  if (currentIndex > 0) {
+                    setCurrentIndex(currentIndex - 1);
+                  }
                 }}
+                disabled={currentIndex === 0}
+                className="md:hidden flex-1 inline-flex justify-center items-center gap-2 px-5 py-2.5 rounded-lg border border-slate-300 font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors disabled:opacity-50"
               >
-                {idx + 1}
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+                Prev
               </button>
-            ))}
+              
+              <button
+                onClick={() => {
+                  if (currentIndex < questions.length - 1) {
+                    setCurrentIndex(currentIndex + 1);
+                  }
+                }}
+                disabled={currentIndex === questions.length - 1}
+                className="flex-1 md:flex-none inline-flex justify-center items-center gap-2 px-5 py-2.5 rounded-lg border border-slate-300 font-medium text-slate-700 bg-white hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                Next
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+            </div>
           </div>
-          <button
-            onClick={() => {
-              if (currentIndex < questions.length - 1) {
-                setCurrentIndex(currentIndex + 1);
-              }
-            }}
-            disabled={currentIndex === questions.length - 1}
-            className="btn btn-secondary"
-          >
-            Next
-          </button>
         </div>
       </div>
 
-      {/* Violation Warning Modal (Toast) */}
-      {/* Modal chặn: recorder mất state (reload) — buộc bật lại ghi màn hình mới thi tiếp */}
+      {/* Modals & Overlays */}
       {recordingLost && !locked && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.75)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 10000
-        }}>
-          <div style={{
-            background: 'white', padding: '30px', borderRadius: '12px',
-            maxWidth: '480px', textAlign: 'center', border: '2px solid var(--danger)'
-          }}>
-            <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '22px' }}>
-              🎥 Screen recording must be restarted
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-[10000] p-4">
+          <div className="bg-white p-8 rounded-2xl max-w-md w-full text-center border border-red-200 shadow-2xl">
+            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <h3 className="text-xl font-bold text-red-600 mb-4">
+              Screen recording interrupted
             </h3>
-            <p style={{ fontSize: '16px', lineHeight: '1.5', color: '#333', marginBottom: 20 }}>
-              Screen recording was interrupted (possibly by a page reload). You need to share
-              your <b>entire screen</b> again to continue the exam.
+            <p className="text-slate-600 mb-8 leading-relaxed">
+              Screen recording was lost (possibly due to a page reload). You must share
+              your <strong className="text-slate-900">entire screen</strong> again to continue the exam.
             </p>
-            <button onClick={handleResumeRecording} className="btn btn-primary" style={{ width: '100%' }}>
-              Restart screen recording
+            <button 
+              onClick={handleResumeRecording} 
+              className="w-full inline-flex justify-center items-center px-6 py-3 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-colors shadow-sm"
+            >
+              Restart Screen Recording
             </button>
           </div>
         </div>
       )}
 
       {violationWarningModal && (
-        <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999
-        }}>
-          <div style={{
-            background: 'white',
-            padding: '30px',
-            borderRadius: '12px',
-            boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
-            maxWidth: '500px',
-            textAlign: 'center',
-            border: '2px solid var(--danger)'
-          }}>
-            <h3 style={{ color: 'var(--danger)', marginBottom: '15px', fontSize: '24px' }}>⚠️ Exam Rule Violation</h3>
-            <p style={{ fontSize: '18px', lineHeight: '1.5', color: '#333' }}>
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-[9999] p-4">
+          <div className="bg-white p-8 rounded-2xl max-w-md w-full text-center border-2 border-orange-500 shadow-2xl transform scale-100 animate-in fade-in zoom-in duration-200">
+            <div className="w-16 h-16 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <h3 className="text-2xl font-bold text-orange-600 mb-4">Rule Violation</h3>
+            <p className="text-slate-700 text-lg mb-6 leading-relaxed">
               {violationWarningModal}
             </p>
-            <p style={{ marginTop: '20px', color: 'var(--text-light)', fontSize: '14px' }}>
+            <p className="text-slate-400 text-sm">
               This warning will disappear automatically...
             </p>
           </div>
         </div>
       )}
 
-      {/* Resume Notification Modal — xuất hiện khi học viên quay lại sau khi tắt trình duyệt */}
       {resumeInfo && (
-        <div style={{
-          position: 'fixed',
-          top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: 'rgba(0,0,0,0.6)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 10000
-        }}>
-          <div style={{
-            background: 'white',
-            padding: '36px 40px',
-            borderRadius: '16px',
-            boxShadow: '0 12px 40px rgba(0,0,0,0.3)',
-            maxWidth: '480px',
-            textAlign: 'center',
-            border: '2px solid #22c55e'
-          }}>
-            <div style={{ fontSize: 52, marginBottom: 12 }}>🔄</div>
-            <h3 style={{ color: '#16a34a', marginBottom: '12px', fontSize: '22px' }}>
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-[10000] p-4">
+          <div className="bg-white p-10 rounded-3xl shadow-2xl max-w-md w-full text-center border-2 border-emerald-500">
+            <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <svg className="w-10 h-10 animate-spin-slow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </div>
+            <h3 className="text-2xl font-bold text-emerald-600 mb-2">
               Exam Resumed
             </h3>
-            <p style={{ fontSize: '16px', lineHeight: '1.6', color: '#333', marginBottom: 8 }}>
+            <p className="text-slate-600 mb-6">
               Your session has been restored. Time remaining:
             </p>
-            <p style={{ fontSize: '32px', fontWeight: 700, color: '#16a34a', marginBottom: 16, fontVariantNumeric: 'tabular-nums' }}>
-              {formatTime(resumeInfo.timeLeft)}
-            </p>
-            <p style={{ color: '#666', fontSize: '13px', marginBottom: 20 }}>
-              ⚠️ If you close the browser again, you will have 2 minutes to return before your exam is automatically submitted.
-            </p>
+            <div className="bg-slate-50 rounded-2xl p-6 mb-8 border border-slate-100">
+              <p className="text-5xl font-black text-emerald-600 font-mono tracking-tight tabular-nums">
+                {formatTime(resumeInfo.timeLeft)}
+              </p>
+            </div>
+            <div className="bg-orange-50 text-orange-800 text-sm p-4 rounded-xl text-left mb-8 flex items-start gap-3">
+              <svg className="w-5 h-5 shrink-0 mt-0.5 text-orange-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <p>If you close the browser again, you will have exactly 2 minutes to return before automatic submission.</p>
+            </div>
             <button
               onClick={() => setResumeInfo(null)}
-              style={{
-                background: '#16a34a',
-                color: 'white',
-                border: 'none',
-                borderRadius: 8,
-                padding: '10px 28px',
-                fontSize: 15,
-                fontWeight: 600,
-                cursor: 'pointer'
-              }}
+              className="w-full inline-flex justify-center items-center px-6 py-4 bg-emerald-600 text-white rounded-xl font-bold text-lg hover:bg-emerald-700 transition-colors shadow-sm"
             >
               Continue Exam
             </button>
@@ -1066,33 +1135,19 @@ function StudentExam() {
         </div>
       )}
 
-      {/* Forensic Watermark – hiển thị studentId + timestamp trong mọi ảnh chụp màn hình */}
       {started && !locked && (
         <div
           aria-hidden="true"
-          style={{
-            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-            pointerEvents: 'none',
-            zIndex: 9997,
-            overflow: 'hidden',
-          }}
+          className="fixed inset-0 pointer-events-none z-[9997] overflow-hidden"
         >
-          {/* 12 lát (4 cột x 3 hàng): to & rõ đủ để đọc trên video ghi màn hình 5fps,
-              nhưng thưa và mờ vừa phải để không che bài làm của thí sinh. */}
           {Array.from({ length: 12 }).map((_, i) => (
             <span
               key={i}
+              className="absolute text-[26px] font-bold whitespace-nowrap text-black/5 select-none"
               style={{
-                position: 'absolute',
                 top: `${(i % 3) * 33 + 8}%`,
                 left: `${Math.floor(i / 3) * 26}%`,
                 transform: 'rotate(-25deg)',
-                opacity: 0.14,
-                fontSize: 26,
-                fontWeight: 700,
-                whiteSpace: 'nowrap',
-                color: '#000',
-                userSelect: 'none',
               }}
             >
               {studentEmail || studentId} · {watermarkTime.toLocaleString('vi-VN')}

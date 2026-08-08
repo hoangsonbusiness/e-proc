@@ -718,96 +718,130 @@ function BatchManagement() {
   // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="container">
-      <div className="header">
-        <h1>Batch Management</h1>
-        <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
-      </div>
+    <div className="min-h-screen bg-slate-50 p-6 md:p-8">
+      <div className="max-w-7xl mx-auto space-y-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Batch Management</h1>
+            <p className="text-slate-500 mt-1">Manage exam batches, blueprints, and students</p>
+          </div>
+          <Link to="/admin/dashboard" className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back to Dashboard
+          </Link>
+        </div>
 
-      <AdminNav />
+        <AdminNav />
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2>Batches</h2>
-        <button onClick={() => setShowForm(!showForm)} className="btn btn-primary">
-          {showForm ? 'Cancel' : 'Create New Batch'}
-        </button>
-      </div>
+        <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+          <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+            <svg className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+            </svg>
+            Batches List
+          </h2>
+          <button onClick={() => setShowForm(!showForm)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm ${showForm ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+            {showForm ? 'Cancel' : (
+              <>
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Create New Batch
+              </>
+            )}
+          </button>
+        </div>
 
       {/* ── Create Batch Form ──────────────────────────────────────────── */}
       {showForm && (
-        <div className="card">
-          <h3>Create New Batch</h3>
-          <form onSubmit={handleSubmit}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
-              <div className="form-group">
-                <label>Batch Name</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={e => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                  required
-                />
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+          <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+            <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+              <svg className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+              </svg>
+              Create New Batch
+            </h3>
+          </div>
+          <div className="p-6">
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">Batch Name</label>
+                  <input
+                    type="text"
+                    value={formData.name}
+                    onChange={e => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                    placeholder="e.g. Midterm Fall 2023"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">Duration (minutes)</label>
+                  <input
+                    type="number"
+                    value={formData.duration}
+                    onChange={e => setFormData(prev => ({ ...prev, duration: parseInt(e.target.value) }))}
+                    min={10}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">Start Time</label>
+                  <input
+                    type="datetime-local"
+                    value={formData.start_time}
+                    onChange={e => setFormData(prev => ({ ...prev, start_time: e.target.value }))}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">End Time</label>
+                  <input
+                    type="datetime-local"
+                    value={formData.end_time}
+                    onChange={e => setFormData(prev => ({ ...prev, end_time: e.target.value }))}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                  />
+                </div>
               </div>
-              <div className="form-group">
-                <label>Duration (minutes)</label>
-                <input
-                  type="number"
-                  value={formData.duration}
-                  onChange={e => setFormData(prev => ({ ...prev, duration: parseInt(e.target.value) }))}
-                  min={10}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>Start Time</label>
-                <input
-                  type="datetime-local"
-                  value={formData.start_time}
-                  onChange={e => setFormData(prev => ({ ...prev, start_time: e.target.value }))}
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label>End Time</label>
-                <input
-                  type="datetime-local"
-                  value={formData.end_time}
-                  onChange={e => setFormData(prev => ({ ...prev, end_time: e.target.value }))}
-                  required
-                />
-              </div>
-            </div>
 
-            {/* Loại đề: tự luận/coding (chấm AI) hoặc trắc nghiệm (chấm tự động) */}
-            <div className="form-group" style={{ marginTop: 12 }}>
-              <label>Exam Type</label>
-              <select
-                value={formData.exam_type}
-                onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
-                style={{ width: 'auto' }}
-              >
-                <option value="essay">Tự luận / Coding</option>
-                <option value="quiz">Trắc nghiệm (Quiz)</option>
-              </select>
-            </div>
-
-            {/* Chế độ ghi màn hình — chỉ admin đổi được; mod thấy nhưng bị khóa */}
-            <div className="form-group" style={{ marginTop: 12 }}>
-              <label>Screen Recording</label>
-              <select
-                value={formData.record_mode}
-                disabled={!isAdmin}
-                onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
-                style={{ width: 'auto' }}
-              >
-                <option value="none">Default (No recording)</option>
-                <option value="local">Record Local (Save on student's machine, encrypted)</option>
-                <option value="s3">Record S3 (Save to AWS S3)</option>
-              </select>
-              {!isAdmin && (
-                <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
-              )}
-            </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">Exam Type</label>
+                  <select
+                    value={formData.exam_type}
+                    onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
+                  >
+                    <option value="essay">Tự luận / Coding (Essay)</option>
+                    <option value="quiz">Trắc nghiệm (Quiz)</option>
+                  </select>
+                </div>
+                
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">Screen Recording</label>
+                  <select
+                    value={formData.record_mode}
+                    disabled={!isAdmin}
+                    onChange={e => setFormData(prev => ({ ...prev, record_mode: e.target.value as 'none' | 'local' | 's3' }))}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none disabled:opacity-60 disabled:bg-slate-100"
+                  >
+                    <option value="none">Default (No recording)</option>
+                    <option value="local">Record Local (Save on student's machine)</option>
+                    <option value="s3">Record S3 (Save to AWS S3)</option>
+                  </select>
+                  {!isAdmin && (
+                    <p className="text-xs text-amber-600 font-medium">Only admin accounts can change this setting.</p>
+                  )}
+                </div>
+              </div>
 
             <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/100)</h4>
 
@@ -973,109 +1007,133 @@ function BatchManagement() {
               </>
             )}
 
-            {/* Validation errors */}
-            {(feasibilityErrors.length > 0 || createBlueprintErrors.length > 0) && (
-              <div style={{ marginTop: 15, padding: '12px 16px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8 }}>
-                <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Lỗi Blueprint:</strong>
-                {[...feasibilityErrors, ...createBlueprintErrors.filter(e => !feasibilityErrors.includes(e))].map((err, i) => (
-                  <p key={i} style={{ color: '#b91c1c', margin: '4px 0 0', fontSize: 13 }}>{err}</p>
-                ))}
-              </div>
-            )}
+              {/* Validation errors */}
+              {(feasibilityErrors.length > 0 || createBlueprintErrors.length > 0) && (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-2">
+                  <strong className="text-red-800 text-sm flex items-center gap-2">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    Blueprint Errors:
+                  </strong>
+                  {[...feasibilityErrors, ...createBlueprintErrors.filter(e => !feasibilityErrors.includes(e))].map((err, i) => (
+                    <p key={i} className="text-red-700 text-sm ml-6">{err}</p>
+                  ))}
+                </div>
+              )}
 
-            <button
-              type="submit"
-              disabled={
-                loading ||
-                totalQuestions < 1 ||
-                totalQuestions > 100 ||
-                (blueprintMode === 'module' && modules.length === 0) ||
-                (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
-                createBlueprintErrors.length > 0
-              }
-              className="btn btn-primary"
-              style={{ marginTop: 20 }}
-            >
-              {loading ? 'Creating...' : 'Create Batch'}
-            </button>
-          </form>
+              <div className="pt-6 border-t border-slate-100 flex justify-end">
+                <button
+                  type="submit"
+                  disabled={
+                    loading ||
+                    totalQuestions < 1 ||
+                    totalQuestions > 100 ||
+                    (blueprintMode === 'module' && modules.length === 0) ||
+                    (blueprintMode === 'type' && moduleTypeStats.length === 0) ||
+                    createBlueprintErrors.length > 0
+                  }
+                  className="inline-flex items-center justify-center gap-2 px-8 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-colors shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create Batch'
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
       {/* ── Invite Students Form ───────────────────────────────────────── */}
       {showInviteForm && selectedBatchId && (
-        <div className="card" style={{ borderColor: '#22c55e', background: '#f0fdf4' }}>
-          <h3 style={{ color: '#166534' }}>Invite Students to Batch #{selectedBatchId}</h3>
-          <p style={{ color: '#166534', fontSize: 14 }}>Enter email addresses (one per line)</p>
-          <textarea
-            value={emails}
-            onChange={e => setEmails(e.target.value)}
-            placeholder={`student1@example.com\nstudent2@example.com\nstudent3@example.com`}
-            rows={6}
-            style={{ width: '100%', padding: 10, marginTop: 10, fontFamily: 'monospace' }}
-          />
-          <div style={{ marginTop: 10, display: 'flex', gap: 10 }}>
-            <button
-              onClick={handleInviteStudents}
-              disabled={loading || !emails.trim()}
-              className="btn btn-primary"
-            >
-              {loading ? 'Inviting...' : 'Invite Students'}
-            </button>
-            <button
-              onClick={() => { setShowInviteForm(false); setInviteResult(null); }}
-              className="btn btn-secondary"
-            >
-              Close
-            </button>
+        <div className="bg-emerald-50 rounded-2xl shadow-sm border border-emerald-200 overflow-hidden mb-6">
+          <div className="p-6 border-b border-emerald-100 bg-emerald-100/50">
+            <h3 className="text-lg font-bold text-emerald-800 flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+              </svg>
+              Invite Students to Batch #{selectedBatchId}
+            </h3>
+            <p className="text-emerald-700 text-sm mt-1">Enter email addresses (one per line)</p>
           </div>
-
-          {inviteResult && (
-            <div style={{ marginTop: 20 }}>
-              <h4 style={{ color: '#166534' }}>Invited {inviteResult.success} students:</h4>
-              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
-                <thead>
-                  <tr style={{ background: '#e5e7eb' }}>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Email</th>
-                    <th style={{ padding: 8, textAlign: 'left' }}>Access Code</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {inviteResult.emails.map((s, i) => (
-                    <tr key={i} style={{ borderBottom: '1px solid #e5e7eb' }}>
-                      <td style={{ padding: 8 }}>{s.email}</td>
-                      <td style={{ padding: 8, fontFamily: 'monospace', fontWeight: 'bold' }}>{s.code}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="p-6 space-y-4">
+            <textarea
+              value={emails}
+              onChange={e => setEmails(e.target.value)}
+              placeholder="student1@example.com&#10;student2@example.com"
+              rows={6}
+              className="w-full px-4 py-3 rounded-xl border border-emerald-200 bg-white focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all outline-none font-mono text-sm shadow-inner"
+            />
+            <div className="flex gap-3">
               <button
-                onClick={() => exportStudents(selectedBatchId)}
-                className="btn btn-secondary"
-                style={{ marginTop: 10 }}
+                onClick={handleInviteStudents}
+                disabled={loading || !emails.trim()}
+                className="inline-flex items-center gap-2 px-6 py-2.5 bg-emerald-600 text-white rounded-lg font-bold hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
               >
-                Export to Excel
+                {loading ? 'Inviting...' : 'Invite Students'}
+              </button>
+              <button
+                onClick={() => { setShowInviteForm(false); setInviteResult(null); }}
+                className="inline-flex items-center gap-2 px-6 py-2.5 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors shadow-sm"
+              >
+                Close
               </button>
             </div>
-          )}
+
+            {inviteResult && (
+              <div className="mt-6 pt-6 border-t border-emerald-200">
+                <h4 className="text-emerald-800 font-bold mb-4">Invited {inviteResult.success} students successfully:</h4>
+                <div className="bg-white rounded-xl border border-emerald-100 overflow-hidden shadow-sm">
+                  <table className="w-full text-left text-sm text-slate-600">
+                    <thead className="bg-emerald-50 text-emerald-800 border-b border-emerald-100">
+                      <tr>
+                        <th className="px-6 py-3 font-bold">Email</th>
+                        <th className="px-6 py-3 font-bold">Access Code</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-emerald-50">
+                      {inviteResult.emails.map((s, i) => (
+                        <tr key={i} className="hover:bg-emerald-50/50 transition-colors">
+                          <td className="px-6 py-3">{s.email}</td>
+                          <td className="px-6 py-3 font-mono font-bold text-emerald-600">{s.code}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  onClick={() => exportStudents(selectedBatchId)}
+                  className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-emerald-100 text-emerald-700 rounded-lg font-bold hover:bg-emerald-200 transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                  Export to Excel
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* ── Batches Table ──────────────────────────────────────────────── */}
-      <div className="card">
-        {/* Header: title + page-size selector */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <h3 style={{ margin: 0 }}>
-            Batches&nbsp;
-            <span style={{ color: 'var(--text-light)', fontWeight: 400, fontSize: 15 }}>({batches.length} total)</span>
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <h3 className="text-lg font-bold text-slate-800">
+            Batches List <span className="text-slate-400 font-normal ml-1">({batches.length} total)</span>
           </h3>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label style={{ fontSize: 13, color: 'var(--text-light)', whiteSpace: 'nowrap' }}>Show:</label>
+          <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">
+            <span className="text-sm font-medium text-slate-600">Show:</span>
             <select
-              id="batch-page-size"
               value={batchPageSize}
               onChange={e => handleBatchPageSizeChange(Number(e.target.value) as BatchPageSize)}
-              style={{ fontSize: 13, padding: '4px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', cursor: 'pointer' }}
+              className="bg-transparent text-sm font-bold text-slate-800 outline-none cursor-pointer"
             >
               {BATCH_PAGE_SIZE_OPTIONS.map(s => (
                 <option key={s} value={s}>{s} / page</option>
@@ -1084,117 +1142,139 @@ function BatchManagement() {
           </div>
         </div>
 
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Start Time</th>
-              <th>End Time</th>
-              <th>Duration</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paginatedBatches.map(batch => {
-              const editable = canEditBatch(batch);
-              return (
-                <tr key={batch.id}>
-                  <td>{batch.id}</td>
-                  <td>
-                    {batch.name}
-                    {!editable && (
-                      <span style={{
-                        marginLeft: 8, fontSize: 10, padding: '2px 6px',
-                        borderRadius: 4, background: '#f3f4f6', color: '#6b7280', verticalAlign: 'middle',
-                      }}>view only</span>
-                    )}
-                  </td>
-                  <td>{formatGMT7(batch.start_time)}</td>
-                  <td>{formatGMT7(batch.end_time)}</td>
-                  <td>{batch.duration} min</td>
-                  <td>
-                    {editable && (
-                      <button
-                        onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
-                        className="btn btn-primary"
-                        style={{ marginRight: 5, fontSize: 12 }}
-                      >
-                        Invite
-                      </button>
-                    )}
-                    <Link to={`/admin/batches/${batch.id}/students`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
-                      Students
-                    </Link>
-                    <Link to={`/admin/batches/${batch.id}/results`} className="btn btn-secondary" style={{ marginRight: 5, fontSize: 12 }}>
-                      Results
-                    </Link>
-                    {editable && (
-                      <>
-                        <button
-                          onClick={() => handleEditBatch(batch)}
-                          className="btn btn-secondary"
-                          style={{ marginRight: 5, fontSize: 12 }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => {
-                            if (confirm('Delete this batch? All students and exam data will be lost.')) {
-                              adminApi.deleteBatch(batch.id).then(() => {
-                                setBatches(prev => prev.filter(b => b.id !== batch.id));
-                              });
-                            }
-                          }}
-                          className="btn btn-danger"
-                          style={{ fontSize: 12 }}
-                        >
-                          Delete
-                        </button>
-                      </>
-                    )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm text-slate-600">
+            <thead className="bg-slate-50 text-slate-800 border-b border-slate-200">
+              <tr>
+                <th className="px-6 py-4 font-bold">ID</th>
+                <th className="px-6 py-4 font-bold">Name</th>
+                <th className="px-6 py-4 font-bold">Start Time</th>
+                <th className="px-6 py-4 font-bold">End Time</th>
+                <th className="px-6 py-4 font-bold">Duration</th>
+                <th className="px-6 py-4 font-bold text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {paginatedBatches.map(batch => {
+                const editable = canEditBatch(batch);
+                return (
+                  <tr key={batch.id} className="hover:bg-slate-50/50 transition-colors">
+                    <td className="px-6 py-4 font-mono font-medium text-slate-500">#{batch.id}</td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-900">{batch.name}</span>
+                        {!editable && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500 uppercase tracking-wider">
+                            View Only
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">{formatGMT7(batch.start_time)}</td>
+                    <td className="px-6 py-4">{formatGMT7(batch.end_time)}</td>
+                    <td className="px-6 py-4 font-medium">{batch.duration} min</td>
+                    <td className="px-6 py-4 text-right space-x-2">
+                      <div className="inline-flex items-center justify-end gap-2">
+                        {editable && (
+                          <button
+                            onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
+                            className="inline-flex items-center px-3 py-1.5 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 rounded-md text-xs font-bold transition-colors"
+                          >
+                            Invite
+                          </button>
+                        )}
+                        <Link to={`/admin/batches/${batch.id}/students`} className="inline-flex items-center px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded-md text-xs font-bold transition-colors">
+                          Students
+                        </Link>
+                        <Link to={`/admin/batches/${batch.id}/results`} className="inline-flex items-center px-3 py-1.5 bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 rounded-md text-xs font-bold transition-colors">
+                          Results
+                        </Link>
+                        {editable && (
+                          <>
+                            <button
+                              onClick={() => handleEditBatch(batch)}
+                              className="inline-flex items-center px-3 py-1.5 bg-white text-slate-700 hover:bg-slate-50 border border-slate-300 rounded-md text-xs font-bold transition-colors"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm('Delete this batch? All students and exam data will be lost.')) {
+                                  adminApi.deleteBatch(batch.id).then(() => {
+                                    setBatches(prev => prev.filter(b => b.id !== batch.id));
+                                  });
+                                }
+                              }}
+                              className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded-md text-xs font-bold transition-colors"
+                            >
+                              Delete
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+              {batches.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-6 py-12 text-center text-slate-500">
+                    <div className="flex flex-col items-center justify-center gap-2">
+                      <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+                      </svg>
+                      No batches found.
+                    </div>
                   </td>
                 </tr>
-              );
-            })}
-            {batches.length === 0 && (
-              <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-light)' }}>No batches yet</td></tr>
-            )}
-          </tbody>
-        </table>
+              )}
+            </tbody>
+          </table>
+        </div>
 
         {/* Pagination controls */}
         {batchTotalPages > 1 && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, flexWrap: 'wrap', gap: 8 }}>
-            <span style={{ fontSize: 13, color: 'var(--text-light)' }}>
-              Page {batchCurrentPage} of {batchTotalPages}&nbsp;·&nbsp;
-              {(batchCurrentPage - 1) * batchPageSize + 1}–{Math.min(batchCurrentPage * batchPageSize, batches.length)} of {batches.length}
+          <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-50/50">
+            <span className="text-sm text-slate-500 font-medium">
+              Page {batchCurrentPage} of {batchTotalPages} <span className="mx-2 text-slate-300">|</span> 
+              Showing {(batchCurrentPage - 1) * batchPageSize + 1} to {Math.min(batchCurrentPage * batchPageSize, batches.length)} of {batches.length}
             </span>
-            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+            <div className="flex gap-1">
               <button
                 onClick={() => setBatchCurrentPage(p => Math.max(1, p - 1))}
                 disabled={batchCurrentPage === 1}
-                className="btn btn-secondary"
-                style={{ fontSize: 13, padding: '4px 10px' }}
-              >←</button>
+                className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
               {getBatchPageNumbers().map((p, i) =>
                 p === '...' ? (
-                  <span key={`el-${i}`} style={{ padding: '0 6px', color: 'var(--text-light)' }}>…</span>
+                  <span key={`el-${i}`} className="px-3 py-1.5 text-slate-400">…</span>
                 ) : (
                   <button
                     key={p}
                     onClick={() => setBatchCurrentPage(p as number)}
-                    className={`btn ${batchCurrentPage === p ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ fontSize: 13, padding: '4px 10px', minWidth: 34 }}
-                  >{p}</button>
+                    className={`px-3 py-1.5 rounded-md text-sm font-bold transition-colors min-w-[32px] ${
+                      batchCurrentPage === p 
+                        ? 'bg-blue-600 text-white shadow-sm' 
+                        : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {p}
+                  </button>
                 )
               )}
               <button
                 onClick={() => setBatchCurrentPage(p => Math.min(batchTotalPages, p + 1))}
                 disabled={batchCurrentPage === batchTotalPages}
-                className="btn btn-secondary"
-                style={{ fontSize: 13, padding: '4px 10px' }}
-              >→</button>
+                className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
             </div>
           </div>
         )}
@@ -1202,316 +1282,361 @@ function BatchManagement() {
 
       {/* ── Edit Batch Form ────────────────────────────────────────────── */}
       {editingBatch && (
-        <div className="card" style={{ marginTop: 20, borderColor: '#3b82f6', background: '#eff6ff' }}>
-          <h3 style={{ color: '#1d4ed8' }}>Edit Batch #{editingBatch.id}</h3>
-
-          <div className="form-group">
-            <label>Batch Name</label>
-            <input
-              type="text"
-              value={editingBatch.name}
-              onChange={e => setEditingBatch({ ...editingBatch, name: e.target.value })}
-              required
-            />
+        <div className="bg-blue-50 rounded-2xl shadow-sm border border-blue-200 overflow-hidden mt-8">
+          <div className="p-6 border-b border-blue-100 bg-blue-100/50">
+            <h3 className="text-lg font-bold text-blue-800 flex items-center gap-2">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Edit Batch #{editingBatch.id}
+            </h3>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <div className="form-group">
-              <label>Start Time</label>
-              <input
-                type="datetime-local"
-                value={editingBatch.start_time || ''}
-                onChange={e => setEditingBatch({ ...editingBatch, start_time: e.target.value })}
-                required
-              />
+          <div className="p-6 space-y-6">
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Batch Name</label>
+                <input
+                  type="text"
+                  value={editingBatch.name}
+                  onChange={e => setEditingBatch({ ...editingBatch, name: e.target.value })}
+                  required
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">Start Time</label>
+                  <input
+                    type="datetime-local"
+                    value={editingBatch.start_time || ''}
+                    onChange={e => setEditingBatch({ ...editingBatch, start_time: e.target.value })}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-1">End Time</label>
+                  <input
+                    type="datetime-local"
+                    value={editingBatch.end_time || ''}
+                    onChange={e => setEditingBatch({ ...editingBatch, end_time: e.target.value })}
+                    required
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Duration (minutes)</label>
+                <input
+                  type="number"
+                  value={editingBatch.duration}
+                  onChange={e => setEditingBatch({ ...editingBatch, duration: parseInt(e.target.value) })}
+                  min={1}
+                  required
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900"
+                />
+              </div>
+
+              {/* Exam type */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Exam Type</label>
+                <select
+                  value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
+                  onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900 min-w-[200px]"
+                >
+                  <option value="essay">Tự luận / Coding</option>
+                  <option value="quiz">Trắc nghiệm (Quiz)</option>
+                </select>
+              </div>
+
+              {/* Chế độ ghi màn hình */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">Screen Recording</label>
+                <select
+                  value={editingBatch.record_mode || 'none'}
+                  disabled={!isAdmin}
+                  onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900 min-w-[300px] disabled:bg-slate-50 disabled:text-slate-500"
+                >
+                  <option value="none">Default (No recording)</option>
+                  <option value="local">Record Local (Save on student's machine, encrypted)</option>
+                  <option value="s3">Record S3 (Save to AWS S3)</option>
+                </select>
+                {!isAdmin && (
+                  <p className="mt-2 text-sm text-amber-600 font-medium">Only admin accounts can change this setting.</p>
+                )}
+              </div>
             </div>
-            <div className="form-group">
-              <label>End Time</label>
-              <input
-                type="datetime-local"
-                value={editingBatch.end_time || ''}
-                onChange={e => setEditingBatch({ ...editingBatch, end_time: e.target.value })}
-                required
-              />
-            </div>
-          </div>
 
-          <div className="form-group">
-            <label>Duration (minutes)</label>
-            <input
-              type="number"
-              value={editingBatch.duration}
-              onChange={e => setEditingBatch({ ...editingBatch, duration: parseInt(e.target.value) })}
-              min={1}
-              required
-            />
-          </div>
+            <div className="pt-6 border-t border-blue-200">
+              <h4 className="text-lg font-bold text-blue-800 mb-4">Exam Blueprint</h4>
 
-          {/* Exam type */}
-          <div className="form-group">
-            <label>Exam Type</label>
-            <select
-              value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
-              onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
-              style={{ width: 'auto' }}
-            >
-              <option value="essay">Tự luận / Coding</option>
-              <option value="quiz">Trắc nghiệm (Quiz)</option>
-            </select>
-          </div>
+              {/* Blueprint Mode Toggle */}
+              <div className="mb-4">
+                <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
+              </div>
 
-          {/* Chế độ ghi màn hình — chỉ admin đổi được; mod bị khóa (backend giữ nguyên mode cũ) */}
-          <div className="form-group">
-            <label>Screen Recording</label>
-            <select
-              value={editingBatch.record_mode || 'none'}
-              disabled={!isAdmin}
-              onChange={e => setEditingBatch({ ...editingBatch, record_mode: e.target.value })}
-              style={{ width: 'auto' }}
-            >
-              <option value="none">Default (No recording)</option>
-              <option value="local">Record Local (Save on student's machine, encrypted)</option>
-              <option value="s3">Record S3 (Save to AWS S3)</option>
-            </select>
-            {!isAdmin && (
-              <small style={{ color: 'var(--text-light)', display: 'block' }}>Only admin accounts can change this setting.</small>
-            )}
-          </div>
+              {editBlueprintMode === 'module' ? (
+                modules.length === 0 ? (
+                  <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No modules available</div>
+                ) : (
+                  <>
+                    <QuestionBankStatsPanel />
+                    <div className="overflow-x-auto bg-white rounded-xl border border-blue-100 shadow-sm">
+                      <table className="w-full text-left text-sm text-slate-600">
+                        <thead className="bg-blue-50 text-blue-800 border-b border-blue-100">
+                          <tr>
+                            <th className="px-4 py-3 font-bold">Module</th>
+                            <th className="px-4 py-3 font-bold text-center">🟢 Easy</th>
+                            <th className="px-4 py-3 font-bold text-center">🟡 Medium</th>
+                            <th className="px-4 py-3 font-bold text-center">🔴 Hard</th>
+                            <th className="px-4 py-3"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-blue-50">
+                          {(editingBatch.blueprint || []).map((item: any, index: number) => {
+                            const stats = getStatsForModule(item.module);
+                            return (
+                              <tr key={index} className="hover:bg-blue-50/30 transition-colors">
+                                <td className="px-4 py-3 align-top min-w-[200px]">
+                                  <select
+                                    value={item.module}
+                                    onChange={e => {
+                                      const newBlueprint = [...editingBatch.blueprint];
+                                      newBlueprint[index].module = e.target.value;
+                                      setEditingBatch({ ...editingBatch, blueprint: newBlueprint });
+                                    }}
+                                    className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-700"
+                                  >
+                                    {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                                  </select>
+                                  <div className="text-[11px] text-slate-500 mt-1.5 ml-1 font-medium">
+                                    Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
+                                    const nb = [...editingBatch.blueprint]; nb[index].easy = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprint: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
+                                    const nb = [...editingBatch.blueprint]; nb[index].medium = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprint: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
+                                    const nb = [...editingBatch.blueprint]; nb[index].hard = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprint: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top text-right">
+                                  <button
+                                    onClick={() => setEditingBatch({
+                                      ...editingBatch,
+                                      blueprint: editingBatch.blueprint.filter((_: any, i: number) => i !== index)
+                                    })}
+                                    className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Remove"
+                                  >
+                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )
+              ) : (
+                moduleTypeStats.length === 0 ? (
+                  <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No type data available</div>
+                ) : (
+                  <>
+                    <QuestionBankTypeStatsPanel />
+                    <div className="overflow-x-auto bg-white rounded-xl border border-blue-100 shadow-sm">
+                      <table className="w-full text-left text-sm text-slate-600">
+                        <thead className="bg-blue-50 text-blue-800 border-b border-blue-100">
+                          <tr>
+                            <th className="px-4 py-3 font-bold">Module</th>
+                            <th className="px-4 py-3 font-bold">Type</th>
+                            <th className="px-4 py-3 font-bold text-center">🟢 Easy</th>
+                            <th className="px-4 py-3 font-bold text-center">🟡 Medium</th>
+                            <th className="px-4 py-3 font-bold text-center">🔴 Hard</th>
+                            <th className="px-4 py-3"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-blue-50">
+                          {((editingBatch.blueprintByType || []) as BlueprintItemByType[]).map((item, index) => {
+                            const stats = getStatsForModuleType(item.module, item.type);
+                            const otherCombos = ((editingBatch.blueprintByType || []) as BlueprintItemByType[])
+                              .filter((_, i) => i !== index)
+                              .map(i => `${i.module}||${i.type}`);
+                            return (
+                              <tr key={index} className="hover:bg-blue-50/30 transition-colors">
+                                <td className="px-4 py-3 align-top min-w-[140px]">
+                                  <select
+                                    value={item.module}
+                                    onChange={e => {
+                                      const nb = [...editingBatch.blueprintByType];
+                                      nb[index].module = e.target.value;
+                                      setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                                    }}
+                                    className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-700"
+                                  >
+                                    {modules.map(m => <option key={m} value={m}>{m}</option>)}
+                                  </select>
+                                </td>
+                                <td className="px-4 py-3 align-top min-w-[140px]">
+                                  <select
+                                    value={item.type}
+                                    onChange={e => {
+                                      const nb = [...editingBatch.blueprintByType];
+                                      nb[index].type = e.target.value;
+                                      setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                                    }}
+                                    className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-slate-700"
+                                  >
+                                    {QUESTION_TYPES.map(t => {
+                                      const combo = `${item.module}||${t}`;
+                                      const isUsed = otherCombos.includes(combo);
+                                      return (
+                                        <option key={t} value={t} disabled={isUsed}>
+                                          {t}{isUsed ? ' (selected)' : ''}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                  <div className="text-[11px] text-slate-500 mt-1.5 ml-1 font-medium">
+                                    Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
+                                    const nb = [...editingBatch.blueprintByType]; nb[index].easy = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
+                                    const nb = [...editingBatch.blueprintByType]; nb[index].medium = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top">
+                                  <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
+                                    const nb = [...editingBatch.blueprintByType]; nb[index].hard = parseInt(v) || 0;
+                                    setEditingBatch({ ...editingBatch, blueprintByType: nb });
+                                  }} />
+                                </td>
+                                <td className="px-4 py-3 align-top text-right">
+                                  <button
+                                    onClick={() => setEditingBatch({
+                                      ...editingBatch,
+                                      blueprintByType: (editingBatch.blueprintByType || []).filter((_: any, i: number) => i !== index)
+                                    })}
+                                    className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Remove"
+                                  >
+                                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )
+              )}
 
-          <h4 style={{ marginTop: 16, marginBottom: 10, color: '#1e40af' }}>Exam Blueprint</h4>
+              {/* Edit blueprint validation errors */}
+              {editBlueprintErrors.length > 0 && (
+                <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl">
+                  <strong className="text-red-800 text-sm font-bold flex items-center gap-2">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    </svg>
+                    Blueprint exceeds available question count:
+                  </strong>
+                  <ul className="mt-2 space-y-1 list-disc list-inside">
+                    {editBlueprintErrors.map((err, i) => (
+                      <li key={i} className="text-red-700 text-sm">{err}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
-          {/* Blueprint Mode Toggle for Edit form */}
-          <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
-
-          {editBlueprintMode === 'module' ? (
-            modules.length === 0 ? (
-              <p className="error">No modules available</p>
-            ) : (
-              <>
-                <QuestionBankStatsPanel />
-                <table className="matrix-table">
-                  <thead>
-                    <tr>
-                      <th>Module</th>
-                      <th style={{ textAlign: 'center' }}>🟢 Easy</th>
-                      <th style={{ textAlign: 'center' }}>🟡 Medium</th>
-                      <th style={{ textAlign: 'center' }}>🔴 Hard</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(editingBatch.blueprint || []).map((item: any, index: number) => {
-                      const stats = getStatsForModule(item.module);
-                      return (
-                        <tr key={index}>
-                          <td>
-                            <select
-                              value={item.module}
-                              onChange={e => {
-                                const newBlueprint = [...editingBatch.blueprint];
-                                newBlueprint[index].module = e.target.value;
-                                setEditingBatch({ ...editingBatch, blueprint: newBlueprint });
-                              }}
-                              style={{ width: '100%' }}
-                            >
-                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
-                            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
-                            </div>
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
-                              const nb = [...editingBatch.blueprint]; nb[index].easy = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprint: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
-                              const nb = [...editingBatch.blueprint]; nb[index].medium = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprint: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
-                              const nb = [...editingBatch.blueprint]; nb[index].hard = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprint: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <button
-                              onClick={() => setEditingBatch({
-                                ...editingBatch,
-                                blueprint: editingBatch.blueprint.filter((_: any, i: number) => i !== index)
-                              })}
-                              className="btn btn-danger"
-                              style={{ fontSize: 12, padding: '4px 8px' }}
-                            >X</button>
-                          </td>
-                        </tr>
-                      );
+              <div className="mt-8 flex flex-wrap gap-3 items-center">
+                {editBlueprintMode === 'module' ? (
+                  <button
+                    onClick={() => setEditingBatch({
+                      ...editingBatch,
+                      blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
                     })}
-                  </tbody>
-                </table>
-              </>
-            )
-          ) : (
-            moduleTypeStats.length === 0 ? (
-              <p className="error">No type data available</p>
-            ) : (
-              <>
-                <QuestionBankTypeStatsPanel />
-                <table className="matrix-table">
-                  <thead>
-                    <tr>
-                      <th>Module</th>
-                      <th>Type</th>
-                      <th>🟢 Easy</th>
-                      <th>🟡 Medium</th>
-                      <th>🔴 Hard</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {((editingBatch.blueprintByType || []) as BlueprintItemByType[]).map((item, index) => {
-                      const stats = getStatsForModuleType(item.module, item.type);
-                      const otherCombos = ((editingBatch.blueprintByType || []) as BlueprintItemByType[])
-                        .filter((_, i) => i !== index)
-                        .map(i => `${i.module}||${i.type}`);
-                      return (
-                        <tr key={index}>
-                          <td style={{ minWidth: 140 }}>
-                            <select
-                              value={item.module}
-                              onChange={e => {
-                                const nb = [...editingBatch.blueprintByType];
-                                nb[index].module = e.target.value;
-                                setEditingBatch({ ...editingBatch, blueprintByType: nb });
-                              }}
-                              style={{ width: '100%' }}
-                            >
-                              {modules.map(m => <option key={m} value={m}>{m}</option>)}
-                            </select>
-                          </td>
-                          <td style={{ minWidth: 120 }}>
-                            <select
-                              value={item.type}
-                              onChange={e => {
-                                const nb = [...editingBatch.blueprintByType];
-                                nb[index].type = e.target.value;
-                                setEditingBatch({ ...editingBatch, blueprintByType: nb });
-                              }}
-                              style={{ width: '100%' }}
-                            >
-                              {QUESTION_TYPES.map(t => {
-                                const combo = `${item.module}||${t}`;
-                                const isUsed = otherCombos.includes(combo);
-                                return (
-                                  <option key={t} value={t} disabled={isUsed}>
-                                    {t}{isUsed ? ' (selected)' : ''}
-                                  </option>
-                                );
-                              })}
-                            </select>
-                            <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4, paddingLeft: 2 }}>
-                              Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
-                            </div>
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
-                              const nb = [...editingBatch.blueprintByType]; nb[index].easy = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
-                              const nb = [...editingBatch.blueprintByType]; nb[index].medium = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
-                              const nb = [...editingBatch.blueprintByType]; nb[index].hard = parseInt(v) || 0;
-                              setEditingBatch({ ...editingBatch, blueprintByType: nb });
-                            }} />
-                          </td>
-                          <td>
-                            <button
-                              onClick={() => setEditingBatch({
-                                ...editingBatch,
-                                blueprintByType: (editingBatch.blueprintByType || []).filter((_: any, i: number) => i !== index)
-                              })}
-                              className="btn btn-danger"
-                              style={{ fontSize: 12, padding: '4px 8px' }}
-                            >X</button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </>
-            )
-          )}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Module
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      if (!nextAvailableModuleTypeEdit) return;
+                      setEditingBatch({
+                        ...editingBatch,
+                        blueprintByType: [
+                          ...(editingBatch.blueprintByType || []),
+                          { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                        ]
+                      });
+                    }}
+                    disabled={!nextAvailableModuleTypeEdit}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Module / Type
+                  </button>
+                )}
 
-          {/* Edit blueprint validation errors */}
-          {editBlueprintErrors.length > 0 && (
-            <div style={{ marginTop: 12, padding: '12px 16px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8 }}>
-              <strong style={{ color: '#991b1b', fontSize: 13 }}>⚠️ Blueprint exceeds available question count:</strong>
-              {editBlueprintErrors.map((err, i) => (
-                <p key={i} style={{ color: '#b91c1c', margin: '4px 0 0', fontSize: 13 }}>{err}</p>
-              ))}
+                <button
+                  onClick={handleUpdateBatch}
+                  disabled={loading || editBlueprintErrors.length > 0}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? 'Saving...' : 'Save Changes'}
+                </button>
+
+                <button
+                  onClick={() => setEditingBatch(null)}
+                  className="inline-flex items-center gap-2 px-6 py-2.5 bg-slate-100 text-slate-700 rounded-lg font-bold hover:bg-slate-200 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
-          )}
-
-          <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            {editBlueprintMode === 'module' ? (
-              <button
-                onClick={() => setEditingBatch({
-                  ...editingBatch,
-                  blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
-                })}
-                className="btn btn-secondary"
-              >
-                + Add Module
-              </button>
-            ) : (
-              <button
-                onClick={() => {
-                  if (!nextAvailableModuleTypeEdit) return;
-                  setEditingBatch({
-                    ...editingBatch,
-                    blueprintByType: [
-                      ...(editingBatch.blueprintByType || []),
-                      { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
-                    ]
-                  });
-                }}
-                disabled={!nextAvailableModuleTypeEdit}
-                className="btn btn-secondary"
-                title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
-              >
-                + Add Module / Type
-              </button>
-            )}
-
-            <button
-              onClick={handleUpdateBatch}
-              disabled={loading || editBlueprintErrors.length > 0}
-              className="btn btn-primary"
-            >
-              {loading ? 'Saving...' : 'Save Changes'}
-            </button>
-
-            <button
-              onClick={() => setEditingBatch(null)}
-              className="btn btn-secondary"
-            >
-              Cancel
-            </button>
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

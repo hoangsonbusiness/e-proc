@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import obfuscator from 'vite-plugin-javascript-obfuscator';
+import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
   plugins: [
     react(),
+    tailwindcss(),
     // Obfuscate bundle app khi BUILD production (không áp lúc dev để vẫn debug được).
     // Loại trừ Monaco + node_modules: obfuscate Monaco gần như chắc chắn vỡ editor / phình bundle.
     // Preset vừa phải: bật stringArray + base64 để chuỗi (endpoint, violation type, ngưỡng)

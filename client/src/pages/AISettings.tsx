@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
+import { Cpu, Save, Link as LinkIcon, ShieldAlert, CheckCircle2, XCircle, Info, KeyRound, ArrowLeft, Settings } from 'lucide-react';
 
 interface AISettings {
   provider: string;
@@ -39,7 +40,6 @@ function AISettings() {
   useEffect(() => {
     loadSettings();
   }, []);
-
 
   const loadSettings = async () => {
     try {
@@ -87,179 +87,229 @@ function AISettings() {
 
   return (
     <div className="container">
-      <div className="header">
-        <h1>AI Settings</h1>
-        <Link to="/admin/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-slate-200 gap-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg">
+            <Cpu size={24} />
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0 border-none pb-0">AI Settings</h1>
+        </div>
+        <Link 
+          to="/admin/dashboard" 
+          className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-50 transition-colors shadow-sm"
+        >
+          <ArrowLeft size={16} />
+          <span className="hidden sm:inline">Back to Dashboard</span>
+        </Link>
       </div>
 
       <AdminNav />
 
-      <div className="card" style={{ maxWidth: 800 }}>
-        <h3>AI Configuration</h3>
-        <p style={{ color: 'var(--text-light)', marginBottom: 20 }}>
-          Configure the AI provider for automatic answer grading.
-        </p>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <div className="lg:col-span-2 space-y-6">
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="px-6 py-5 border-b border-slate-100 bg-slate-50/50">
+              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2 m-0 border-none pb-0">
+                <Settings size={20} className="text-slate-500" />
+                AI Configuration
+              </h3>
+              <p className="text-sm text-slate-500 mt-1">
+                Configure the AI provider for automatic code grading and evaluation.
+              </p>
+            </div>
+            
+            <div className="p-6 space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">AI Provider</label>
+                  <select 
+                    value={settings.provider}
+                    onChange={e => handleProviderChange(e.target.value)}
+                    className="block w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  >
+                    {PROVIDERS.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
 
-        <div className="form-group">
-          <label>AI Provider</label>
-          <select 
-            value={settings.provider}
-            onChange={e => handleProviderChange(e.target.value)}
-          >
-            {PROVIDERS.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Model</label>
+                  <select 
+                    value={settings.model}
+                    onChange={e => setSettings(prev => ({ ...prev, model: e.target.value }))}
+                    className="block w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  >
+                    {PROVIDERS.find(p => p.id === settings.provider)?.models.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
 
-        <div className="form-group">
-          <label>Model</label>
-          <select 
-            value={settings.model}
-            onChange={e => setSettings(prev => ({ ...prev, model: e.target.value }))}
-          >
-            {PROVIDERS.find(p => p.id === settings.provider)?.models.map(m => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2 flex items-center justify-between">
+                  API Key
+                  {settings.provider === 'ollama' && (
+                    <span className="text-xs text-slate-500 font-normal">Enter local server URL (e.g., http://localhost:11434)</span>
+                  )}
+                </label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <KeyRound size={16} className="text-slate-400" />
+                    </div>
+                    <input 
+                      type={showApiKey ? 'text' : 'password'}
+                      value={settings.apiKey}
+                      onChange={e => setSettings(prev => ({ ...prev, apiKey: e.target.value }))}
+                      placeholder={settings.provider === 'ollama' ? "http://localhost:11434" : "Enter API key..."}
+                      className="block w-full pl-10 pr-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                    />
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="px-4 py-2.5 bg-slate-100 border border-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-200 transition-colors"
+                  >
+                    {showApiKey ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
 
-        <div className="form-group">
-          <label>API Key</label>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <input 
-              type={showApiKey ? 'text' : 'password'}
-              value={settings.apiKey}
-              onChange={e => setSettings(prev => ({ ...prev, apiKey: e.target.value }))}
-              placeholder="Enter API key..."
-              style={{ flex: 1 }}
-            />
-            <button 
-              type="button"
-              onClick={() => setShowApiKey(!showApiKey)}
-              className="btn btn-secondary"
-              style={{ minWidth: 80 }}
-            >
-              {showApiKey ? 'Hide' : 'Show'}
-            </button>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-sm font-medium text-slate-700">Temperature</label>
+                    <span className="bg-slate-100 text-slate-700 text-xs font-semibold px-2 py-0.5 rounded-full border border-slate-200">
+                      {settings.temperature}
+                    </span>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={settings.temperature}
+                    onChange={e => setSettings(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
+                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                  />
+                  <div className="flex justify-between mt-2">
+                    <span className="text-xs text-slate-500">More focused</span>
+                    <span className="text-xs text-slate-500">More creative</span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Max Tokens</label>
+                  <input 
+                    type="number"
+                    min="100"
+                    max="10000"
+                    value={settings.maxTokens}
+                    onChange={e => setSettings(prev => ({ ...prev, maxTokens: parseInt(e.target.value) || 2048 }))}
+                    className="block w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:ring-2 focus:ring-blue-500"
+                  />
+                  <p className="text-xs text-slate-500 mt-2">
+                    Maximum response length for evaluations
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center gap-3">
+              <button 
+                onClick={handleSave}
+                disabled={saving}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50"
+              >
+                <Save size={18} />
+                {saving ? 'Saving...' : 'Save Settings'}
+              </button>
+              <button 
+                onClick={handleTest}
+                disabled={testing || !settings.apiKey}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50"
+              >
+                <LinkIcon size={18} />
+                {testing ? 'Testing...' : 'Test Connection'}
+              </button>
+            </div>
           </div>
-          {settings.provider === 'ollama' && (
-            <p style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 5 }}>
-              For Ollama, enter your local server URL (e.g., http://localhost:11434)
-            </p>
+
+          {testResult && (
+            <div className={`rounded-xl p-4 flex items-start gap-3 border ${
+              testResult.success 
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}>
+              <div className="mt-0.5 shrink-0">
+                {testResult.success ? <CheckCircle2 size={20} className="text-emerald-600" /> : <XCircle size={20} className="text-red-600" />}
+              </div>
+              <div>
+                <h4 className={`text-sm font-bold m-0 ${testResult.success ? 'text-emerald-900' : 'text-red-900'}`}>
+                  {testResult.success ? 'Connection Successful' : 'Connection Failed'}
+                </h4>
+                <p className="text-sm mt-1 whitespace-pre-wrap leading-relaxed opacity-90 break-all">
+                  {testResult.message}
+                </p>
+              </div>
+            </div>
           )}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 15 }}>
-          <div className="form-group">
-            <label>Temperature ({settings.temperature})</label>
-            <input 
-              type="range"
-              min="0"
-              max="1"
-              step="0.1"
-              value={settings.temperature}
-              onChange={e => setSettings(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
-            />
-            <p style={{ fontSize: 12, color: 'var(--text-light)' }}>
-              Lower = more focused, Higher = more creative
-            </p>
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-fit">
+          <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-2">
+            <Info size={18} className="text-slate-500" />
+            <h3 className="font-bold text-slate-800 m-0 border-none pb-0">Provider Info</h3>
           </div>
-
-          <div className="form-group">
-            <label>Max Tokens</label>
-            <input 
-              type="number"
-              min="100"
-              max="10000"
-              value={settings.maxTokens}
-              onChange={e => setSettings(prev => ({ ...prev, maxTokens: parseInt(e.target.value) || 2048 }))}
-            />
-            <p style={{ fontSize: 12, color: 'var(--text-light)' }}>
-              Maximum response length
-            </p>
+          <div className="p-0">
+            <table className="w-full text-sm text-left">
+              <thead>
+                <tr className="bg-slate-50">
+                  <th className="px-5 py-3 font-semibold text-slate-600 border-b border-slate-200">Provider</th>
+                  <th className="px-5 py-3 font-semibold text-slate-600 border-b border-slate-200">Free Tier</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">Google Gemini</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">15 req/min, 1500/day</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">OpenAI</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">$5 free credits</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">DeepSeek</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">Very Generous</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">Groq</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">14,400 tokens/min</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">Anthropic</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">$5 free credits</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">OpenRouter</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs">$1 free credits</td>
+                </tr>
+                <tr className="hover:bg-slate-50 transition-colors">
+                  <td className="px-5 py-3 text-slate-800 font-medium">Ollama</td>
+                  <td className="px-5 py-3 text-slate-600 text-xs flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span> Local</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div className="bg-amber-50 p-4 border-t border-slate-100">
+            <div className="flex gap-2 text-amber-800 text-xs leading-relaxed">
+              <ShieldAlert size={16} className="shrink-0 text-amber-600" />
+              <p>Keep your API keys secure. They are stored encrypted in the database.</p>
+            </div>
           </div>
         </div>
-
-        <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
-          <button 
-            onClick={handleSave}
-            disabled={saving}
-            className="btn btn-primary"
-          >
-            {saving ? 'Saving...' : 'Save Settings'}
-          </button>
-          <button 
-            onClick={handleTest}
-            disabled={testing || !settings.apiKey}
-            className="btn btn-secondary"
-          >
-            {testing ? 'Testing...' : 'Test Connection'}
-          </button>
-        </div>
-
-        {testResult && (
-          <div style={{ 
-            marginTop: 20, 
-            padding: 15, 
-            borderRadius: 6,
-            background: testResult.success ? '#dcfce7' : '#fee2e2',
-            color: testResult.success ? '#166534' : '#dc2626'
-          }}>
-            <strong>{testResult.success ? '✓ Success' : '✗ Error'}</strong>
-            <p style={{ marginTop: 5, wordBreak: 'break-all' }}>{testResult.message}</p>
-          </div>
-        )}
-      </div>
-
-      <div className="card" style={{ maxWidth: 800, marginTop: 20 }}>
-        <h4>Provider Information</h4>
-        <table style={{ width: '100%', fontSize: 14 }}>
-          <thead>
-            <tr>
-              <th>Provider</th>
-              <th>Free Tier</th>
-              <th>Website</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Google Gemini</td>
-              <td>15 req/min, 1500/day</td>
-              <td><a href="https://aistudio.google.com" target="_blank">aistudio.google.com</a></td>
-            </tr>
-            <tr>
-              <td>OpenAI</td>
-              <td>$5 free credits</td>
-              <td><a href="https://platform.openai.com" target="_blank">platform.openai.com</a></td>
-            </tr>
-            <tr>
-              <td>DeepSeek</td>
-              <td>Very Generous</td>
-              <td><a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a></td>
-            </tr>
-            <tr>
-              <td>Groq</td>
-              <td>14,400 tokens/min</td>
-              <td><a href="https://console.groq.com" target="_blank">console.groq.com</a></td>
-            </tr>
-            <tr>
-              <td>Anthropic Claude</td>
-              <td>$5 free credits</td>
-              <td><a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a></td>
-            </tr>
-            <tr>
-              <td>OpenRouter</td>
-              <td>$1 free credits</td>
-              <td><a href="https://openrouter.ai" target="_blank">openrouter.ai</a></td>
-            </tr>
-            <tr>
-              <td>Ollama (Local)</td>
-              <td>Free (local)</td>
-              <td><a href="https://ollama.com" target="_blank">ollama.com</a></td>
-            </tr>
-          </tbody>
-        </table>
       </div>
     </div>
   );

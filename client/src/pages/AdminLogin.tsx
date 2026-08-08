@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { Lock } from 'lucide-react';
 
 function AdminLogin() {
   const [username, setUsername] = useState('');
@@ -27,45 +28,66 @@ function AdminLogin() {
   };
 
   return (
-    <div className="container" style={{ maxWidth: 400, marginTop: 100 }}>
-      <div className="card">
-        <h2 style={{ marginBottom: 20 }}>Admin Login</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Username</label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              disabled={loading}
-              autoFocus
-            />
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+        <div className="p-8">
+          <div className="flex flex-col items-center mb-8">
+            <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-blue-50 text-blue-600 mb-4">
+              <Lock size={24} />
+            </div>
+            <h2 className="text-2xl font-bold text-slate-900">Admin Portal</h2>
+            <p className="text-slate-500 text-sm mt-1">Sign in to manage assessments</p>
           </div>
-          <div className="form-group">
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
+
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Username</label>
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                disabled={loading}
+                autoFocus
+                className="block w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                placeholder="Enter admin username"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={loading}
+                className="block w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+                placeholder="••••••••"
+              />
+            </div>
+            
+            {error && (
+              <div className="bg-red-50 text-red-600 px-4 py-3 rounded-lg text-sm font-medium">
+                {error}
+              </div>
+            )}
+            
+            <button
+              type="submit"
+              className="w-full bg-blue-600 text-white font-medium py-3 rounded-xl hover:bg-blue-700 focus:ring-4 focus:ring-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm mt-2"
               disabled={loading}
-            />
+            >
+              {loading ? 'Authenticating...' : 'Sign In'}
+            </button>
+          </form>
+          
+          <div className="mt-8 pt-6 border-t border-slate-100 text-center">
+            <p className="text-sm text-slate-500">
+              First time setting up?{' '}
+              <Link to="/admin/setup" className="font-semibold text-blue-600 hover:text-blue-700 hover:underline">
+                Initialize Admin Account
+              </Link>
+            </p>
           </div>
-          {error && <p className="error">{error}</p>}
-          <button
-            type="submit"
-            className="btn btn-primary"
-            style={{ width: '100%' }}
-            disabled={loading}
-          >
-            {loading ? 'Logging in...' : 'Login'}
-          </button>
-        </form>
-        <p style={{ marginTop: 16, fontSize: 12, color: 'var(--text-light)', textAlign: 'center' }}>
-          First time?{' '}
-          <Link to="/admin/setup" style={{ color: 'var(--primary)' }}>
-            Set up admin account
-          </Link>
-        </p>
+        </div>
       </div>
     </div>
   );
