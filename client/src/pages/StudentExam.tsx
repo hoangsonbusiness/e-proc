@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
+import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
 import CodeEditor, { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
@@ -66,6 +67,7 @@ function StudentExam() {
   const focusLostTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // [Anti-Cheat v2] suspicious paste cooldown ref
   const suspiciousPasteCooldownRef = useRef<number>(0);
+  const multipleDisplayReportedRef = useRef(false);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
@@ -202,7 +204,7 @@ function StudentExam() {
 
   const handleViolation = useCallback(async (
     type: string,
-    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number> }
   ): Promise<boolean> => {
     const now = Date.now();
     // Global cooldown: ignore multiple violations within 3 seconds
@@ -215,6 +217,7 @@ function StudentExam() {
     try {
       const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
       setViolationCount(res.data.total_violations);
+      if (res.data.forensic_only) return false;
       if (res.data.locked) {
         setLocked(true);
         clearFullscreenExitTimeout();
@@ -258,50 +261,41 @@ function StudentExam() {
     }
   }, [clearFullscreenExitTimeout, handleSubmit]);
 
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      if (!startedRef.current || lockedRef.current || submittingRef.current) {
-        clearFullscreenExitTimeout();
-        return;
-      }
+  const reconcileFullscreenState = useCallback(() => {
+    if (!startedRef.current || lockedRef.current || submittingRef.current) {
+      clearFullscreenExitTimeout();
+      return;
+    }
 
-      if (document.fullscreenElement) {
-        clearFullscreenExitTimeout();
-        fullscreenAutoSubmitTriggeredRef.current = false;
-        // Ghi lại baseline width để so sánh sau này — Side Panel extension (Monica)
-        // co lại documentElement/body nhưng không đổi innerWidth/screen.width khi đang fullscreen.
-        documentWidthBaselineRef.current = document.documentElement.getBoundingClientRect().width;
-        viewportShrinkPollCountRef.current = 0;
-        return;
-      }
+    if (document.fullscreenElement) {
+      clearFullscreenExitTimeout();
+      fullscreenAutoSubmitTriggeredRef.current = false;
+      documentWidthBaselineRef.current = document.documentElement.getBoundingClientRect().width;
+      viewportShrinkPollCountRef.current = 0;
+      return;
+    }
 
-      if (fullscreenExitTimeoutRef.current || fullscreenAutoSubmitTriggeredRef.current) {
-        return;
-      }
+    if (fullscreenExitTimeoutRef.current || fullscreenAutoSubmitTriggeredRef.current) return;
+
+    fullscreenExitTimeoutRef.current = setTimeout(async () => {
+      fullscreenExitTimeoutRef.current = null;
+      if (!startedRef.current || lockedRef.current || submittingRef.current || document.fullscreenElement) return;
+      if (fullscreenAutoSubmitTriggeredRef.current) return;
+
+      fullscreenAutoSubmitTriggeredRef.current = true;
+      const wasLocked = await handleViolation('fullscreen_exit');
+      if (wasLocked || document.fullscreenElement) return;
 
       fullscreenExitTimeoutRef.current = setTimeout(async () => {
         fullscreenExitTimeoutRef.current = null;
-
-        if (!startedRef.current || lockedRef.current || submittingRef.current) return;
-        if (document.fullscreenElement) return;
-        if (fullscreenAutoSubmitTriggeredRef.current) return;
-
-        fullscreenAutoSubmitTriggeredRef.current = true;
-        const wasLocked = await handleViolation('fullscreen_exit');
-
-        if (wasLocked) return;
-
-        if (!document.fullscreenElement) {
-          fullscreenExitTimeoutRef.current = setTimeout(async () => {
-            fullscreenExitTimeoutRef.current = null;
-            if (!startedRef.current || lockedRef.current || submittingRef.current) return;
-            if (document.fullscreenElement) return;
-
-            await handleViolation('fullscreen_exit');
-          }, FULLSCREEN_EXIT_TIMEOUT_MS);
-        }
+        if (!startedRef.current || lockedRef.current || submittingRef.current || document.fullscreenElement) return;
+        await handleViolation('fullscreen_exit');
       }, FULLSCREEN_EXIT_TIMEOUT_MS);
-    };
+    }, FULLSCREEN_EXIT_TIMEOUT_MS);
+  }, [clearFullscreenExitTimeout, handleViolation]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => reconcileFullscreenState();
 
     const handleVisibilityChange = () => {
       if (document.hidden && startedRef.current && !lockedRef.current && !submittingRef.current) {
@@ -317,7 +311,15 @@ function StudentExam() {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [clearFullscreenExitTimeout, handleSubmit, handleViolation]);
+  }, [clearFullscreenExitTimeout, reconcileFullscreenState]);
+
+  // Fullscreen watchdog: catches initial denial and platform transitions that do not emit fullscreenchange.
+  useEffect(() => {
+    if (!started || locked || submitting) return;
+    reconcileFullscreenState();
+    const interval = setInterval(reconcileFullscreenState, 1000);
+    return () => clearInterval(interval);
+  }, [started, locked, submitting, reconcileFullscreenState]);
 
   // Phát hiện extension side-panel (vd: Monica AI) che một phần viewport
   // mà không thoát Fullscreen API thực sự, nên fullscreenchange không bắn.
@@ -439,9 +441,31 @@ function StudentExam() {
   useEffect(() => {
     const interval = setInterval(() => {
       setWatermarkTime(new Date());
-    }, 30000);
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!started || locked || submitting) return;
+    const inspectDisplays = () => {
+      const snapshot = getExamEnvironmentSnapshot();
+      if (snapshot.screenExtended === true && !multipleDisplayReportedRef.current) {
+        multipleDisplayReportedRef.current = true;
+        void handleViolation('multiple_display_detected', {
+          metadata: {
+            screenWidth: snapshot.screenWidth,
+            screenHeight: snapshot.screenHeight,
+            devicePixelRatio: snapshot.devicePixelRatio,
+          },
+        });
+      } else if (snapshot.screenExtended === false) {
+        multipleDisplayReportedRef.current = false;
+      }
+    };
+    inspectDisplays();
+    const interval = setInterval(inspectDisplays, 3000);
+    return () => clearInterval(interval);
+  }, [started, locked, submitting, handleViolation]);
 
   const triggerDevtoolsViolation = useCallback(() => {
     if (!startedRef.current || lockedRef.current || submittingRef.current) return;
@@ -457,15 +481,18 @@ function StudentExam() {
       if (!startedRef.current || lockedRef.current || submittingRef.current) return;
 
       const isF12 = e.key === 'F12';
-      const isCtrlShiftI = e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i');
-      const isCtrlShiftJ = e.ctrlKey && e.shiftKey && (e.key === 'J' || e.key === 'j');
-      const isCtrlShiftC = e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c');
+      const key = e.key.toLowerCase();
+      const isCtrlShiftI = e.ctrlKey && e.shiftKey && key === 'i';
+      const isCtrlShiftJ = e.ctrlKey && e.shiftKey && key === 'j';
+      const isCtrlShiftC = e.ctrlKey && e.shiftKey && key === 'c';
       const isCtrlShiftK = e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k');
-      const isCtrlU = e.ctrlKey && (e.key === 'u' || e.key === 'U');
+      const isMacDevtools = e.metaKey && e.altKey && ['i', 'j', 'c'].includes(key);
+      const isViewSource = (e.ctrlKey && key === 'u') || (e.metaKey && e.altKey && key === 'u');
       // Phím chụp màn hình
       const isPrintScreen = e.key === 'PrintScreen' || e.key === 'Snapshot';
+      const isMacScreenshot = e.metaKey && e.shiftKey && ['3', '4', '5'].includes(e.key);
       // Ctrl+P (in trang) — một số extension dùng print API để capture
-      const isCtrlP = e.ctrlKey && (e.key === 'p' || e.key === 'P');
+      const isPrint = (e.ctrlKey || e.metaKey) && key === 'p';
 
       // Intercept F11 to force HTML5 Fullscreen API
       if (e.key === 'F11') {
@@ -479,19 +506,25 @@ function StudentExam() {
         return;
       }
 
-      if (isF12 || isCtrlShiftI || isCtrlShiftJ || isCtrlShiftC || isCtrlShiftK || isCtrlU) {
+      if (isF12 || isCtrlShiftI || isCtrlShiftJ || isCtrlShiftC || isCtrlShiftK || isMacDevtools) {
         e.preventDefault();
         e.stopPropagation();
         triggerDevtoolsViolation();
       }
 
-      if (isPrintScreen) {
+      if (isViewSource) {
+        e.preventDefault();
+        e.stopPropagation();
+        void handleViolation('view_source');
+      }
+
+      if (isPrintScreen || isMacScreenshot) {
         e.preventDefault();
         e.stopPropagation();
         void handleViolation('screenshot_attempt');
       }
 
-      if (isCtrlP) {
+      if (isPrint) {
         e.preventDefault();
         e.stopPropagation();
         void handleViolation('print_attempt');
@@ -672,6 +705,20 @@ function StudentExam() {
       contentPreview: preview,
       textLength,
       questionId: currentQuestionIdRef.current,
+    });
+  }, [started, locked, submitting, handleViolation]);
+
+  const handleRapidInsertion = useCallback((metadata: {
+    insertedChars: number;
+    changeCount: number;
+    windowMs: number;
+    maxSingleChange: number;
+  }) => {
+    if (!started || locked || submitting) return;
+    void handleViolation('rapid_text_insertion', {
+      textLength: metadata.insertedChars,
+      questionId: currentQuestionIdRef.current,
+      metadata,
     });
   }, [started, locked, submitting, handleViolation]);
 
@@ -969,6 +1016,7 @@ function StudentExam() {
                     onCutAttempt={handleCutAttempt}
                     onPasteAttempt={handlePasteAttempt}
                     onSuspiciousPaste={handleSuspiciousPaste}
+                    onRapidInsertion={handleRapidInsertion}
                     defaultLanguage={detectLanguage(
                       currentQuestion.type,
                       currentQuestion.module
@@ -1145,12 +1193,12 @@ function StudentExam() {
               key={i}
               className="absolute text-[26px] font-bold whitespace-nowrap text-black/5 select-none"
               style={{
-                top: `${(i % 3) * 33 + 8}%`,
-                left: `${Math.floor(i / 3) * 26}%`,
+                top: `${((i % 3) * 33 + 8 + Math.floor(watermarkTime.getTime() / 15000) * 7) % 92}%`,
+                left: `${(Math.floor(i / 3) * 26 + Math.floor(watermarkTime.getTime() / 15000) * 11) % 94}%`,
                 transform: 'rotate(-25deg)',
               }}
             >
-              {studentEmail || studentId} · {watermarkTime.toLocaleString('vi-VN')}
+              {studentEmail || studentId} · SID {studentId} · {watermarkTime.toLocaleString('vi-VN')}
             </span>
           ))}
         </div>

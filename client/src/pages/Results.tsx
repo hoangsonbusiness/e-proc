@@ -157,6 +157,13 @@ function Results() {
                             </code>
                           </div>
                         )}
+                        {batch?.record_mode === 's3' && (
+                          <div className={`mt-1.5 text-xs font-semibold ${r.recording_parts?.length ? 'text-emerald-700' : 'text-red-700'}`}>
+                            {r.recording_parts?.length
+                              ? `Recording evidence: ${r.recording_parts.length} part(s), ${r.recording_parts.reduce((sum: number, part: any) => sum + Number(part.byte_size || 0), 0).toLocaleString()} bytes`
+                              : 'Recording evidence missing'}
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-center">
                         <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${r.student.status === 'submitted'
@@ -437,6 +444,20 @@ function Results() {
                           Q: {ev.question_id}
                         </span>
                       )}
+                      {ev.metadata_json && (() => {
+                        try {
+                          const metadata = typeof ev.metadata_json === 'string'
+                            ? JSON.parse(ev.metadata_json)
+                            : ev.metadata_json;
+                          return (
+                            <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded font-mono">
+                              {Object.entries(metadata).map(([key, value]) => `${key}=${value}`).join(' · ')}
+                            </span>
+                          );
+                        } catch (_) {
+                          return null;
+                        }
+                      })()}
                     </div>
                     {ev.content_preview && (
                       <div className="p-0">

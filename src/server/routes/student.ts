@@ -6,7 +6,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import type { StudentTokenPayload } from '../middleware/studentAuth.js';
-import { createRecordingUploadUrl, isS3Configured } from '../services/s3.js';
+import { createRecordingUploadUrl, inspectRecordingObject, isS3Configured } from '../services/s3.js';
 
 dotenv.config();
 
@@ -163,11 +163,49 @@ router.post('/select-email', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/exam/start', async (req: Request, res: Response) => {
+router.post('/exam/environment-ack', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const studentId = req.studentPayload!.studentId;
+    const { acknowledgements, environment } = req.body || {};
+    const required = [
+      'focusMode', 'notifications', 'iphoneMirroring',
+      'universalControl', 'externalDisplays', 'clearWorkspace',
+    ];
+    if (!acknowledgements || required.some((key) => acknowledgements[key] !== true)) {
+      return res.status(400).json({ error: 'All exam environment acknowledgements are required' });
+    }
+
+    const snapshot = {
+      acknowledgements: Object.fromEntries(required.map((key) => [key, true])),
+      environment: {
+        platform: typeof environment?.platform === 'string' ? environment.platform.slice(0, 100) : 'unknown',
+        screenCheckSupported: environment?.screenCheckSupported === true,
+        screenExtended: typeof environment?.screenExtended === 'boolean' ? environment.screenExtended : null,
+        screenWidth: Number.isFinite(environment?.screenWidth) ? Math.trunc(environment.screenWidth) : null,
+        screenHeight: Number.isFinite(environment?.screenHeight) ? Math.trunc(environment.screenHeight) : null,
+        devicePixelRatio: Number.isFinite(environment?.devicePixelRatio) ? environment.devicePixelRatio : null,
+      },
+    };
+
+    if (snapshot.environment.screenExtended === true) {
+      return res.status(409).json({ error: 'Multiple or extended displays are not allowed during the exam' });
+    }
+
+    await db.query(
+      'UPDATE students SET environment_acknowledged_at = ?, environment_snapshot = ? WHERE id = ?',
+      [new Date().toISOString(), JSON.stringify(snapshot), studentId]
+    );
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/exam/start', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     
-    const { student_id } = req.body;
+    const student_id = req.studentPayload!.studentId;
     console.log('[startExam] student_id:', student_id);
 
     const studentResult = await db.query(
@@ -179,6 +217,10 @@ router.post('/exam/start', async (req: Request, res: Response) => {
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.environment_acknowledged_at) {
+      return res.status(428).json({ error: 'Exam environment checklist must be completed before starting' });
     }
 
     console.log('[startExam] student.status:', student.status);
@@ -295,7 +337,7 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
-      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
+      SELECT s.status, s.exam_deadline, s.disconnected_at, s.environment_acknowledged_at, b.duration
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.id = ?
@@ -304,6 +346,10 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
+    }
+
+    if (!student.environment_acknowledged_at) {
+      return res.status(428).json({ error: 'Exam environment checklist must be completed before loading questions' });
     }
 
     if (student.status === 'submitted') {
@@ -495,7 +541,7 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
     const studentId = req.studentPayload!.studentId.toString();
     const batchId = req.studentPayload!.batchId;
 
-    const { type, content_preview, text_length, question_id } = req.body;
+    const { type, content_preview, text_length, question_id, metadata } = req.body;
 
     // Validate violation type — chỉ chấp nhận các loại hợp lệ.
     // suspicious_paste & focus_lost giờ là lockable (không còn log-only) —
@@ -508,22 +554,26 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
       'cut_attempt',
       'paste_attempt',
       'devtools_open',
+      'view_source',
       'extension_panel',
       'screenshot_attempt',  // phím PrintScreen / PrtSc
       'print_attempt',       // Ctrl+P hoặc browser print dialog
       'suspicious_paste',    // Thâm nhập text lớn bất thường qua Maccy/Win+V Accessibility API
       'focus_lost',          // Mất focus cửa sổ (Split View / mở app khác trên macOS)
       'recording_stopped',   // Thí sinh tự dừng chia sẻ màn hình giữa bài (getDisplayMedia track ended)
+      'rapid_text_insertion',
+      'multiple_display_detected',
     ];
     if (!type || !validTypes.includes(type)) {
       return res.status(400).json({ error: 'Invalid violation type' });
     }
 
+    const forensicOnly = type === 'rapid_text_insertion' || type === 'multiple_display_detected';
     const existingResult = await db.query('SELECT * FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
 
-    if (existingResult.rows.length === 0) {
+    if (!forensicOnly && existingResult.rows.length === 0) {
       await db.query('INSERT INTO violations (student_id, type, count) VALUES (?, ?, 1)', [parseInt(studentId), type]);
-    } else {
+    } else if (!forensicOnly) {
       await db.query('UPDATE violations SET count = count + 1 WHERE id = ?', [existingResult.rows[0].id]);
     }
 
@@ -536,9 +586,12 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
       const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
       const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
       const qId = typeof question_id === 'string' ? question_id : null;
+      const metadataJson = metadata && typeof metadata === 'object'
+        ? JSON.stringify(metadata).slice(0, 2000)
+        : null;
       await db.query(
-        'INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id) VALUES (?, ?, ?, ?, ?, ?)',
-        [parseInt(studentId), batchId, type, textLen, preview, qId]
+        'INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [parseInt(studentId), batchId, type, textLen, preview, qId, metadataJson]
       );
     } catch (logErr: any) {
       console.error('[violation] forensic log insert failed (non-fatal):', logErr?.message);
@@ -552,11 +605,12 @@ router.post('/violation', studentAuthMiddleware, async (req: Request, res: Respo
 
     // recording_stopped: dừng chia sẻ màn hình = cố ý trốn giám sát → khóa NGAY lần đầu.
     // Các type khác: khóa khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
-    const locked = type === 'recording_stopped' || currentCount >= 2 || total >= 2;
+    const locked = !forensicOnly && (type === 'recording_stopped' || currentCount >= 2 || total >= 2);
     res.json({
       violation_count: currentCount,
       total_violations: total,
       locked,
+      forensic_only: forensicOnly,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -588,6 +642,13 @@ router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, r
     if (!Number.isInteger(idx) || idx < 0) {
       return res.status(400).json({ error: 'Invalid partIndex' });
     }
+    const existingPart = await db.query(
+      'SELECT id FROM recording_parts WHERE student_id = ? AND part_index = ?',
+      [studentId, idx]
+    );
+    if (existingPart.rows.length > 0) {
+      return res.status(409).json({ error: 'Recording part has already been finalized' });
+    }
 
     const { url, key } = await createRecordingUploadUrl({
       batchId,
@@ -599,6 +660,28 @@ router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, r
     res.json({ url, key });
   } catch (error: any) {
     console.error('[recording-url] failed:', error?.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/exam/recording-complete', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const studentId = req.studentPayload!.studentId;
+    const batchId = req.studentPayload!.batchId;
+    const partIndex = Number(req.body?.partIndex);
+    if (!Number.isInteger(partIndex) || partIndex < 0) {
+      return res.status(400).json({ error: 'Invalid recording part metadata' });
+    }
+    const objectKey = `recordings/${batchId}/${studentId}/part${String(partIndex).padStart(3, '0')}.webm`;
+    const { byteSize } = await inspectRecordingObject(objectKey);
+    if (byteSize <= 0) return res.status(422).json({ error: 'Uploaded recording part is empty' });
+    await db.query(`
+      INSERT INTO recording_parts (student_id, batch_id, part_index, object_key, byte_size, uploaded_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (student_id, part_index) DO NOTHING
+    `, [studentId, batchId, partIndex, objectKey, Math.trunc(byteSize), new Date().toISOString()]);
+    res.json({ success: true, key: objectKey });
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });

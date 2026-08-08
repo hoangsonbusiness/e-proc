@@ -91,7 +91,9 @@ async function uploadPart(part: PendingPart): Promise<boolean> {
       headers: { 'Content-Type': part.blob.type || 'video/webm' },
       body: part.blob,
     });
-    return putRes.ok;
+    if (!putRes.ok) return false;
+    await studentApi.completeRecordingPart(part.partIndex, part.blob.size);
+    return true;
   } catch (err) {
     console.error('[examRecorder] uploadPart failed:', err);
     return false;

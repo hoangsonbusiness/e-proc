@@ -162,6 +162,8 @@ await client.query(`
       exam_deadline TIMESTAMP,
       disconnected_at TIMESTAMP,
       recording_password TEXT,
+      environment_acknowledged_at TIMESTAMP,
+      environment_snapshot TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -172,6 +174,8 @@ await client.query(`
     { col: 'exam_deadline', def: 'TIMESTAMP' },
     { col: 'disconnected_at', def: 'TIMESTAMP' },
     { col: 'recording_password', def: 'TEXT' },
+    { col: 'environment_acknowledged_at', def: 'TIMESTAMP' },
+    { col: 'environment_snapshot', def: 'TEXT' },
   ];
   for (const { col, def } of colChecks) {
     try {
@@ -223,10 +227,27 @@ await client.query(`
       text_length INTEGER,
       content_preview VARCHAR(500),
       question_id VARCHAR(50),
+      metadata_json TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
   console.log('[DB] violation_events ready');
+  try {
+    await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS metadata_json TEXT');
+  } catch (_) { /* already exists */ }
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS recording_parts (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL,
+      part_index INTEGER NOT NULL,
+      object_key TEXT NOT NULL,
+      byte_size INTEGER,
+      uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(student_id, part_index)
+    )
+  `);
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS ai_queue (
@@ -317,6 +338,8 @@ function initSqlite() {
         exam_deadline DATETIME,
         disconnected_at DATETIME,
         recording_password TEXT,
+        environment_acknowledged_at DATETIME,
+        environment_snapshot TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -336,6 +359,12 @@ function initSqlite() {
     }
     if (!colNames.includes('recording_password')) {
       sqliteDb.exec('ALTER TABLE students ADD COLUMN recording_password TEXT');
+    }
+    if (!colNames.includes('environment_acknowledged_at')) {
+      sqliteDb.exec('ALTER TABLE students ADD COLUMN environment_acknowledged_at DATETIME');
+    }
+    if (!colNames.includes('environment_snapshot')) {
+      sqliteDb.exec('ALTER TABLE students ADD COLUMN environment_snapshot TEXT');
     }
     
     sqliteDb.exec(`
@@ -374,7 +403,26 @@ function initSqlite() {
         text_length INTEGER,
         content_preview TEXT,
         question_id TEXT,
+        metadata_json TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+    const violationEventCols = sqliteDb.prepare("PRAGMA table_info(violation_events)").all() as { name: string }[];
+    if (!violationEventCols.some((col) => col.name === 'metadata_json')) {
+      sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN metadata_json TEXT');
+    }
+
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS recording_parts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        part_index INTEGER NOT NULL,
+        object_key TEXT NOT NULL,
+        byte_size INTEGER,
+        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(student_id, part_index),
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
       )
     `);

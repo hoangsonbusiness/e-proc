@@ -1033,10 +1033,12 @@ router.post('/students/:studentId/reset', async (req, res) => {
         const { studentId } = req.params;
         await db.query(`
       UPDATE students 
-      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL 
+      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL,
+          environment_acknowledged_at = NULL, environment_snapshot = NULL
       WHERE id = ?
     `, [parseInt(studentId)]);
         await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
+        await db.query('DELETE FROM recording_parts WHERE student_id = ?', [parseInt(studentId)]);
         res.json({ success: true, message: 'Student exam reset successfully' });
     }
     catch (error) {
@@ -1083,7 +1085,7 @@ router.get('/batches/:id/results', async (req, res) => {
             let violationEvents = [];
             try {
                 const violationEventsResult = await db.query(`
-          SELECT type, text_length, content_preview, question_id, created_at
+          SELECT type, text_length, content_preview, question_id, metadata_json, created_at
           FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
         `, [student.id]);
                 violationEvents = violationEventsResult.rows;
@@ -1091,12 +1093,24 @@ router.get('/batches/:id/results', async (req, res) => {
             catch (evErr) {
                 console.error('[results] violation_events query failed (non-fatal):', evErr?.message);
             }
+            let recordingParts = [];
+            try {
+                const recordingPartsResult = await db.query(`
+          SELECT part_index, object_key, byte_size, uploaded_at
+          FROM recording_parts WHERE student_id = ? ORDER BY part_index
+        `, [student.id]);
+                recordingParts = recordingPartsResult.rows;
+            }
+            catch (recordErr) {
+                console.error('[results] recording_parts query failed (non-fatal):', recordErr?.message);
+            }
             results.push({
                 student,
                 questions: questionsResult.rows,
                 violations: parseInt(violationsResult.rows[0]?.total) || 0,
                 violations_breakdown: violationsBreakdown,
                 violation_events: violationEvents,
+                recording_parts: recordingParts,
             });
         }
         res.json(results);

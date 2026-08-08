@@ -157,6 +157,16 @@ export const studentApi = {
   selectEmail: (studentId: number, email: string) =>
     api.post('/student/select-email', { student_id: studentId, email }),
 
+  acknowledgeEnvironment: (
+    acknowledgements: Record<string, boolean>,
+    environment: any,
+    studentToken: string
+  ) => api.post(
+    '/student/exam/environment-ack',
+    { acknowledgements, environment },
+    { headers: { Authorization: `Bearer ${studentToken}` } }
+  ),
+
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
 
@@ -172,18 +182,22 @@ export const studentApi = {
 
   reportViolation: (
     type: string,
-    meta?: { contentPreview?: string; textLength?: number; questionId?: string }
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number> }
   ) =>
     api.post('/student/violation', {
       type,
       content_preview: meta?.contentPreview,
       text_length: meta?.textLength,
       question_id: meta?.questionId,
+      metadata: meta?.metadata,
     }),
 
   // Xin presigned PUT URL để upload 1 phần video record thẳng lên S3
   getRecordingUploadUrl: (partIndex: number, contentType: string) =>
     api.post('/student/exam/recording-url', { partIndex, contentType }),
+
+  completeRecordingPart: (partIndex: number, byteSize: number) =>
+    api.post('/student/exam/recording-complete', { partIndex, byteSize }),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

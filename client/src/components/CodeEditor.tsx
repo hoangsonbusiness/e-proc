@@ -57,6 +57,7 @@ interface CodeEditorProps {
   // Optional: phát hiện paste lớn qua Maccy/Win+V Accessibility API.
   // Truyền preview (500 ký tự đầu) + độ dài thật để backend ghi forensic log.
   onSuspiciousPaste?: (preview: string, textLength: number) => void;
+  onRapidInsertion?: (metadata: { insertedChars: number; changeCount: number; windowMs: number; maxSingleChange: number }) => void;
   disabled?: boolean;
   defaultLanguage?: SupportedLanguage;
   height?: string;
@@ -73,6 +74,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
       onCutAttempt,
       onPasteAttempt,
       onSuspiciousPaste,
+      onRapidInsertion,
       disabled = false,
       defaultLanguage = 'java',
       height = '400px',
@@ -1131,10 +1133,37 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           });
         }
 
+        if (onRapidInsertion) {
+          let samples: { at: number; chars: number }[] = [];
+          let lastFired = 0;
+          const windowMs = 2500;
+
+          editor.onDidChangeModelContent((e) => {
+            if (e.isFlush) return;
+            const now = Date.now();
+            const insertions = e.changes.map((change) => change.text.length).filter((length) => length > 0);
+            if (insertions.length === 0) return;
+            for (const chars of insertions) samples.push({ at: now, chars });
+            samples = samples.filter((sample) => now - sample.at <= windowMs);
+
+            const insertedChars = samples.reduce((sum, sample) => sum + sample.chars, 0);
+            const maxSingleChange = Math.max(...samples.map((sample) => sample.chars));
+            if (insertedChars >= 300 && maxSingleChange < 300 && now - lastFired >= 10000) {
+              lastFired = now;
+              onRapidInsertion({
+                insertedChars,
+                changeCount: samples.length,
+                windowMs,
+                maxSingleChange,
+              });
+            }
+          });
+        }
+
         // Auto-focus
         editor.focus();
       },
-      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste]
+      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste, onRapidInsertion]
     );
 
     // ── Language change handler ────────────────────────────────────────────

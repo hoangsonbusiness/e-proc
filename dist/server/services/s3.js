@@ -6,7 +6,7 @@
 //
 // Xóa video: dùng S3 Lifecycle rule trên bucket (tự xóa sau N ngày) — không cần
 // script backend.
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RECORDINGS_BUCKET || '';
@@ -46,4 +46,8 @@ export async function createRecordingUploadUrl(params) {
     });
     const url = await getSignedUrl(getClient(), command, { expiresIn: URL_EXPIRES_SECONDS });
     return { url, key };
+}
+export async function inspectRecordingObject(key) {
+    const result = await getClient().send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+    return { byteSize: Number(result.ContentLength || 0) };
 }
