@@ -80,6 +80,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `violations`
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
   - `recording_parts` (S3 recording-part metadata verified by backend `HeadObject`; unique per student + part index)
+  - `exam_sessions` (anti-cheat session tracking — one row per `(student_id, jti, ip)`; `last_seen` upserted on each exam request; used to detect concurrent multi-client/multi-IP use — see Concurrent-session detection section)
   - `ai_queue`
   - `ai_settings`
   - `admin_users`
@@ -124,8 +125,10 @@ When debugging student exam state, inspect:
   - backend buffers answers through `src/server/cache.ts`
   - buffered answers are flushed periodically or on submit
 - Violations are reported from the frontend through `studentApi.reportViolation(type)` and stored in the `violations` table
-- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`
-- Locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`. `suspicious_paste` and `focus_lost` remain lockable; `rapid_text_insertion` and `multiple_display_detected` are forensic-only. **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** — stopping screen share is treated as deliberate evasion.
+- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`, `concurrent_session`
+- Locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`. `suspicious_paste` and `focus_lost` remain lockable; `rapid_text_insertion`, `multiple_display_detected`, and `concurrent_session` are forensic-only in the `violations` table. **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** — stopping screen share is treated as deliberate evasion.
+- **Backend enforces the lock itself (2026-08-09):** when the `/violation` handler computes `locked`, it now *server-side* auto-submits (`flushAnswers` + `status='submitted'` + `finalizeSubmission`, only if still `in_progress`) instead of merely returning the `locked` flag for the frontend to honor. An automation client that ignores the response can no longer keep working past the threshold.
+- **`concurrent_session` (2026-08-09) locks via a different path** — not the count thresholds above; it auto-submits when time-overlapping requests from ≥2 IPs are seen. See Concurrent-session detection section.
 - Every violation report is additionally appended to the `violation_events` table (append-only forensic log); `suspicious_paste` events carry a `content_preview` (first 500 chars of the pasted text) — see Anti-Cheat v2 section
 - `rapid_text_insertion` and `multiple_display_detected` are **forensic-only**: they are appended to `violation_events` with `metadata_json`, but are not inserted/incremented in `violations` and never contribute to auto-lock thresholds.
 - Anti-cheat behavior is concentrated in `client/src/pages/StudentExam.tsx`:
@@ -206,6 +209,30 @@ The `violations` table is keyed by `(student_id, type)` and only stores a runnin
 - `rapid_text_insertion` is forensic-only to avoid auto-lock false positives from Monaco completion/formatting behavior. Calibrate from production evidence before ever making it lockable.
 - `examEnvironment.ts` reads `screen.isExtended` when the browser exposes it. `StudentConfirm` blocks Start when an extended display is detected. `StudentExam` polls every 3 seconds and records forensic-only `multiple_display_detected` if an additional display appears mid-exam.
 - Browser display detection is best-effort and does not prove that Sidecar/external displays are absent when the API is unsupported or unavailable. There is no candidate checkbox/acknowledgement fallback because self-attestation is not a security control.
+
+**7. Concurrent-session / multi-IP detection (`concurrent_session`, added 2026-08-09)**
+
+Addresses the highest-risk attack vector for a technical candidate: driving the exam via the HTTP API / a second client using the same valid student JWT, which produces none of the frontend anti-cheat events. Detection is purely **server-side** (the frontend has no involvement).
+
+- **`jti`:** each `POST /student/verify` mints a fresh `jti` (`crypto.randomUUID()`) into the JWT payload (`StudentTokenPayload.jti`). Distinct browser sessions therefore carry distinct `jti`s.
+- **Tracking:** `sessionTracker` middleware (`src/server/middleware/sessionTracker.ts`) runs **after `studentAuthMiddleware`** on `/exam/questions`, `/exam/answer`, `/violation` (deliberately **not** on `/exam/disconnect` — beacon IP/UA are unreliable). It upserts one `exam_sessions` row per `(student_id, jti, ip)` (`ON CONFLICT ... DO UPDATE last_seen, user_agent` — valid on both PostgreSQL and better-sqlite3), refreshing `last_seen` and storing the User-Agent. `req.ip` is authoritative because `app.set('trust proxy', 1)` is set — verify Vercel forwards `x-forwarded-for` correctly, otherwise all rows collapse to one IP.
+- **Evaluation:** `detectConcurrentSession(studentId)` reads rows with `last_seen` within `SESSION_WINDOW_SECONDS` (60s) and computes four signals: ≥2 distinct IPs, ≥2 distinct User-Agents, ≥2 distinct `jti`s, and **time-overlap** (two rows with *different* IPs whose `last_seen` differ by < `OVERLAP_SECONDS` = 10s). `suspicious` = any signal; **`lockable` = time-overlap only**.
+- **Why only overlap locks:** a candidate legitimately switching wifi→4G changes IP *sequentially*, not overlapping — that is `suspicious` (logged) but **not** locked, avoiding the most common false positive. Two genuinely-concurrent clients produce overlapping requests.
+- **Enforcement:** `enforceConcurrentSession()` in `student.ts` is called from both `/exam/questions` (polled regularly, so it catches a second client even if it never reports a violation) and `/violation`. On `suspicious` it appends a forensic `concurrent_session` row to `violation_events` (`metadata_json` = `{ ips, userAgents, jtis, overlap }`, `content_preview` = the IP list); on `lockable` (still `in_progress`) it additionally auto-submits and returns `410 { reason: 'concurrent_session' }` (questions) / `locked: true` (violation). All detect/log/lock steps are wrapped in try/catch so a missing table on an old DB never breaks the exam.
+- **Reset:** `POST /admin/students/:id/reset` deletes `exam_sessions` rows so a re-attempt does not false-positive against the prior attempt's sessions.
+- **Admin UI:** `Results.tsx` shows a pulsing red `⚠️ Multi-session (N IP) ×count` badge on any student with `concurrent_session` events; the forensic detail popup renders the IP/UA/jti metadata.
+- **Constants** (`SESSION_WINDOW_SECONDS` = 60, `OVERLAP_SECONDS` = 10) live in `sessionTracker.ts` and are the tuning knobs; adjust there if false-positive/negative rates warrant.
+- **Migration:** `migrations/20260809_concurrent_session_detection.sql` (idempotent) creates `exam_sessions` + index for Supabase; run it manually before deploying, like the other migrations. The DB layer also creates the table automatically on startup for both PostgreSQL and SQLite.
+- **Limits:** heartbeat/tracking can be spoofed by an attacker who fully controls the client and mimics one IP/UA — this is a risk signal and forensic aid, not absolute proof. Strong anti-automation still requires a managed device / kiosk browser.
+
+#### Backend request-guard hardening (2026-08-09)
+
+Beyond the anti-cheat layers, several backend guards were added/tightened the same day:
+
+- **`POST /verify` rate-limit:** dedicated `verifyRateLimit` (10 req/min/IP) in `student.ts` on top of the global 200 req/min limiter, to blunt access-code brute-forcing.
+- **`/exam/answer` status guard:** rejects with `410` when the student is `submitted` or past `exam_deadline` — previously it buffered blindly, so answers could be overwritten after a lock/auto-submit.
+- **`/exam/submit` idempotency:** returns early (`{ already: true }`) if already `submitted`, avoiding duplicate flush + AI re-queue.
+- **Security headers / CSP:** `src/server/index.ts` sets `Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, and (prod) HSTS via a hand-rolled middleware (no `helmet` dependency). **The CSP intentionally allows `'unsafe-eval'` and `blob:` in `script-src`/`worker-src` because Monaco requires it** — do not remove those or the editor breaks. This is a deliberate trade-off, not an oversight.
 
 #### Screen recording — three modes: `none` / `local` / `s3` (per-batch `record_mode`)
 
@@ -324,6 +351,7 @@ Batches support two blueprint formats for question assignment:
   - All student API requests carry `Authorization: Bearer <token>` header
   - Requests without token return 401
 - Before deploying the 2026-08-08 schema changes to Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually and confirm its verification query returns both expected rows.
+- Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -332,7 +360,8 @@ Batches support two blueprint formats for question assignment:
 - `client/src/pages/StudentLogin.tsx` (verify flow: access code → studentToken)
 - `client/src/pages/StudentConfirm.tsx` (stores studentToken to localStorage)
 - `client/src/services/api.ts` (request interceptors for both admin and student tokens)
-- `src/server/middleware/studentAuth.ts` (student JWT verification)
+- `src/server/middleware/studentAuth.ts` (student JWT verification; `StudentTokenPayload.jti`)
+- `src/server/middleware/sessionTracker.ts` (concurrent-session tracking + `detectConcurrentSession`)
 - `src/server/routes/student.ts`
 - `src/server/cache.ts`
 - `client/src/hooks/useMonacoJavaCompletions.ts` (IntelliSense snippet sizes — relevant for suspicious_paste threshold calibration)

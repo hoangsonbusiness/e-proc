@@ -194,6 +194,26 @@ function Results() {
                                   ))}
                               </div>
                             )}
+                            {/* Cảnh báo nổi bật: phát hiện phiên thi đồng thời từ nhiều IP/client */}
+                            {r.violation_events && (() => {
+                              const cs = (r.violation_events as any[]).filter((e) => e.type === 'concurrent_session');
+                              if (cs.length === 0) return null;
+                              const ipSet = new Set<string>();
+                              cs.forEach((e) => {
+                                try {
+                                  const m = typeof e.metadata_json === 'string' ? JSON.parse(e.metadata_json) : e.metadata_json;
+                                  (m?.ips || []).forEach((ip: string) => ipSet.add(ip));
+                                } catch (_) { /* ignore */ }
+                              });
+                              return (
+                                <div className="mt-1.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 border border-red-300 text-red-800 rounded text-[10px] font-bold">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse"></span>
+                                    ⚠️ Multi-session{ipSet.size > 0 ? ` (${ipSet.size} IP)` : ''} ×{cs.length}
+                                  </span>
+                                </div>
+                              );
+                            })()}
                             {/* Forensic: xem nội dung paste / thời điểm từng lần vi phạm */}
                             {r.violation_events && r.violation_events.length > 0 && (
                               <button

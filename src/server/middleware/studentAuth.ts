@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 export interface StudentTokenPayload {
   studentId: number;
   batchId: number;
+  jti?: string; // định danh phiên — dùng phát hiện dùng đồng thời nhiều client
 }
 
 // Extend Express Request type
