@@ -6,9 +6,20 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
 import { createRecordingUploadUrl, inspectRecordingObject, isS3Configured } from '../services/s3.js';
+import rateLimit from 'express-rate-limit';
+import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTracker.js';
 dotenv.config();
 const USE_SQLITE = process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production';
 const router = Router();
+// [SEC] Rate-limit riêng cho /verify — chống brute-force access code.
+// 10 lần / phút / IP đủ cho retry hợp lệ nhưng chặn dò mã hàng loạt.
+const verifyRateLimit = rateLimit({
+    windowMs: 60_000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many attempts. Please wait a minute and try again.' },
+});
 const toGMT7 = (utcDate) => {
     return new Date(utcDate.getTime() + 7 * 60 * 60 * 1000);
 };
@@ -56,7 +67,49 @@ async function finalizeSubmission(studentId) {
         }
     }
 }
-router.post('/verify', async (req, res) => {
+/**
+ * Anti-Cheat: đánh giá phiên đồng thời và cưỡng chế xử lý.
+ * - suspicious (đổi IP/UA/nhiều jti) → chỉ ghi forensic 'concurrent_session'.
+ * - lockable (chồng lấn thời gian) → ghi forensic + auto-submit ngay ở backend.
+ * Bọc try/catch toàn bộ: lỗi detect KHÔNG được làm hỏng request thi.
+ * Trả về true nếu đã auto-lock (để caller biết mà dừng phục vụ nội dung).
+ */
+async function enforceConcurrentSession(studentId, batchId) {
+    try {
+        const ev = await detectConcurrentSession(studentId);
+        if (!ev.suspicious)
+            return false;
+        // Ghi forensic một lần cho mỗi lần phát hiện (append-only)
+        try {
+            const metadataJson = JSON.stringify({
+                ips: ev.ips,
+                userAgents: ev.userAgents,
+                jtis: ev.jtis,
+                overlap: ev.overlap,
+            }).slice(0, 2000);
+            await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [studentId, batchId, 'concurrent_session', ev.ips.length, `IPs: ${ev.ips.join(', ')}`.slice(0, 500), null, metadataJson]);
+        }
+        catch (logErr) {
+            console.error('[concurrent_session] forensic log failed (non-fatal):', logErr?.message);
+        }
+        if (ev.lockable) {
+            const statusRow = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
+            if (statusRow.rows[0]?.status === 'in_progress') {
+                await cache.flushAnswers();
+                await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [studentId]);
+                await finalizeSubmission(studentId);
+                console.log('[concurrent_session] Auto-submitted (overlap) student:', studentId, 'ips:', ev.ips);
+                return true;
+            }
+        }
+        return false;
+    }
+    catch (err) {
+        console.error('[enforceConcurrentSession] non-fatal:', err?.message);
+        return false;
+    }
+}
+router.post('/verify', verifyRateLimit, async (req, res) => {
     try {
         const { access_code } = req.body;
         if (!access_code) {
@@ -93,7 +146,9 @@ router.post('/verify', async (req, res) => {
     `, [student.batch_id, access_code]);
         // [C-4] Cấp student token (JWT ngắn hạn 4h) — không trả raw studentId dạng tin tưởng nữa
         const secret = process.env.JWT_SECRET;
-        const studentToken = jwt.sign({ studentId: student.id, batchId: student.batch_id }, secret, { expiresIn: '4h' });
+        // jti: định danh phiên riêng cho mỗi lần verify — dùng phát hiện dùng đồng thời nhiều client
+        const jti = crypto.randomUUID();
+        const studentToken = jwt.sign({ studentId: student.id, batchId: student.batch_id, jti }, secret, { expiresIn: '4h' });
         // Chế độ ghi màn hình: 'none' | 'local' | 's3'. record_enabled cũ vẫn được suy ra để tương thích.
         const recordMode = student.record_mode || (student.record_enabled ? 's3' : 'none');
         // Với mode 'local': cấp password mã hóa zip (server sinh & giữ, học viên KHÔNG thấy).
@@ -238,7 +293,7 @@ router.post('/exam/start', studentAuthMiddleware, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.get('/exam/questions', studentAuthMiddleware, async (req, res) => {
+router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         // [C-4] Đọc studentId từ token đã xác thực, không tin x-student-id header
@@ -300,6 +355,16 @@ router.get('/exam/questions', studentAuthMiddleware, async (req, res) => {
             }
             // Trong grace period: xóa disconnected_at (học viên đã quay lại đúng hạn)
             await db.query('UPDATE students SET disconnected_at = NULL WHERE id = ?', [parseInt(studentId)]);
+        }
+        // === CONCURRENT SESSION GUARD ===
+        // Endpoint này được poll đều đặn nên là nơi tự nhiên để phát hiện phiên song song,
+        // kể cả khi client kia không gửi violation. Auto-lock khi có chồng lấn thời gian.
+        const autoLocked = await enforceConcurrentSession(parseInt(studentId), req.studentPayload.batchId);
+        if (autoLocked) {
+            return res.status(410).json({
+                error: 'Multiple concurrent sessions detected. Your exam has been automatically submitted.',
+                reason: 'concurrent_session'
+            });
         }
         // Tính time_remaining từ server
         let time_remaining = null;
@@ -371,11 +436,24 @@ router.post('/exam/disconnect', studentAuthMiddleware, async (req, res) => {
         res.status(204).send();
     }
 });
-router.post('/exam/answer', studentAuthMiddleware, async (req, res) => {
+router.post('/exam/answer', studentAuthMiddleware, sessionTracker, async (req, res) => {
     try {
         // [C-4] studentId từ token đã xác thực
         const studentId = req.studentPayload.studentId.toString();
         const { question_order, answer } = req.body;
+        // [SEC] Không nhận answer sau khi đã nộp hoặc quá deadline.
+        // Trước đây /answer chỉ buffer mù → sau khi bị khóa/auto-submit vẫn ghi đè được đáp án.
+        const stRow = await db.query('SELECT status, exam_deadline FROM students WHERE id = ?', [parseInt(studentId)]);
+        const st = stRow.rows[0];
+        if (!st) {
+            return res.status(404).json({ error: 'Student not found' });
+        }
+        if (st.status === 'submitted') {
+            return res.status(410).json({ error: 'Exam already submitted', reason: 'submitted' });
+        }
+        if (st.exam_deadline && new Date() >= new Date(st.exam_deadline)) {
+            return res.status(410).json({ error: 'Deadline passed', reason: 'timeout' });
+        }
         // Lưu vào buffer trước
         cache.bufferAnswer(parseInt(studentId), question_order, answer);
         res.json({ success: true, cached: true });
@@ -399,6 +477,15 @@ router.post('/exam/submit', studentAuthMiddleware, async (req, res) => {
     try {
         // [C-4] studentId từ token đã xác thực
         const studentId = req.studentPayload.studentId.toString();
+        // [SEC] Idempotent: nếu đã submitted thì trả OK ngay, không flush/queue lại
+        // (tránh re-queue chấm điểm trùng khi client gọi submit nhiều lần).
+        const stRow = await db.query('SELECT status FROM students WHERE id = ?', [parseInt(studentId)]);
+        if (!stRow.rows[0]) {
+            return res.status(404).json({ error: 'Student not found' });
+        }
+        if (stRow.rows[0].status === 'submitted') {
+            return res.json({ success: true, message: 'Exam already submitted.', already: true });
+        }
         await cache.flushAnswers();
         await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
         await finalizeSubmission(parseInt(studentId));
@@ -409,11 +496,16 @@ router.post('/exam/submit', studentAuthMiddleware, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-router.post('/violation', studentAuthMiddleware, async (req, res) => {
+router.post('/violation', studentAuthMiddleware, sessionTracker, async (req, res) => {
     try {
         // [C-4] studentId từ token đã xác thực
         const studentId = req.studentPayload.studentId.toString();
         const batchId = req.studentPayload.batchId;
+        // [SEC] Kiểm tra phiên đồng thời trước — nếu chồng lấn thời gian, backend auto-lock ngay.
+        const autoLocked = await enforceConcurrentSession(parseInt(studentId), batchId);
+        if (autoLocked) {
+            return res.json({ violation_count: 0, total_violations: 0, locked: true, reason: 'concurrent_session' });
+        }
         const { type, content_preview, text_length, question_id, metadata } = req.body;
         // Validate violation type — chỉ chấp nhận các loại hợp lệ.
         // suspicious_paste & focus_lost giờ là lockable (không còn log-only) —
@@ -435,6 +527,7 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
             'recording_stopped', // Thí sinh tự dừng chia sẻ màn hình giữa bài (getDisplayMedia track ended)
             'rapid_text_insertion',
             'multiple_display_detected',
+            'concurrent_session', // dùng đồng thời nhiều client/IP — server tự phát hiện & ghi
         ];
         if (!type || !validTypes.includes(type)) {
             return res.status(400).json({ error: 'Invalid violation type' });
@@ -471,6 +564,23 @@ router.post('/violation', studentAuthMiddleware, async (req, res) => {
         // recording_stopped: dừng chia sẻ màn hình = cố ý trốn giám sát → khóa NGAY lần đầu.
         // Các type khác: khóa khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
         const locked = !forensicOnly && (type === 'recording_stopped' || currentCount >= 2 || total >= 2);
+        // [SEC] Cưỡng chế nộp bài ở BACKEND khi đạt ngưỡng khóa — không phụ thuộc frontend auto-submit.
+        // Trước đây chỉ trả cờ `locked` cho client; một client bị điều khiển (automation) có thể phớt lờ
+        // response và tiếp tục làm bài. Giờ server tự set status='submitted' + chấm điểm ngay.
+        if (locked) {
+            try {
+                const statusRow = await db.query('SELECT status FROM students WHERE id = ?', [parseInt(studentId)]);
+                if (statusRow.rows[0]?.status === 'in_progress') {
+                    await cache.flushAnswers();
+                    await db.query("UPDATE students SET status = 'submitted' WHERE id = ?", [parseInt(studentId)]);
+                    await finalizeSubmission(parseInt(studentId));
+                    console.log('[violation] Auto-submitted (locked) student:', studentId, 'type:', type);
+                }
+            }
+            catch (lockErr) {
+                console.error('[violation] auto-submit on lock failed:', lockErr?.message);
+            }
+        }
         res.json({
             violation_count: currentCount,
             total_violations: total,

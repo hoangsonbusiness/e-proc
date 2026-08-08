@@ -1038,6 +1038,8 @@ router.post('/students/:studentId/reset', async (req, res) => {
     `, [parseInt(studentId)]);
         await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
         await db.query('DELETE FROM recording_parts WHERE student_id = ?', [parseInt(studentId)]);
+        // Xóa phiên cũ để lần thi mới không bị false-positive concurrent_session
+        await db.query('DELETE FROM exam_sessions WHERE student_id = ?', [parseInt(studentId)]);
         res.json({ success: true, message: 'Student exam reset successfully' });
     }
     catch (error) {

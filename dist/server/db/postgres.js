@@ -230,6 +230,26 @@ async function initPostgres() {
       UNIQUE(student_id, part_index)
     )
   `);
+    // Anti-Cheat: theo dõi phiên thi để phát hiện dùng đồng thời nhiều client/IP.
+    // Mỗi cặp (student × jti × ip) một dòng; đổi IP tạo dòng mới. last_seen cập nhật mỗi request.
+    await client.query(`
+    CREATE TABLE IF NOT EXISTS exam_sessions (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER,
+      jti TEXT,
+      ip TEXT,
+      user_agent TEXT,
+      first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(student_id, jti, ip)
+    )
+  `);
+    try {
+        await client.query('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
+    }
+    catch (_) { /* ignore */ }
+    console.log('[DB] exam_sessions ready');
     await client.query(`
     CREATE TABLE IF NOT EXISTS ai_queue (
       id SERIAL PRIMARY KEY,
@@ -386,6 +406,21 @@ function initSqlite() {
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
       )
     `);
+        sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS exam_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER,
+        jti TEXT,
+        ip TEXT,
+        user_agent TEXT,
+        first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(student_id, jti, ip),
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+        sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS ai_queue (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
