@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
 import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, Code, ShieldAlert, Cpu } from 'lucide-react';
+import DOMPurify from 'dompurify';
 
 function Results() {
   const { id } = useParams<{ id: string }>();
@@ -73,8 +74,22 @@ function Results() {
 
   const getAverageScore = (student: any) => {
     const scores = student.questions?.filter((q: any) => q.ai_score !== null).map((q: any) => q.trainer_score ?? q.ai_score) || [];
-    if (scores.length === 0) return 0;
-    return (scores.reduce((a: number, b: number) => a + b, 0) / scores.length).toFixed(1);
+    if (scores.length === 0) return '0.0';
+    return (scores.reduce((a: number, b: number) => a + Number(b), 0) / scores.length).toFixed(1);
+  };
+
+  const sanitizeQuestion = (html: string): string => {
+    return DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: [
+        'br', 'p', 'strong', 'em', 'b', 'i', 'u',
+        'pre', 'code', 'ul', 'ol', 'li',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'span', 'div', 'blockquote',
+        'table', 'thead', 'tbody', 'tr', 'th', 'td'
+      ],
+      ALLOWED_ATTR: ['class', 'style'],
+      FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onfocus', 'onblur'],
+    });
   };
 
   return (
@@ -261,7 +276,10 @@ function Results() {
                     <div className="p-5 space-y-4">
                       <div>
                         <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">Question</span>
-                        <p className="text-slate-900 text-sm leading-relaxed">{q.question_sample}</p>
+                        <div
+                          className="prose prose-sm prose-slate max-w-none text-slate-900 leading-relaxed"
+                          dangerouslySetInnerHTML={{ __html: sanitizeQuestion(q.question_sample || '') }}
+                        />
                       </div>
                       
                       <div>

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import { ArrowLeft, FolderKanban, ListChecks, Plus } from 'lucide-react';
 
 const BATCH_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type BatchPageSize = typeof BATCH_PAGE_SIZE_OPTIONS[number];
@@ -718,36 +719,32 @@ function BatchManagement() {
   // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 md:p-8">
-      <div className="max-w-7xl mx-auto space-y-6">
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div>
-            <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Batch Management</h1>
-            <p className="text-slate-500 mt-1">Manage exam batches, blueprints, and students</p>
+    <div className="min-h-screen bg-slate-50">
+      <div className="container space-y-6">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-slate-200 gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-emerald-100 text-emerald-600 rounded-lg">
+              <FolderKanban size={24} />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0 border-none pb-0">Batch Management</h1>
           </div>
-          <Link to="/admin/dashboard" className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-colors shadow-sm">
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-            Back to Dashboard
+          <Link to="/admin/dashboard" className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-50 transition-colors shadow-sm">
+            <ArrowLeft size={16} />
+            <span className="hidden sm:inline">Back to Dashboard</span>
           </Link>
         </div>
 
         <AdminNav />
 
-        <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-200">
-          <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-            <svg className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-            </svg>
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white px-6 py-4 rounded-xl shadow-sm border border-slate-200 gap-4">
+          <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2 m-0 border-none pb-0">
+            <ListChecks size={18} className="text-slate-500" />
             Batches List
-          </h2>
+          </h3>
           <button onClick={() => setShowForm(!showForm)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm ${showForm ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
             {showForm ? 'Cancel' : (
               <>
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                </svg>
+                <Plus size={16} />
                 Create New Batch
               </>
             )}
@@ -843,7 +840,7 @@ function BatchManagement() {
                 </div>
               </div>
 
-            <h4 style={{ marginTop: 20, marginBottom: 10 }}>Exam Blueprint (Total: {totalQuestions}/100)</h4>
+            <h4 className="mt-6 mb-3 text-base font-bold text-slate-900">Exam Blueprint (Total: {totalQuestions}/100)</h4>
 
             {/* Blueprint Mode Toggle */}
             <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
@@ -1125,7 +1122,7 @@ function BatchManagement() {
       {/* ── Batches Table ──────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <h3 className="text-lg font-bold text-slate-800">
+          <h3 className="text-lg font-bold text-slate-900 m-0 border-none pb-0">
             Batches List <span className="text-slate-400 font-normal ml-1">({batches.length} total)</span>
           </h3>
           <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">

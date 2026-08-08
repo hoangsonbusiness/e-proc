@@ -1252,6 +1252,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
               acceptSuggestionOnEnter: 'on',
               tabCompletion: 'on',
               parameterHints: { enabled: true },
+              fixedOverflowWidgets: true,
               // Formatting
               tabSize: 4,
               insertSpaces: true,

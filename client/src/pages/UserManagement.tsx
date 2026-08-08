@@ -65,7 +65,7 @@ function UserManagement() {
   if (isLoading || !isAdmin) return null;
 
   return (
-    <div className="container max-w-5xl">
+    <div className="container">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-slate-200 gap-4">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-purple-100 text-purple-600 rounded-lg">
@@ -84,7 +84,7 @@ function UserManagement() {
 
       <AdminNav />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 xl:grid-cols-4 gap-8">
         <div className="lg:col-span-1">
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden sticky top-8">
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex items-center gap-2">
@@ -160,7 +160,7 @@ function UserManagement() {
           </div>
         </div>
 
-        <div className="lg:col-span-2">
+        <div className="lg:col-span-2 xl:col-span-3 min-w-0">
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
               <h3 className="font-bold text-slate-900 m-0 border-none pb-0 text-base flex items-center gap-2">
