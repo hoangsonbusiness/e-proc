@@ -1,19 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import * as examRecorder from '../services/examRecorder';
-import { studentApi } from '../services/api';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
 import { UserCheck, AlertTriangle } from 'lucide-react';
-
-const REQUIRED_ENVIRONMENT_ACKS = [
-  'focusMode', 'notifications', 'iphoneMirroring',
-  'universalControl', 'externalDisplays', 'clearWorkspace',
-] as const;
 
 function StudentConfirm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [acknowledgements, setAcknowledgements] = useState<Record<string, boolean>>({});
   const [environment, setEnvironment] = useState(() => getExamEnvironmentSnapshot());
 
   const navigate = useNavigate();
@@ -24,7 +17,6 @@ function StudentConfirm() {
   const email = location.state?.email;
   const duration = location.state?.duration;
   const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
-  const checklistComplete = REQUIRED_ENVIRONMENT_ACKS.every((key) => acknowledgements[key]);
   const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
 
   useEffect(() => {
@@ -43,11 +35,6 @@ function StudentConfirm() {
     setError('');
     setLoading(true);
 
-    if (!checklistComplete) {
-      setError('Please complete the exam environment checklist before starting.');
-      setLoading(false);
-      return;
-    }
     if (environment.screenExtended === true) {
       setError('An external or extended display was detected. Disconnect external displays and Sidecar, then try again.');
       setLoading(false);
@@ -91,16 +78,6 @@ function StudentConfirm() {
       return;
     }
 
-    try {
-      await studentApi.acknowledgeEnvironment(acknowledgements, environment, studentToken);
-    } catch (e: any) {
-      document.exitFullscreen().catch(() => undefined);
-      if (recordMode !== 'none') await examRecorder.stopAndSave().catch(() => undefined);
-      setError(e.response?.data?.error || 'Could not verify the exam environment. Please try again.');
-      setLoading(false);
-      return;
-    }
-
     localStorage.setItem('recordMode', recordMode); // để /exam biết mode (none/local/s3)
     if (recordMode === 'local' && recordingPassword) {
       localStorage.setItem('recordingPassword', recordingPassword); // dùng ngầm cho resume-after-reload
@@ -137,37 +114,13 @@ function StudentConfirm() {
             Please confirm your email before starting the assessment.
           </p>
 
-          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-6 text-sm">
-            <p className="font-bold text-slate-900 mb-3">Required macOS exam setup</p>
-            {[
-              ['focusMode', 'Focus / Do Not Disturb is enabled.'],
-              ['notifications', 'Notification previews are disabled.'],
-              ['iphoneMirroring', 'iPhone Mirroring and iPhone notifications are disabled.'],
-              ['universalControl', 'Universal Control and Handoff are disabled.'],
-              ['externalDisplays', 'External displays and Sidecar are disconnected.'],
-              ['clearWorkspace', 'Phones, tablets, notes, and reference materials are away from the exam area.'],
-            ].map(([key, label]) => (
-              <label key={key} className="flex items-start gap-2 py-1.5 text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={Boolean(acknowledgements[key])}
-                  onChange={(e) => setAcknowledgements((current) => ({ ...current, [key]: e.target.checked }))}
-                />
-                <span>{label}</span>
-              </label>
-            ))}
-            {environment.screenExtended === true && (
+          {environment.screenExtended === true && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 text-sm">
               <p className="mt-3 text-red-700 font-semibold">
                 Multiple displays detected. Disconnect the additional display or Sidecar before continuing.
               </p>
-            )}
-            {!environment.screenCheckSupported && (
-              <p className="mt-3 text-amber-700">
-                This browser cannot automatically verify the number of displays; your confirmation will be recorded.
-              </p>
-            )}
-          </div>
+            </div>
+          )}
 
           {recordMode !== 'none' && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-sm text-amber-800 shadow-sm">
@@ -195,7 +148,7 @@ function StudentConfirm() {
           <div className="space-y-3">
             <button
               onClick={handleStartExam}
-              disabled={loading || !checklistComplete || environment.screenExtended === true}
+              disabled={loading || environment.screenExtended === true}
               className="w-full bg-blue-600 text-white font-medium text-base py-3 rounded-xl hover:bg-blue-700 focus:ring-4 focus:ring-blue-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
             >
               {loading ? 'Preparing screen recording...' : 'Start Exam'}

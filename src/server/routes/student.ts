@@ -163,44 +163,6 @@ router.post('/select-email', async (req: Request, res: Response) => {
   }
 });
 
-router.post('/exam/environment-ack', studentAuthMiddleware, async (req: Request, res: Response) => {
-  try {
-    const studentId = req.studentPayload!.studentId;
-    const { acknowledgements, environment } = req.body || {};
-    const required = [
-      'focusMode', 'notifications', 'iphoneMirroring',
-      'universalControl', 'externalDisplays', 'clearWorkspace',
-    ];
-    if (!acknowledgements || required.some((key) => acknowledgements[key] !== true)) {
-      return res.status(400).json({ error: 'All exam environment acknowledgements are required' });
-    }
-
-    const snapshot = {
-      acknowledgements: Object.fromEntries(required.map((key) => [key, true])),
-      environment: {
-        platform: typeof environment?.platform === 'string' ? environment.platform.slice(0, 100) : 'unknown',
-        screenCheckSupported: environment?.screenCheckSupported === true,
-        screenExtended: typeof environment?.screenExtended === 'boolean' ? environment.screenExtended : null,
-        screenWidth: Number.isFinite(environment?.screenWidth) ? Math.trunc(environment.screenWidth) : null,
-        screenHeight: Number.isFinite(environment?.screenHeight) ? Math.trunc(environment.screenHeight) : null,
-        devicePixelRatio: Number.isFinite(environment?.devicePixelRatio) ? environment.devicePixelRatio : null,
-      },
-    };
-
-    if (snapshot.environment.screenExtended === true) {
-      return res.status(409).json({ error: 'Multiple or extended displays are not allowed during the exam' });
-    }
-
-    await db.query(
-      'UPDATE students SET environment_acknowledged_at = ?, environment_snapshot = ? WHERE id = ?',
-      [new Date().toISOString(), JSON.stringify(snapshot), studentId]
-    );
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 router.post('/exam/start', studentAuthMiddleware, async (req: Request, res: Response) => {
   try {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -217,10 +179,6 @@ router.post('/exam/start', studentAuthMiddleware, async (req: Request, res: Resp
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
-    }
-
-    if (!student.environment_acknowledged_at) {
-      return res.status(428).json({ error: 'Exam environment checklist must be completed before starting' });
     }
 
     console.log('[startExam] student.status:', student.status);
@@ -337,7 +295,7 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
-      SELECT s.status, s.exam_deadline, s.disconnected_at, s.environment_acknowledged_at, b.duration
+      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.id = ?
@@ -346,10 +304,6 @@ router.get('/exam/questions', studentAuthMiddleware, async (req: Request, res: R
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
-    }
-
-    if (!student.environment_acknowledged_at) {
-      return res.status(428).json({ error: 'Exam environment checklist must be completed before loading questions' });
     }
 
     if (student.status === 'submitted') {

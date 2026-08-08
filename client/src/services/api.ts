@@ -157,16 +157,6 @@ export const studentApi = {
   selectEmail: (studentId: number, email: string) =>
     api.post('/student/select-email', { student_id: studentId, email }),
 
-  acknowledgeEnvironment: (
-    acknowledgements: Record<string, boolean>,
-    environment: any,
-    studentToken: string
-  ) => api.post(
-    '/student/exam/environment-ack',
-    { acknowledgements, environment },
-    { headers: { Authorization: `Bearer ${studentToken}` } }
-  ),
-
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
 

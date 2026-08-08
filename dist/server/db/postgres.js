@@ -150,8 +150,6 @@ async function initPostgres() {
       exam_deadline TIMESTAMP,
       disconnected_at TIMESTAMP,
       recording_password TEXT,
-      environment_acknowledged_at TIMESTAMP,
-      environment_snapshot TEXT,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -161,8 +159,6 @@ async function initPostgres() {
         { col: 'exam_deadline', def: 'TIMESTAMP' },
         { col: 'disconnected_at', def: 'TIMESTAMP' },
         { col: 'recording_password', def: 'TEXT' },
-        { col: 'environment_acknowledged_at', def: 'TIMESTAMP' },
-        { col: 'environment_snapshot', def: 'TEXT' },
     ];
     for (const { col, def } of colChecks) {
         try {
@@ -315,8 +311,6 @@ function initSqlite() {
         exam_deadline DATETIME,
         disconnected_at DATETIME,
         recording_password TEXT,
-        environment_acknowledged_at DATETIME,
-        environment_snapshot TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -335,12 +329,6 @@ function initSqlite() {
         }
         if (!colNames.includes('recording_password')) {
             sqliteDb.exec('ALTER TABLE students ADD COLUMN recording_password TEXT');
-        }
-        if (!colNames.includes('environment_acknowledged_at')) {
-            sqliteDb.exec('ALTER TABLE students ADD COLUMN environment_acknowledged_at DATETIME');
-        }
-        if (!colNames.includes('environment_snapshot')) {
-            sqliteDb.exec('ALTER TABLE students ADD COLUMN environment_snapshot TEXT');
         }
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_questions (

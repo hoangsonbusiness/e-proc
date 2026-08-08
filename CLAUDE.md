@@ -79,6 +79,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `exam_questions`
   - `violations`
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
+  - `recording_parts` (S3 recording-part metadata verified by backend `HeadObject`; unique per student + part index)
   - `ai_queue`
   - `ai_settings`
   - `admin_users`
@@ -123,17 +124,19 @@ When debugging student exam state, inspect:
   - backend buffers answers through `src/server/cache.ts`
   - buffered answers are flushed periodically or on submit
 - Violations are reported from the frontend through `studentApi.reportViolation(type)` and stored in the `violations` table
-- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`
-- Locking occurs when `violation_count >= 2` for any single type or `total_violations >= 2`. **As of 2026-07-29 the log-only exemption was removed** — `suspicious_paste` and `focus_lost` are now lockable like every other type and count toward `total_violations` (see Anti-Cheat v2 section for the rationale behind the change). **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** (see Screen recording section) — stopping the screen share is treated as deliberate evasion.
+- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`
+- Locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`. `suspicious_paste` and `focus_lost` remain lockable; `rapid_text_insertion` and `multiple_display_detected` are forensic-only. **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** — stopping screen share is treated as deliberate evasion.
 - Every violation report is additionally appended to the `violation_events` table (append-only forensic log); `suspicious_paste` events carry a `content_preview` (first 500 chars of the pasted text) — see Anti-Cheat v2 section
+- `rapid_text_insertion` and `multiple_display_detected` are **forensic-only**: they are appended to `violation_events` with `metadata_json`, but are not inserted/incremented in `violations` and never contribute to auto-lock thresholds.
 - Anti-cheat behavior is concentrated in `client/src/pages/StudentExam.tsx`:
   - clipboard attempts (`copy_attempt`, `cut_attempt`, `paste_attempt`) are intercepted inside the Monaco CodeEditor via `addCommand()` and reported as violations
-  - fullscreen exit triggers a 5-second grace period timer; if the student stays out of fullscreen past the timer, `fullscreen_exit` is recorded and the exam is force-submitted
+  - fullscreen must succeed on `/confirm` before navigation to `/exam`; denial stops recording and blocks entry. During the exam, both `fullscreenchange` and a 1-second watchdog feed the same timer state. Staying out for 5 seconds records the first `fullscreen_exit`; remaining out for another 5 seconds records the second violation and triggers client auto-submit.
   - tab switching (visibilitychange) reports `tab_switch` violation
-  - DevTools key shortcuts (F12, Ctrl+Shift+I/J/C/K, Ctrl+U) are blocked and report `devtools_open` violation (with 10-second cooldown)
-  - `beforeprint` reports `print_attempt`; PrintScreen key reports `screenshot_attempt`
+  - DevTools/View Source shortcuts cover Windows/Linux modifiers and macOS Command/Option modifiers. DevTools reports `devtools_open`; View Source reports `view_source`.
+  - `beforeprint`, Ctrl/Cmd+P report `print_attempt`; PrintScreen and macOS screenshot shortcuts are intercepted on a best-effort basis and report `screenshot_attempt` (OS-reserved shortcuts are not guaranteed to reach browser JavaScript).
+  - multiple-display preflight uses `screen.isExtended` when supported: an extended display blocks Start on `/confirm`; a display that appears during the exam produces forensic-only `multiple_display_detected`. There is deliberately no self-attestation/checklist gate.
   - **Extension side-panel detection (`extension_panel`, added 2026-07)**: detects Chrome side-panel extensions (e.g. Monica AI) that open alongside the exam while remaining fullscreen. See dedicated subsection below — the detection metric matters and is easy to get wrong.
-  - locking occurs when `violation_count >= 2` for any single type or `total_violations >= 2`
+  - locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`; forensic-only types are excluded
 
 #### Extension side-panel detection (`extension_panel`)
 Chrome side-panel extensions (Monica AI and similar "AI sidebar" extensions) render via the browser's native Side Panel API. This panel visually shrinks the page's rendered layout while `document.fullscreenElement` remains set — no `fullscreenchange` event fires, so the pre-existing fullscreen-exit detection never sees it.
@@ -181,21 +184,28 @@ Detection in `client/src/pages/StudentExam.tsx` (rewritten 2026-07-29 — replac
 
 **3. Dynamic watermark (same 2026-07-28 update)**
 
-Previously the forensic watermark timestamp was frozen at the time React rendered the watermark JSX (once on mount). It now uses a `watermarkTime` state that updates every 30 seconds, so screenshots taken later in the exam carry a more accurate timestamp for forensic tracing.
+Previously the forensic watermark timestamp was frozen at the time React rendered the watermark JSX (once on mount). It now updates every **15 seconds**, includes email/student ID + timestamp, and shifts position over time so screenshots and recordings can be correlated more accurately and the watermark is harder to crop consistently.
 
 **4. Admin Results page — violations breakdown (2026-07-28, updated 2026-07-29)**
 
-`GET /api/admin/batches/:id/results` returns `violations_breakdown: { [type]: count }` alongside the existing `violations` (total). `client/src/pages/Results.tsx` displays each type as an orange (🟠) badge. (The earlier blue-badge distinction for log-only types was removed on 2026-07-29 when `suspicious_paste`/`focus_lost` became lockable — every type is now a lockable violation.)
+`GET /api/admin/batches/:id/results` returns `violations_breakdown: { [type]: count }` alongside the existing `violations` (total). `client/src/pages/Results.tsx` displays counted violation types as orange badges. `rapid_text_insertion` and `multiple_display_detected` appear only in the detailed forensic event list because they do not increment `violations`.
 
 **5. Forensic `violation_events` table + paste-content popup (added 2026-07-29)**
 
 The `violations` table is keyed by `(student_id, type)` and only stores a running count — it cannot record individual occurrences or their content. A new append-only table `violation_events` was added (created in `src/server/db/postgres.ts` for both SQLite and PostgreSQL):
-- Columns: `id, student_id, batch_id, type, text_length, content_preview (VARCHAR 500), question_id, created_at`
-- `POST /api/student/violation` inserts one row per report (in addition to the existing count UPDATE on `violations`), reading optional `content_preview` / `text_length` / `question_id` from the request body. `content_preview` is server-side truncated to 500 chars and is only populated for `suspicious_paste`; `focus_lost` rows store timestamp + type only.
+- Columns: `id, student_id, batch_id, type, text_length, content_preview (VARCHAR 500), question_id, metadata_json, created_at`
+- `POST /api/student/violation` inserts one row per report, reading optional `content_preview` / `text_length` / `question_id` / structured `metadata` from the request body. `content_preview` is server-side truncated to 500 chars; metadata is serialized and capped before storage.
 - `GET /api/admin/batches/:id/results` returns a `violation_events` array per student.
 - `client/src/pages/Results.tsx` shows a "🔍 Xem chi tiết (N)" button that opens a modal listing each event (type, timestamp, char length, question id, and the paste preview in a monospace block) — so admins can adjudicate a flag from the actual pasted text without querying the DB.
 - Server-side timer guard in `GET /exam/questions`: if `exam_deadline` has passed, the server auto-submits and returns `410 Gone` with `reason: 'timeout'`
 - Disconnect guard: if `disconnected_at` is set for > 120 seconds, the server auto-submits on next `GET /exam/questions` and returns `410 Gone` with `reason: 'absent_too_long'`
+
+**6. Rapid insertion telemetry + multiple-display telemetry (added 2026-08-08)**
+
+- `CodeEditor.tsx` retains the existing single-change `suspicious_paste` threshold (>=300 chars), and additionally aggregates inserted characters in a rolling **2.5-second** window. If total insertion reaches 300 while each individual change remains below 300, it reports `rapid_text_insertion` with `insertedChars`, `changeCount`, `windowMs`, and `maxSingleChange`.
+- `rapid_text_insertion` is forensic-only to avoid auto-lock false positives from Monaco completion/formatting behavior. Calibrate from production evidence before ever making it lockable.
+- `examEnvironment.ts` reads `screen.isExtended` when the browser exposes it. `StudentConfirm` blocks Start when an extended display is detected. `StudentExam` polls every 3 seconds and records forensic-only `multiple_display_detected` if an additional display appears mid-exam.
+- Browser display detection is best-effort and does not prove that Sidecar/external displays are absent when the API is unsupported or unavailable. There is no candidate checkbox/acknowledgement fallback because self-attestation is not a security control.
 
 #### Screen recording — three modes: `none` / `local` / `s3` (per-batch `record_mode`)
 
@@ -212,12 +222,15 @@ The exam can record the candidate's full screen. Since 2026-07-30 the per-batch 
 Architecture (presigned URL — sidesteps Vercel serverless payload/timeout limits, since the video goes client→S3, not through the backend):
 ```
 Client records → every 5 min cuts a part → asks backend for a presigned PUT URL
-  → PUTs the blob straight to S3 → retry-queue on failure (does not block the exam)
+  → PUTs the blob straight to S3 → calls recording-complete
+  → backend verifies S3 ContentLength with HeadObject and persists recording_parts metadata
+  → retry-queue on failure (does not block the exam)
 S3 key: recordings/{batchId}/{studentId}/part{NNN}.webm  (batchId/studentId from JWT, not client)
 Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script)
 ```
 
-- **Backend:** `POST /api/student/exam/recording-url` (`studentAuthMiddleware`) returns a presigned PUT URL from `src/server/services/s3.ts` (`createRecordingUploadUrl`). AWS credentials live only in backend env; the URL expires in 15 min. The S3 key is built from `batchId`/`studentId` in the JWT so a candidate cannot overwrite another's video. Returns `503` if S3 env is not configured (`isS3Configured()`).
+- **Backend:** `POST /api/student/exam/recording-url` (`studentAuthMiddleware`) returns a presigned PUT URL from `src/server/services/s3.ts` (`createRecordingUploadUrl`). AWS credentials live only in backend env; the URL expires in 15 min. The S3 key is built from `batchId`/`studentId` in the JWT so a candidate cannot overwrite another's video. A finalized `(student_id, part_index)` is rejected with 409, preventing later URL issuance/overwrite. Returns `503` if S3 env is not configured.
+- **Completion verification:** after a successful PUT, the client calls `POST /api/student/exam/recording-complete`. The backend reconstructs the key from the JWT, calls S3 `HeadObject`, rejects empty/missing objects, and inserts `recording_parts(student_id, batch_id, part_index, object_key, byte_size, uploaded_at)`. The Results page reports part count/total bytes and warns when S3 evidence is missing.
 - **Frontend module** `client/src/services/examRecorder.ts` (singleton **outside React** — survives the `/confirm` → `/exam` navigation; handles **both** `s3` and `local` modes):
   - **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; a shared tab/window (`displaySurface !== 'monitor'`) is refused. Requires **Chrome/Edge + HTTPS**; Safari/Firefox blocked at confirm.
   - **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~22 MB per **5-minute part**. In `s3` mode each part asks for a presigned URL then `fetch(url, { method: 'PUT', body: blob })` straight to S3, with a **retry queue** (exponential backoff, max 5 attempts) in the background. In `local` mode each part is zipped+encrypted and written to the chosen folder.
@@ -225,7 +238,7 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Lifecycle:** `requestSetup(recordMode)` is called in `StudentConfirm.tsx#handleStartExam` **in the click gesture, BEFORE `requestFullscreen()`** (fullscreen consumes the user-activation that `getDisplayMedia`/`showDirectoryPicker` need — order matters). `start({ mode, password })` begins recording. `stopAndSave()` at the top of `handleSubmit` in `StudentExam.tsx` covers all three submit paths (manual / cheating auto-submit / timeout); wrapped in try/catch so a recording error never blocks submission. For `local`, `stopAndSave()` **awaits** the final zip write.
 - **`recording_stopped` violation:** `track.onended` (candidate clicks "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). Registered via `examRecorder.setOnRecordingStopped()` after `/exam` mounts; if the track already ended before registration, the callback fires immediately. Applies to both `local` and `s3`.
 - **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while running but `examRecorder.isActive()` is false, a blocking modal (`handleResumeRecording`) forces them to re-share the screen. For `local`, the `dirHandle` does **not** survive F5, so the candidate must re-pick the folder; the password is re-read from `localStorage.recordingPassword` (same value the server issued, so pre- and post-reload zip parts share one password).
-- **Env required for `s3` (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM user should be scoped to `PutObject` on `recordings/*` only. `local` mode needs none of these.
+- **Env required for `s3` (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM needs `s3:PutObject` for upload plus `s3:GetObject` on `recordings/*` so backend `HeadObject` verification succeeds. `local` mode needs none of these.
 - **macOS caveat:** the first `getDisplayMedia` requires granting Screen Recording permission to Chrome in System Settings **and restarting Chrome**. Because exams are time-gated, candidates should do this during a **practice exam** beforehand, not on exam day.
 
 ##### `local` mode specifics (added 2026-07-30)
@@ -233,7 +246,8 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Password provenance:** `POST /api/student/verify` generates `crypto.randomBytes(24).toString('base64url')` **once per `students` row** and stores it in `students.recording_password` (reused on subsequent `/verify` calls for that row, so resume uses the same password). It is returned to the client **only for `local` mode** (needed to encrypt) and **never displayed to the candidate**.
 - **Password scope:** keyed by `students.id`, and since a `students` row is one **(person × batch)**, the same person in different batches gets **different** passwords; all zip parts of one exam attempt share **one** password.
 - **Admin retrieval:** the password is surfaced on the **Results page** (`Results.tsx`) next to each student (`r.student.recording_password`, admin-only) so an admin can decrypt the GitLab-committed zip. It rides along in the `/batches/:id/results` payload via `SELECT s.*`.
-- **DB columns:** `batches.record_mode` (VARCHAR(16)/TEXT default `'none'`) and `students.recording_password` (TEXT), created + migrated in `src/server/db/postgres.ts` for both Postgres and SQLite. Migration backfills `record_mode='s3'` where the old `record_enabled` was true. **Deploy note (Vercel + Supabase):** these `ALTER TABLE`s run automatically at DB init on cold-start (idempotent, `IF NOT EXISTS` + try/catch), but to avoid a race on the first few requests after deploy, prefer running them manually in the Supabase SQL Editor **before** deploying.
+- **DB schema:** `batches.record_mode` (VARCHAR(16)/TEXT default `'none'`), `students.recording_password` (TEXT), `violation_events.metadata_json` and the `recording_parts` table are created/migrated in `src/server/db/postgres.ts` for both PostgreSQL and SQLite. For Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually before deploying; it is idempotent and contains only the new PostgreSQL DDL for `metadata_json` + `recording_parts`.
+- **Reset behavior:** resetting a student deletes `recording_parts` database metadata, but does **not** delete existing S3 objects. A new attempt can overwrite reused part keys; stale higher-numbered objects remain until the configured S3 Lifecycle rule expires them.
 
 ### Static runtime path
 - There are **three** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
@@ -301,11 +315,15 @@ Batches support two blueprint formats for question assignment:
   - browser-side blocking / auto-submit behavior
   - network calls to `/api/student/violation` and `/api/student/exam/submit`
   - resulting counts in admin results / violations data
+  - on real macOS Chrome/Edge: Command/Option DevTools/View Source/Print shortcuts, screenshot best-effort telemetry, Mission Control, Spaces, Split View, Hot Corners, external display and Sidecar behavior
+  - confirm that `rapid_text_insertion` and `multiple_display_detected` remain forensic-only and never cause auto-lock
+  - for S3 mode: verify PUT → `/exam/recording-complete` → S3 `HeadObject` → `recording_parts` row, plus the Results evidence summary
 - For student auth changes, verify the full auth flow:
   - `POST /student/verify` returns `student_token`
   - `localStorage.studentToken` is set after confirm page
   - All student API requests carry `Authorization: Bearer <token>` header
   - Requests without token return 401
+- Before deploying the 2026-08-08 schema changes to Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually and confirm its verification query returns both expected rows.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -324,14 +342,16 @@ Batches support two blueprint formats for question assignment:
 ## Notable current behavior
 
 - Clipboard attempts are counted as violations. Clipboard interception is handled inside the Monaco CodeEditor component (not via DOM events on the wrapper), because Monaco stops DOM event propagation internally.
-- Leaving fullscreen for more than 5 seconds records `fullscreen_exit`. A second fullscreen exit after the first violation triggers force-submit from the client.
+- Fullscreen must activate successfully on Confirm before `/exam` is entered. During an active exam, event + watchdog reconciliation records `fullscreen_exit` after 5 seconds outside fullscreen and a second event after another 5 seconds, which reaches the normal two-violation lock threshold and triggers client auto-submit.
 - Chrome side-panel extensions (e.g. Monica AI) opened during a fullscreen exam are detected as `extension_panel` via a `document.documentElement` width-shrink heuristic — see "Extension side-panel detection" above. Do not use `window.innerWidth`/`window.screen.width` for this; they don't change when a side panel is open.
-- Violation locking threshold: `violation_count >= 2` for any single type OR `total_violations >= 2`, applied uniformly to **every** type. The former `suspicious_paste`/`focus_lost` log-only exemption (`isLogOnly`/`LOG_ONLY_TYPES`) was **removed on 2026-07-29** — both are now lockable and count toward the total.
+- Violation locking threshold: `violation_count >= 2` for any single lockable type OR `total_violations >= 2`; `recording_stopped` locks on the first occurrence. `rapid_text_insertion` and `multiple_display_detected` are explicit forensic-only exceptions and do not increment `violations`.
 - `suspicious_paste` is detected via Monaco `onDidChangeModelContent` with threshold ≥ **300 chars** per change event (lowered from 1200 on 2026-07-29 to catch Notes-copied answers; see Anti-Cheat v2 section). **Do not raise it back or re-enable large IntelliSense snippets** without pairing the length check with a snippet exclusion — the larger snippets in `useMonacoJavaCompletions.ts` (up to `GlobalExceptionHandler` at 1093 chars) now exceed 300 and would false-positive if typed; they are only safe because they are currently unused.
 - `focus_lost` is detected via `window` `blur`/`focus` events with a **3-second grace timer** (rewritten 2026-07-29, replacing the old 5s×3 polling heartbeat). A `blur` starts the timer; a `focus` before it fires cancels it; if it fires with focus still lost, the violation is reported. Event-based rather than polling to avoid aliasing short focus-losses.
-- Each violation report also appends a row to `violation_events` (timestamp, type, `text_length`, `content_preview` ≤ 500 chars for `suspicious_paste`, `question_id`). Admins review these via the "🔍 Xem chi tiết" popup on the Results page.
+- Each violation report also appends a row to `violation_events` (timestamp, type, `text_length`, `content_preview` ≤500 chars, `question_id`, optional `metadata_json`). Admins review these via the violation-detail popup on the Results page.
 - Server auto-submits the exam when the deadline passes (detected on `GET /exam/questions` → returns `410 Gone`, `reason: 'timeout'`).
 - Server auto-submits the exam when the student has been disconnected for more than 120 seconds (`reason: 'absent_too_long'`).
 - Runtime anti-cheat behavior depends heavily on `client/src/pages/StudentExam.tsx`; many server-side changes alone will not alter what candidates experience in the browser.
 - Student API authentication uses JWT (`studentToken`), not the `x-student-id` header. Any code that still reads `x-student-id` from request headers on student endpoints is stale and should be replaced.
+- `POST /api/student/exam/start` requires `studentAuthMiddleware` and derives `studentId` from the verified JWT; the legacy `student_id` body field sent by the frontend is ignored for identity.
+- There is intentionally no pre-exam checkbox/acknowledgement API or DB gate. Controls must use automatically observed browser/server signals; candidate self-attestation was removed as non-enforcing.
 - Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) require admin JWT. `/api/init-tables` has been removed — DB init runs automatically on server startup.

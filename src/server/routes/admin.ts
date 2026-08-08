@@ -1175,8 +1175,7 @@ router.post('/students/:studentId/reset', async (req: Request, res: Response) =>
     
     await db.query(`
       UPDATE students 
-      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL,
-          environment_acknowledged_at = NULL, environment_snapshot = NULL
+      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL
       WHERE id = ?
     `, [parseInt(studentId)]);
     
