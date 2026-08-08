@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
-import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, Code, ShieldAlert, Cpu } from 'lucide-react';
+import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound } from 'lucide-react';
 import DOMPurify from 'dompurify';
 
 function Results() {
@@ -101,8 +101,8 @@ function Results() {
           </div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0 border-none pb-0">Results {batch ? `- ${batch.name}` : ''}</h1>
         </div>
-        <Link 
-          to="/admin/batches" 
+        <Link
+          to="/admin/batches"
           className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-50 transition-colors shadow-sm"
         >
           <ArrowLeft size={16} />
@@ -114,9 +114,9 @@ function Results() {
 
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-lg font-bold text-slate-800 m-0 border-none pb-0">Student Results ({results.length})</h2>
-        <button 
-          onClick={handleExport} 
-          disabled={results.length === 0} 
+        <button
+          onClick={handleExport}
+          disabled={results.length === 0}
           className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium text-sm hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
         >
           <Download size={16} />
@@ -159,11 +159,10 @@ function Results() {
                         )}
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
-                          r.student.status === 'submitted' 
-                            ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' 
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${r.student.status === 'submitted'
+                            ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
                             : 'bg-amber-100 text-amber-700 border border-amber-200'
-                        }`}>
+                          }`}>
                           {r.student.status === 'submitted' && <CheckCircle2 size={12} />}
                           {r.student.status}
                         </span>
@@ -179,7 +178,7 @@ function Results() {
                             {r.violations_breakdown && Object.keys(r.violations_breakdown).length > 0 && (
                               <div className="flex flex-wrap gap-1.5 mt-1">
                                 {Object.entries(r.violations_breakdown as Record<string, number>)
-                                  .sort(([,a], [,b]) => b - a)
+                                  .sort(([, a], [, b]) => b - a)
                                   .map(([type, count]) => (
                                     <span key={type} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-orange-50 border border-orange-200 text-orange-700 rounded text-[10px] font-mono font-semibold">
                                       <span className="w-1.5 h-1.5 rounded-full bg-orange-500"></span>
@@ -208,7 +207,7 @@ function Results() {
                         </span>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <button 
+                        <button
                           onClick={() => {
                             setSelectedStudent(r);
                             const firstQ = r.questions[0];
@@ -218,7 +217,7 @@ function Results() {
                             setTimeout(() => {
                               document.getElementById('review-section')?.scrollIntoView({ behavior: 'smooth' });
                             }, 100);
-                          }} 
+                          }}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
                         >
                           <Settings2 size={14} />
@@ -250,7 +249,7 @@ function Results() {
                   <X size={18} />
                 </button>
               </div>
-              
+
               <div className="p-6 space-y-6">
                 {/* All Questions */}
                 {selectedStudent.questions.map((q: any, index: number) => (
@@ -264,15 +263,14 @@ function Results() {
                           {q.module} ({q.level}) - {q.type}
                         </strong>
                       </div>
-                      <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${
-                        q.ai_score >= 7 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
-                        q.ai_score >= 5 ? 'bg-amber-50 text-amber-700 border-amber-200' : 
-                        'bg-red-50 text-red-700 border-red-200'
-                      }`}>
+                      <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${q.ai_score >= 7 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                          q.ai_score >= 5 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                            'bg-red-50 text-red-700 border-red-200'
+                        }`}>
                         <Cpu size={12} /> AI Score: {q.ai_score ?? '-'}
                       </span>
                     </div>
-                    
+
                     <div className="p-5 space-y-4">
                       <div>
                         <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">Question</span>
@@ -281,7 +279,7 @@ function Results() {
                           dangerouslySetInnerHTML={{ __html: sanitizeQuestion(q.question_sample || '') }}
                         />
                       </div>
-                      
+
                       <div>
                         <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1 block">Student Answer</span>
                         {q.answer ? (
@@ -296,7 +294,7 @@ function Results() {
                           </div>
                         )}
                       </div>
-                      
+
                       <details className="group border border-slate-200 rounded-lg bg-white overflow-hidden [&_summary::-webkit-details-marker]:hidden">
                         <summary className="flex items-center justify-between cursor-pointer px-4 py-3 bg-slate-50 text-slate-700 font-medium text-sm hover:bg-slate-100 transition-colors">
                           <span className="flex items-center gap-2"><FileText size={16} className="text-slate-400" /> Rubric & AI Feedback</span>
@@ -317,7 +315,7 @@ function Results() {
                               <div className="md:col-span-9 text-slate-700">{q.rubric_optional}</div>
                             </div>
                           </div>
-                          
+
                           {q.ai_feedback && (
                             <div className="mt-4 p-4 bg-indigo-50 border border-indigo-100 rounded-lg">
                               <strong className="flex items-center gap-2 text-indigo-900 text-xs uppercase tracking-wide mb-2"><Cpu size={14} /> AI Feedback Analysis</strong>
@@ -335,20 +333,20 @@ function Results() {
                   <div className="absolute top-0 right-0 p-6 opacity-10 pointer-events-none">
                     <CheckCircle2 size={120} className="text-emerald-600" />
                   </div>
-                  
+
                   <div className="relative z-10">
                     <h4 className="text-lg font-bold text-emerald-900 mb-1 m-0 border-none pb-0">Trainer Score Override</h4>
                     <p className="text-emerald-700 text-sm mb-6">
                       Review all answers above before making your final decision.
                     </p>
-                    
+
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                       <div className="md:col-span-1">
                         <label className="block text-sm font-bold text-emerald-900 mb-2">Final Score (0-10)</label>
-                        <input 
-                          type="number" 
-                          min="0" 
-                          max="10" 
+                        <input
+                          type="number"
+                          min="0"
+                          max="10"
                           step="0.1"
                           value={editScore ?? ''}
                           onChange={e => setEditScore(parseFloat(e.target.value))}
@@ -357,7 +355,7 @@ function Results() {
                       </div>
                       <div className="md:col-span-2">
                         <label className="block text-sm font-bold text-emerald-900 mb-2">Trainer Feedback (Optional)</label>
-                        <textarea 
+                        <textarea
                           rows={3}
                           value={editFeedback}
                           onChange={e => setEditFeedback(e.target.value)}
@@ -366,16 +364,16 @@ function Results() {
                         />
                       </div>
                     </div>
-                    
+
                     <div className="mt-6 flex items-center gap-3">
-                      <button 
+                      <button
                         onClick={() => handleSaveScore(selectedStudent.student.id)}
                         disabled={saving}
                         className="inline-flex items-center justify-center px-6 py-2.5 bg-emerald-600 text-white font-medium rounded-lg hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
                       >
                         {saving ? 'Saving...' : 'Save & Apply to All Questions'}
                       </button>
-                      <button 
+                      <button
                         onClick={() => setSelectedStudent(null)}
                         className="inline-flex items-center justify-center px-4 py-2.5 bg-white text-slate-700 border border-slate-300 font-medium rounded-lg hover:bg-slate-50 transition-colors"
                       >
@@ -405,14 +403,14 @@ function Results() {
                 <AlertCircle size={20} className="text-red-500" />
                 Violation Details <span className="text-slate-500 font-normal text-sm ml-2">{violationDetail.email}</span>
               </h3>
-              <button 
-                onClick={() => setViolationDetail(null)} 
+              <button
+                onClick={() => setViolationDetail(null)}
                 className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
               >
                 <X size={20} />
               </button>
             </div>
-            
+
             <div className="p-6 overflow-y-auto space-y-4">
               {violationDetail.events.length === 0 ? (
                 <div className="text-center py-8 text-slate-500">
