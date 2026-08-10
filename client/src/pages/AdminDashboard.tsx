@@ -167,6 +167,8 @@ function AdminDashboard() {
         </div>
       )}
       
+      <AdminNav />
+
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex items-center gap-5">
           <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl">
@@ -188,8 +190,6 @@ function AdminDashboard() {
           </div>
         </div>
       </div>
-
-      <AdminNav />
 
       <div className="card mt-6">
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4 border-b border-slate-100 pb-4 m-0">

@@ -410,10 +410,11 @@ function QuestionBank() {
                       {deletable ? (
                         <button
                           onClick={() => handleDelete(q.id)}
-                          className="inline-flex items-center justify-center p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-600 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
                           title="Delete question"
                         >
-                          <Trash2 size={16} />
+                          <Trash2 size={14} />
+                          <span>Delete</span>
                         </button>
                       ) : (
                         <span className="inline-block px-2 text-slate-300">—</span>

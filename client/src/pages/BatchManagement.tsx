@@ -3,7 +3,18 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
-import { ArrowLeft, FolderKanban, ListChecks, Plus } from 'lucide-react';
+import {
+  ArrowLeft,
+  BarChart3,
+  ChevronDown,
+  FolderKanban,
+  ListChecks,
+  Pencil,
+  Plus,
+  Trash2,
+  UserPlus,
+  Users,
+} from 'lucide-react';
 
 const BATCH_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type BatchPageSize = typeof BATCH_PAGE_SIZE_OPTIONS[number];
@@ -85,6 +96,7 @@ function BatchManagement() {
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
   const [showForm, setShowForm] = useState(false);
+  const [isCreateBlueprintExpanded, setIsCreateBlueprintExpanded] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     start_time: '',
@@ -97,6 +109,7 @@ function BatchManagement() {
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
+  const [isEditBlueprintExpanded, setIsEditBlueprintExpanded] = useState(false);
   const [showInviteForm, setShowInviteForm] = useState(false);
   const [editingBatch, setEditingBatch] = useState<any>(null);
   const [selectedBatchId, setSelectedBatchId] = useState<number | null>(null);
@@ -341,6 +354,7 @@ function BatchManagement() {
     }
 
     setEditBlueprintMode(detectedMode);
+    setIsEditBlueprintExpanded(false);
     setEditingBatch({
       ...batch,
       start_time: utcToLocalInput(batch.start_time),
@@ -498,6 +512,14 @@ function BatchManagement() {
 
   const activeCreateItems = blueprintMode === 'type' ? formData.blueprintByType : formData.blueprint;
   const totalQuestions = activeCreateItems.reduce((sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0), 0);
+
+  const activeEditItems = editBlueprintMode === 'type'
+    ? ((editingBatch?.blueprintByType || []) as BlueprintItemByType[])
+    : ((editingBatch?.blueprint || []) as BlueprintItem[]);
+  const editTotalQuestions = activeEditItems.reduce(
+    (sum, item) => sum + (item.easy || 0) + (item.medium || 0) + (item.hard || 0),
+    0
+  );
 
   const createBlueprintErrors = blueprintMode === 'type'
     ? validateTypesBlueprintAgainstStats(formData.blueprintByType)
@@ -741,7 +763,14 @@ function BatchManagement() {
             <ListChecks size={18} className="text-slate-500" />
             Batches List
           </h3>
-          <button onClick={() => setShowForm(!showForm)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm ${showForm ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+          <button
+            onClick={() => {
+              const nextShowForm = !showForm;
+              setShowForm(nextShowForm);
+              if (nextShowForm) setIsCreateBlueprintExpanded(false);
+            }}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm ${showForm ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+          >
             {showForm ? 'Cancel' : (
               <>
                 <Plus size={16} />
@@ -840,12 +869,57 @@ function BatchManagement() {
                 </div>
               </div>
 
-            <h4 className="mt-6 mb-3 text-base font-bold text-slate-900">Exam Blueprint (Total: {totalQuestions}/100)</h4>
+            <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setIsCreateBlueprintExpanded(prev => !prev)}
+                aria-expanded={isCreateBlueprintExpanded}
+                aria-controls="create-blueprint-content"
+                className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+              >
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="text-base font-bold text-slate-900">Exam Blueprint (Total: {totalQuestions}/100)</span>
+                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                    {blueprintMode === 'module' ? 'By Module' : 'By Type'}
+                  </span>
+                </span>
+                <ChevronDown
+                  size={20}
+                  className={`shrink-0 text-slate-500 transition-transform ${isCreateBlueprintExpanded ? 'rotate-180' : ''}`}
+                />
+              </button>
 
-            {/* Blueprint Mode Toggle */}
-            <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
+              {isCreateBlueprintExpanded && (
+                <div id="create-blueprint-content" className="space-y-4 border-t border-slate-200 p-4 sm:p-5">
+                  <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
 
-            {modules.length === 0 && blueprintMode === 'module' ? (
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {blueprintMode === 'module' ? (
+                      <button
+                        type="button"
+                        onClick={addBlueprintRow}
+                        disabled={modules.length === 0}
+                        className="btn btn-secondary gap-2"
+                        title={modules.length === 0 ? 'No modules available' : ''}
+                      >
+                        <Plus size={16} />
+                        Add Module
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={addTypeBlueprintRow}
+                        disabled={!nextAvailableModuleType}
+                        className="btn btn-secondary gap-2"
+                        title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
+                      >
+                        <Plus size={16} />
+                        Add Module / Type
+                      </button>
+                    )}
+                  </div>
+
+                  {modules.length === 0 && blueprintMode === 'module' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
             ) : typeStats.length === 0 && blueprintMode === 'type' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
@@ -908,9 +982,6 @@ function BatchManagement() {
                     })}
                   </tbody>
                 </table>
-                <button type="button" onClick={addBlueprintRow} className="btn btn-secondary" style={{ marginTop: 10 }}>
-                  + Add Module
-                </button>
               </>
             ) : (
               <>
@@ -991,16 +1062,6 @@ function BatchManagement() {
                     })}
                   </tbody>
                 </table>
-                <button
-                  type="button"
-                  onClick={addTypeBlueprintRow}
-                  disabled={!nextAvailableModuleType}
-                  className="btn btn-secondary"
-                  style={{ marginTop: 10 }}
-                  title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
-                >
-                  + Add Module / Type
-                </button>
               </>
             )}
 
@@ -1018,6 +1079,9 @@ function BatchManagement() {
                   ))}
                 </div>
               )}
+                </div>
+              )}
+            </div>
 
               <div className="pt-6 border-t border-slate-100 flex justify-end">
                 <button
@@ -1170,28 +1234,32 @@ function BatchManagement() {
                     <td className="px-6 py-4">{formatGMT7(batch.start_time)}</td>
                     <td className="px-6 py-4">{formatGMT7(batch.end_time)}</td>
                     <td className="px-6 py-4 font-medium">{batch.duration} min</td>
-                    <td className="px-6 py-4 text-right space-x-2">
-                      <div className="inline-flex items-center justify-end gap-2">
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
                         {editable && (
                           <button
                             onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
-                            className="inline-flex items-center px-3 py-1.5 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 rounded-md text-xs font-bold transition-colors"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors"
                           >
+                            <UserPlus size={14} />
                             Invite
                           </button>
                         )}
-                        <Link to={`/admin/batches/${batch.id}/students`} className="inline-flex items-center px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 rounded-md text-xs font-bold transition-colors">
+                        <Link to={`/admin/batches/${batch.id}/students`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-50 hover:border-blue-300 transition-colors">
+                          <Users size={14} />
                           Students
                         </Link>
-                        <Link to={`/admin/batches/${batch.id}/results`} className="inline-flex items-center px-3 py-1.5 bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 rounded-md text-xs font-bold transition-colors">
+                        <Link to={`/admin/batches/${batch.id}/results`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-purple-700 border border-purple-200 rounded-lg text-sm font-medium hover:bg-purple-50 hover:border-purple-300 transition-colors">
+                          <BarChart3 size={14} />
                           Results
                         </Link>
                         {editable && (
                           <>
                             <button
                               onClick={() => handleEditBatch(batch)}
-                              className="inline-flex items-center px-3 py-1.5 bg-white text-slate-700 hover:bg-slate-50 border border-slate-300 rounded-md text-xs font-bold transition-colors"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-slate-700 border border-slate-300 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors"
                             >
+                              <Pencil size={14} />
                               Edit
                             </button>
                             <button
@@ -1202,8 +1270,9 @@ function BatchManagement() {
                                   });
                                 }
                               }}
-                              className="inline-flex items-center px-3 py-1.5 bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 rounded-md text-xs font-bold transition-colors"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-700 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
                             >
+                              <Trash2 size={14} />
                               Delete
                             </button>
                           </>
@@ -1370,14 +1439,69 @@ function BatchManagement() {
             </div>
 
             <div className="pt-6 border-t border-blue-200">
-              <h4 className="text-lg font-bold text-blue-800 mb-4">Exam Blueprint</h4>
+              <div className="overflow-hidden rounded-xl border border-blue-200 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setIsEditBlueprintExpanded(prev => !prev)}
+                  aria-expanded={isEditBlueprintExpanded}
+                  aria-controls="edit-blueprint-content"
+                  className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-blue-50/50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+                >
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-lg font-bold text-blue-800">Exam Blueprint (Total: {editTotalQuestions}/100)</span>
+                    <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                      {editBlueprintMode === 'module' ? 'By Module' : 'By Type'}
+                    </span>
+                  </span>
+                  <ChevronDown
+                    size={20}
+                    className={`shrink-0 text-blue-600 transition-transform ${isEditBlueprintExpanded ? 'rotate-180' : ''}`}
+                  />
+                </button>
 
-              {/* Blueprint Mode Toggle */}
-              <div className="mb-4">
-                <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
-              </div>
+                {isEditBlueprintExpanded && (
+                  <div id="edit-blueprint-content" className="space-y-4 border-t border-blue-200 p-4 sm:p-5">
+                    <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
 
-              {editBlueprintMode === 'module' ? (
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {editBlueprintMode === 'module' ? (
+                        <button
+                          type="button"
+                          onClick={() => setEditingBatch({
+                            ...editingBatch,
+                            blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
+                          })}
+                          disabled={modules.length === 0}
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={modules.length === 0 ? 'No modules available' : ''}
+                        >
+                          <Plus size={16} />
+                          Add Module
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!nextAvailableModuleTypeEdit) return;
+                            setEditingBatch({
+                              ...editingBatch,
+                              blueprintByType: [
+                                ...(editingBatch.blueprintByType || []),
+                                { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                              ]
+                            });
+                          }}
+                          disabled={!nextAvailableModuleTypeEdit}
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
+                        >
+                          <Plus size={16} />
+                          Add Module / Type
+                        </button>
+                      )}
+                    </div>
+
+                    {editBlueprintMode === 'module' ? (
                 modules.length === 0 ? (
                   <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No modules available</div>
                 ) : (
@@ -1576,45 +1700,13 @@ function BatchManagement() {
                   </ul>
                 </div>
               )}
+                  </div>
+                )}
+              </div>
 
               <div className="mt-8 flex flex-wrap gap-3 items-center">
-                {editBlueprintMode === 'module' ? (
-                  <button
-                    onClick={() => setEditingBatch({
-                      ...editingBatch,
-                      blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
-                    })}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors"
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                    Add Module
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => {
-                      if (!nextAvailableModuleTypeEdit) return;
-                      setEditingBatch({
-                        ...editingBatch,
-                        blueprintByType: [
-                          ...(editingBatch.blueprintByType || []),
-                          { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
-                        ]
-                      });
-                    }}
-                    disabled={!nextAvailableModuleTypeEdit}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
-                  >
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                    Add Module / Type
-                  </button>
-                )}
-
                 <button
+                  type="button"
                   onClick={handleUpdateBatch}
                   disabled={loading || editBlueprintErrors.length > 0}
                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1623,6 +1715,7 @@ function BatchManagement() {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => setEditingBatch(null)}
                   className="inline-flex items-center gap-2 px-6 py-2.5 bg-slate-100 text-slate-700 rounded-lg font-bold hover:bg-slate-200 transition-colors"
                 >
