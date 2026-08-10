@@ -869,28 +869,14 @@ function BatchManagement() {
                 </div>
               </div>
 
-            <div className="mt-6 overflow-hidden rounded-xl border border-slate-200 bg-white">
-              <button
-                type="button"
-                onClick={() => setIsCreateBlueprintExpanded(prev => !prev)}
-                aria-expanded={isCreateBlueprintExpanded}
-                aria-controls="create-blueprint-content"
-                className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
-              >
-                <span className="flex flex-wrap items-center gap-2">
-                  <span className="text-base font-bold text-slate-900">Exam Blueprint (Total: {totalQuestions}/100)</span>
-                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
-                    {blueprintMode === 'module' ? 'By Module' : 'By Type'}
-                  </span>
+            <div className="mt-6 space-y-4 rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h4 className="m-0 text-base font-bold text-slate-900">Question Configuration</h4>
+                <span className="rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
+                  Total: {totalQuestions}/100
                 </span>
-                <ChevronDown
-                  size={20}
-                  className={`shrink-0 text-slate-500 transition-transform ${isCreateBlueprintExpanded ? 'rotate-180' : ''}`}
-                />
-              </button>
+              </div>
 
-              {isCreateBlueprintExpanded && (
-                <div id="create-blueprint-content" className="space-y-4 border-t border-slate-200 p-4 sm:p-5">
                   <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
 
                   <div className="flex flex-wrap justify-end gap-2">
@@ -925,18 +911,16 @@ function BatchManagement() {
               <p className="error">Please import questions first to configure the blueprint.</p>
             ) : blueprintMode === 'module' ? (
               <>
-                {/* Stats panel – By Module */}
-                <QuestionBankStatsPanel />
-
-                <table className="matrix-table">
+                <div className="overflow-x-auto rounded-lg border border-slate-200">
+                <table className="matrix-table min-w-[720px]">
                   <thead>
                     <tr>
                       <th>Module</th>
-                      <th>🟢 Easy</th>
-                      <th>🟡 Medium</th>
-                      <th>🔴 Hard</th>
-                      <th>Total</th>
-                      <th></th>
+                      <th className="text-center">🟢 Easy</th>
+                      <th className="text-center">🟡 Medium</th>
+                      <th className="text-center">🔴 Hard</th>
+                      <th className="text-center">Total</th>
+                      <th className="w-28 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -960,19 +944,19 @@ function BatchManagement() {
                               Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.easy} max={stats.easy} onChange={v => updateBlueprint(index, 'easy', v)} />
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.medium} max={stats.medium} onChange={v => updateBlueprint(index, 'medium', v)} />
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.hard} max={stats.hard} onChange={v => updateBlueprint(index, 'hard', v)} />
                           </td>
                           <td style={{ textAlign: 'center', fontWeight: 600 }}>
                             {Number(item.easy) + Number(item.medium) + Number(item.hard)}
                           </td>
-                          <td>
+                          <td className="text-center">
                             <button type="button" onClick={() => removeBlueprintRow(index)} className="btn btn-danger" style={{ padding: '5px 10px', fontSize: 12 }}>
                               Remove
                             </button>
@@ -982,22 +966,21 @@ function BatchManagement() {
                     })}
                   </tbody>
                 </table>
+                </div>
               </>
             ) : (
               <>
-                {/* Stats panel – By Module + Type */}
-                <QuestionBankTypeStatsPanel />
-
-                <table className="matrix-table">
+                <div className="overflow-x-auto rounded-lg border border-slate-200">
+                <table className="matrix-table min-w-[840px]">
                   <thead>
                     <tr>
                       <th>Module</th>
                       <th>Type</th>
-                      <th>🟢 Easy</th>
-                      <th>🟡 Medium</th>
-                      <th>🔴 Hard</th>
-                      <th>Total</th>
-                      <th></th>
+                      <th className="text-center">🟢 Easy</th>
+                      <th className="text-center">🟡 Medium</th>
+                      <th className="text-center">🔴 Hard</th>
+                      <th className="text-center">Total</th>
+                      <th className="w-28 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1040,19 +1023,19 @@ function BatchManagement() {
                               Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                             </div>
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.easy} max={stats.easy} onChange={v => updateTypeBlueprint(index, 'easy', v)} />
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.medium} max={stats.medium} onChange={v => updateTypeBlueprint(index, 'medium', v)} />
                           </td>
-                          <td>
+                          <td className="text-center">
                             <ValidatedInput value={item.hard} max={stats.hard} onChange={v => updateTypeBlueprint(index, 'hard', v)} />
                           </td>
                           <td style={{ textAlign: 'center', fontWeight: 600 }}>
                             {Number(item.easy) + Number(item.medium) + Number(item.hard)}
                           </td>
-                          <td>
+                          <td className="text-center">
                             <button type="button" onClick={() => removeTypeBlueprintRow(index)} className="btn btn-danger" style={{ padding: '5px 10px', fontSize: 12 }}>
                               Remove
                             </button>
@@ -1062,6 +1045,7 @@ function BatchManagement() {
                     })}
                   </tbody>
                 </table>
+                </div>
               </>
             )}
 
@@ -1079,6 +1063,32 @@ function BatchManagement() {
                   ))}
                 </div>
               )}
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setIsCreateBlueprintExpanded(prev => !prev)}
+                aria-expanded={isCreateBlueprintExpanded}
+                aria-controls="create-blueprint-content"
+                className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+              >
+                <span className="flex flex-wrap items-center gap-2">
+                  <span className="text-base font-bold text-slate-900">Exam Blueprint</span>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">Reference only</span>
+                  <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                    {blueprintMode === 'module' ? 'By Module' : 'By Type'}
+                  </span>
+                </span>
+                <ChevronDown
+                  size={20}
+                  className={`shrink-0 text-slate-500 transition-transform ${isCreateBlueprintExpanded ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {isCreateBlueprintExpanded && (
+                <div id="create-blueprint-content" className="border-t border-slate-200 p-4 sm:p-5">
+                  {blueprintMode === 'module' ? <QuestionBankStatsPanel /> : <QuestionBankTypeStatsPanel />}
                 </div>
               )}
             </div>
@@ -1439,28 +1449,14 @@ function BatchManagement() {
             </div>
 
             <div className="pt-6 border-t border-blue-200">
-              <div className="overflow-hidden rounded-xl border border-blue-200 bg-white">
-                <button
-                  type="button"
-                  onClick={() => setIsEditBlueprintExpanded(prev => !prev)}
-                  aria-expanded={isEditBlueprintExpanded}
-                  aria-controls="edit-blueprint-content"
-                  className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-blue-50/50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
-                >
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="text-lg font-bold text-blue-800">Exam Blueprint (Total: {editTotalQuestions}/100)</span>
-                    <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
-                      {editBlueprintMode === 'module' ? 'By Module' : 'By Type'}
-                    </span>
+              <div className="space-y-4 rounded-xl border border-blue-200 bg-white p-4 sm:p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h4 className="m-0 text-lg font-bold text-blue-800">Question Configuration</h4>
+                  <span className="rounded-full bg-blue-100 px-3 py-1 text-sm font-semibold text-blue-700">
+                    Total: {editTotalQuestions}/100
                   </span>
-                  <ChevronDown
-                    size={20}
-                    className={`shrink-0 text-blue-600 transition-transform ${isEditBlueprintExpanded ? 'rotate-180' : ''}`}
-                  />
-                </button>
+                </div>
 
-                {isEditBlueprintExpanded && (
-                  <div id="edit-blueprint-content" className="space-y-4 border-t border-blue-200 p-4 sm:p-5">
                     <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
 
                     <div className="flex flex-wrap justify-end gap-2">
@@ -1506,16 +1502,16 @@ function BatchManagement() {
                   <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No modules available</div>
                 ) : (
                   <>
-                    <QuestionBankStatsPanel />
                     <div className="overflow-x-auto bg-white rounded-xl border border-blue-100 shadow-sm">
-                      <table className="w-full text-left text-sm text-slate-600">
+                      <table className="min-w-[720px] w-full text-left text-sm text-slate-600">
                         <thead className="bg-blue-50 text-blue-800 border-b border-blue-100">
                           <tr>
                             <th className="px-4 py-3 font-bold">Module</th>
                             <th className="px-4 py-3 font-bold text-center">🟢 Easy</th>
                             <th className="px-4 py-3 font-bold text-center">🟡 Medium</th>
                             <th className="px-4 py-3 font-bold text-center">🔴 Hard</th>
-                            <th className="px-4 py-3"></th>
+                            <th className="px-4 py-3 font-bold text-center">Total</th>
+                            <th className="w-20 px-4 py-3 font-bold text-center">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-blue-50">
@@ -1539,25 +1535,28 @@ function BatchManagement() {
                                     Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                                   </div>
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
                                     const nb = [...editingBatch.blueprint]; nb[index].easy = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprint: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
                                     const nb = [...editingBatch.blueprint]; nb[index].medium = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprint: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
                                     const nb = [...editingBatch.blueprint]; nb[index].hard = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprint: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top text-right">
+                                <td className="px-4 py-3 align-top text-center font-semibold text-slate-700">
+                                  {Number(item.easy || 0) + Number(item.medium || 0) + Number(item.hard || 0)}
+                                </td>
+                                <td className="px-4 py-3 align-top text-center">
                                   <button
                                     onClick={() => setEditingBatch({
                                       ...editingBatch,
@@ -1584,9 +1583,8 @@ function BatchManagement() {
                   <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No type data available</div>
                 ) : (
                   <>
-                    <QuestionBankTypeStatsPanel />
                     <div className="overflow-x-auto bg-white rounded-xl border border-blue-100 shadow-sm">
-                      <table className="w-full text-left text-sm text-slate-600">
+                      <table className="min-w-[840px] w-full text-left text-sm text-slate-600">
                         <thead className="bg-blue-50 text-blue-800 border-b border-blue-100">
                           <tr>
                             <th className="px-4 py-3 font-bold">Module</th>
@@ -1594,7 +1592,8 @@ function BatchManagement() {
                             <th className="px-4 py-3 font-bold text-center">🟢 Easy</th>
                             <th className="px-4 py-3 font-bold text-center">🟡 Medium</th>
                             <th className="px-4 py-3 font-bold text-center">🔴 Hard</th>
-                            <th className="px-4 py-3"></th>
+                            <th className="px-4 py-3 font-bold text-center">Total</th>
+                            <th className="w-20 px-4 py-3 font-bold text-center">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-blue-50">
@@ -1642,25 +1641,28 @@ function BatchManagement() {
                                     Available: {stats.easy}E / {stats.medium}M / {stats.hard}H
                                   </div>
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.easy || 0} max={stats.easy} onChange={v => {
                                     const nb = [...editingBatch.blueprintByType]; nb[index].easy = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprintByType: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.medium || 0} max={stats.medium} onChange={v => {
                                     const nb = [...editingBatch.blueprintByType]; nb[index].medium = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprintByType: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top">
+                                <td className="px-4 py-3 align-top text-center">
                                   <ValidatedInput value={item.hard || 0} max={stats.hard} onChange={v => {
                                     const nb = [...editingBatch.blueprintByType]; nb[index].hard = parseInt(v) || 0;
                                     setEditingBatch({ ...editingBatch, blueprintByType: nb });
                                   }} />
                                 </td>
-                                <td className="px-4 py-3 align-top text-right">
+                                <td className="px-4 py-3 align-top text-center font-semibold text-slate-700">
+                                  {Number(item.easy || 0) + Number(item.medium || 0) + Number(item.hard || 0)}
+                                </td>
+                                <td className="px-4 py-3 align-top text-center">
                                   <button
                                     onClick={() => setEditingBatch({
                                       ...editingBatch,
@@ -1700,6 +1702,32 @@ function BatchManagement() {
                   </ul>
                 </div>
               )}
+              </div>
+
+              <div className="mt-4 overflow-hidden rounded-xl border border-blue-200 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setIsEditBlueprintExpanded(prev => !prev)}
+                  aria-expanded={isEditBlueprintExpanded}
+                  aria-controls="edit-blueprint-content"
+                  className="flex w-full items-center justify-between gap-4 px-4 py-4 text-left transition-colors hover:bg-blue-50/50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-500"
+                >
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-lg font-bold text-blue-800">Exam Blueprint</span>
+                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">Reference only</span>
+                    <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                      {editBlueprintMode === 'module' ? 'By Module' : 'By Type'}
+                    </span>
+                  </span>
+                  <ChevronDown
+                    size={20}
+                    className={`shrink-0 text-blue-600 transition-transform ${isEditBlueprintExpanded ? 'rotate-180' : ''}`}
+                  />
+                </button>
+
+                {isEditBlueprintExpanded && (
+                  <div id="edit-blueprint-content" className="border-t border-blue-200 p-4 sm:p-5">
+                    {editBlueprintMode === 'module' ? <QuestionBankStatsPanel /> : <QuestionBankTypeStatsPanel />}
                   </div>
                 )}
               </div>
