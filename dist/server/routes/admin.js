@@ -10,11 +10,17 @@ import rateLimit from 'express-rate-limit';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import crypto from 'crypto';
 import { parseBlueprintCompat } from '../services/blueprint.js';
+import cache from '../cache.js';
+import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
+const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_IMPORT_FILE_BYTES, files: 1 },
+});
 // Rate limit riêng cho login: 10 request/phút
 const loginRateLimit = rateLimit({
     windowMs: 60 * 1000,
@@ -1038,21 +1044,23 @@ router.get('/batches/:id/students/export', async (req, res) => {
 });
 router.post('/students/:studentId/reset', async (req, res) => {
     try {
-        const { studentId } = req.params;
-        await db.query(`
-      UPDATE students 
-      SET status = 'pending', exam_started_at = NULL, exam_deadline = NULL, disconnected_at = NULL,
-          submitted_at = NULL, submit_reason = NULL, active_jti = NULL,
-          recording_finalized_at = NULL, recording_final_part_index = NULL, recording_incomplete = FALSE
-      WHERE id = ?
-    `, [parseInt(studentId)]);
-        await db.query('DELETE FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
-        await db.query('DELETE FROM recording_parts WHERE student_id = ?', [parseInt(studentId)]);
-        // Xóa phiên cũ để lần thi mới không bị false-positive concurrent_session
-        await db.query('DELETE FROM exam_sessions WHERE student_id = ?', [parseInt(studentId)]);
-        res.json({ success: true, message: 'Student exam reset successfully' });
+        const studentId = Number(req.params.studentId);
+        const durationMinutes = Number(req.body?.duration_minutes);
+        // Preserve any last edits that are still waiting in the answer buffer.
+        await cache.flushStudentAnswers(studentId);
+        const result = await db.withTransaction((tx) => reopenExamAttempt(tx, studentId, durationMinutes, new Date(), !USE_SQLITE));
+        cache.discardQueueForStudent(studentId);
+        // The transaction also clears the old session/recording metadata.
+        res.json({
+            success: true,
+            message: 'Exam reopened. The student must sign in again with the access code.',
+            ...result,
+        });
     }
     catch (error) {
+        if (error instanceof ExamResetError) {
+            return res.status(error.statusCode).json({ error: error.message });
+        }
         res.status(500).json({ error: error.message });
     }
 });

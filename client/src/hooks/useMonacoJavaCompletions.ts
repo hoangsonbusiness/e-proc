@@ -667,6 +667,21 @@ function getSpringWebMvcCompletions(monaco: typeof Monaco): Monaco.languages.Com
 
 let registered = false;
 
+export function getJavaCompletions(monaco: typeof Monaco): Monaco.languages.CompletionItem[] {
+  return [
+    ...getJavaKeywords(monaco),
+    ...getJavaSnippets(monaco),
+    ...getJavaMethodCompletions(monaco),
+    ...getSpringAnnotations(monaco),
+    ...getSpringWebMvcCompletions(monaco),
+    ...getHibernateAnnotations(monaco),
+    ...getSpringDataMethods(monaco),
+    ...getSpringSnippets(monaco),
+    ...getLombokAnnotations(monaco),
+    ...getValidationAnnotations(monaco),
+  ];
+}
+
 export function registerJavaCompletions(monaco: typeof Monaco): void {
   if (registered) return;
   registered = true;
@@ -682,18 +697,7 @@ export function registerJavaCompletions(monaco: typeof Monaco): void {
         endColumn: word.endColumn,
       };
 
-      const allItems = [
-        ...getJavaKeywords(monaco),
-        ...getJavaSnippets(monaco),
-        ...getJavaMethodCompletions(monaco),
-        ...getSpringAnnotations(monaco),
-        ...getSpringWebMvcCompletions(monaco),
-        ...getHibernateAnnotations(monaco),
-        ...getSpringDataMethods(monaco),
-        ...getSpringSnippets(monaco),
-        ...getLombokAnnotations(monaco),
-        ...getValidationAnnotations(monaco),
-      ].map(item => ({ ...item, range }));
+      const allItems = getJavaCompletions(monaco).map(item => ({ ...item, range }));
 
       return { suggestions: allItems };
     }

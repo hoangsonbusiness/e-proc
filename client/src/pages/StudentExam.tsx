@@ -4,15 +4,33 @@ import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
+import { getBlockReasonMessage, normalizeBlockReason, type BlockReason } from '../services/examBlockReason';
 import CodeEditor, { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
 // Static import: `detectLanguage` was already imported statically above, so Monaco was
-// always in the main bundle — lazy() gave no real split. Static import also avoids the
-// dynamic import() string that the obfuscator mangled (broke Monaco loading in production).
+// always in the main bundle and lazy() gave no real split. Keep one deterministic import
+// path because this is part of the exam-critical rendering path.
 
 const CLIPBOARD_VIOLATION_COOLDOWN_MS = 3000;
 const FULLSCREEN_EXIT_TIMEOUT_MS = 5000;
+// [#3] Cooldown chống đếm trùng, nhưng TÁCH THEO TYPE thay vì global —
+// trước đây một global cooldown 3s khiến một forensic event có thể "nuốt" mất
+// recording_stopped nếu xảy ra trong 3s. Giờ mỗi type có cooldown riêng và các
+// type critical bên dưới bỏ qua cooldown hoàn toàn.
+const VIOLATION_COOLDOWN_MS = 3000;
+// Các type KHÔNG BAO GIỜ bị cooldown bỏ qua — mất một sự kiện là mất bằng chứng gian lận nghiêm trọng.
+const COOLDOWN_EXEMPT_TYPES = new Set<string>([
+  'recording_stopped',
+  'concurrent_session',
+  // Rejected text is reverted immediately and every occurrence is useful
+  // forensic evidence. event_id keeps transport retries idempotent.
+  'suspicious_paste',
+]);
+// [#7] Retry: các type quan trọng phải được gửi tới server dù request đầu tiên lỗi
+// (extension/proxy chặn /violation không được phép âm thầm vô hiệu telemetry).
+const VIOLATION_RETRY_MAX = 5;
+const VIOLATION_RETRY_BASE_MS = 1000;
 const VIEWPORT_SHRINK_THRESHOLD_PX = 80;
 const VIEWPORT_CHECK_INTERVAL_MS = 1500;
 const VIEWPORT_SUSTAIN_POLLS = 2;
@@ -32,8 +50,6 @@ interface Question {
   answer?: string;
   options?: QuizOption[];
 }
-
-type BlockReason = 'timeout' | 'absent_too_long' | 'submitted';
 
 function StudentExam() {
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -56,7 +72,8 @@ function StudentExam() {
   // Modal yêu cầu bật lại ghi màn hình (khi recorder mất state sau reload/F5)
   const [recordingLost, setRecordingLost] = useState(false);
   const editorRef = useRef<CodeEditorHandle>(null);
-  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+  // Mỗi câu một timer: dùng chung một debounce khiến sửa câu B hủy lần lưu đang chờ của câu A.
+  const debounceRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
   const clipboardCooldownRef = useRef<Record<string, number>>({});
   const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -67,13 +84,12 @@ function StudentExam() {
   const devtoolsViolationCooldownRef = useRef<number>(0);
   // [Anti-Cheat v2] focus heartbeat refs
   const focusLostTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  // [Anti-Cheat v2] suspicious paste cooldown ref
-  const suspiciousPasteCooldownRef = useRef<number>(0);
   const multipleDisplayReportedRef = useRef(false);
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
-  const lastViolationTimeRef = useRef<number>(0);
+  // [#3] cooldown riêng cho từng type
+  const violationCooldownByTypeRef = useRef<Record<string, number>>({});
   const currentQuestionIdRef = useRef<string | undefined>(undefined);
   const answersRef = useRef<{ [key: number]: string }>({});
   const navigate = useNavigate();
@@ -130,8 +146,7 @@ function StudentExam() {
         console.error('[Exam] Error:', error);
         // Xử lý trường hợp bị block (410 Gone)
         if (error.response?.status === 410) {
-          const reason: BlockReason = error.response.data?.reason ?? 'submitted';
-          setBlockedReason(reason);
+          setBlockedReason(normalizeBlockReason(error.response.data?.reason));
           setLoading(false);
           document.exitFullscreen().catch(() => { });
           return;
@@ -188,12 +203,16 @@ function StudentExam() {
     if (submittingRef.current) return;
     if (!force && !confirm('Are you sure you want to submit?')) return;
 
+    // [P2-3] Set ref ĐỒNG BỘ ngay khi vượt guard. setSubmitting(true) chỉ đổi submittingRef
+    // ở render kế tiếp → hai lời gọi (vd hai response locked khác type song song) có thể cùng
+    // vượt `if (submittingRef.current) return` và chạy stopAndSave() hai lần, đua nhau thay
+    // recorder.onstop khiến một Promise không bao giờ resolve (treo submit). Đặt ref ngay đây
+    // đóng cửa sổ race đó. (Nếu user bấm Cancel ở confirm() phía trên thì đã return, không tới đây.)
+    submittingRef.current = true;
     setSubmitting(true);
 
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
+    Object.values(debounceRef.current).forEach(clearTimeout);
+    debounceRef.current = {};
     try {
       await Promise.all(
         Object.entries(answersRef.current).map(([order, answer]) => studentApi.saveAnswer(Number(order), answer))
@@ -226,64 +245,103 @@ function StudentExam() {
     }
   }, [navigate]);
 
+  // [#3][#7] Gửi báo cáo vi phạm + xử lý kết quả lock. Tách riêng khỏi cooldown gate
+  // để retry có thể tái sử dụng. Trả về true nếu bài đã bị khóa.
+  const sendViolationReport = useCallback(async (
+    type: string,
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number>; eventId?: string }
+  ): Promise<boolean> => {
+    const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
+    setViolationCount(res.data.total_violations);
+    if (res.data.forensic_only) return false;
+    if (res.data.locked) {
+      // [P2-3] Đặt ref ĐỒNG BỘ ngay khi nhận locked — setLocked/setSubmitting chỉ đổi ref
+      // ở render kế tiếp, nên hai response locked song song có thể cùng vượt guard của
+      // handleSubmit và chạy stopAndSave() hai lần (đua nhau thay recorder.onstop → treo).
+      if (lockedRef.current) return true; // đã có luồng khác xử lý lock rồi
+      lockedRef.current = true;
+      setLocked(true);
+      clearFullscreenExitTimeout();
+      document.exitFullscreen().catch(() => { });
+      alert('You have violated the exam rules. Your exam has been locked.');
+      await handleSubmit(true);
+      return true;
+    }
+    const warningByType: Record<string, string> = {
+      fullscreen_exit: 'You exited fullscreen',
+      tab_switch: 'You switched tabs',
+      copy_attempt: 'You attempted to copy text',
+      cut_attempt: 'You attempted to cut text',
+      paste_attempt: 'You attempted to paste text',
+      devtools_open: 'You attempted to open Developer Tools',
+      extension_panel: 'A browser extension panel was detected',
+      screenshot_attempt: 'You attempted to take a screenshot',
+      print_attempt: 'You attempted to print or capture the page',
+      // [Anti-Cheat v2] log-only types — hiển warning nhưng không lock
+      suspicious_paste: 'A large text insertion was detected (possible external paste)',
+      focus_lost: 'Browser window lost focus for an extended period',
+    };
+    const warning = warningByType[type] || 'You violated the exam rules';
+    // Show the warning as a modal toast instead of an alert() so it doesn't break fullscreen
+    setViolationWarningModal(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
+    if (violationWarningModalTimeoutRef.current) {
+      clearTimeout(violationWarningModalTimeoutRef.current);
+    }
+    violationWarningModalTimeoutRef.current = setTimeout(() => {
+      setViolationWarningModal('');
+    }, 5000);
+    return false;
+  }, [clearFullscreenExitTimeout, handleSubmit]);
+
   const handleViolation = useCallback(async (
     type: string,
     meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number> }
   ): Promise<boolean> => {
     const now = Date.now();
-    // Global cooldown: ignore multiple violations within 3 seconds
-    // This prevents copy+paste or alt+tab from counting as 2 violations instantly
-    if (now - lastViolationTimeRef.current < 3000) {
-      return false;
-    }
-    lastViolationTimeRef.current = now;
-
-    try {
-      const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
-      setViolationCount(res.data.total_violations);
-      if (res.data.forensic_only) return false;
-      if (res.data.locked) {
-        setLocked(true);
-        clearFullscreenExitTimeout();
-        document.exitFullscreen().catch(() => { });
-        alert('You have violated the exam rules. Your exam has been locked.');
-        await handleSubmit(true);
-        return true;
-      } else {
-        const warningByType: Record<string, string> = {
-          fullscreen_exit: 'You exited fullscreen',
-          tab_switch: 'You switched tabs',
-          copy_attempt: 'You attempted to copy text',
-          cut_attempt: 'You attempted to cut text',
-          paste_attempt: 'You attempted to paste text',
-          devtools_open: 'You attempted to open Developer Tools',
-          extension_panel: 'A browser extension panel was detected',
-          screenshot_attempt: 'You attempted to take a screenshot',
-          print_attempt: 'You attempted to print or capture the page',
-          // [Anti-Cheat v2] log-only types — hiển warning nhưng không lock
-          suspicious_paste: 'A large text insertion was detected (possible external paste)',
-          focus_lost: 'Browser window lost focus for an extended period',
-        };
-        const warning = warningByType[type] || 'You violated the exam rules';
-
-        // Show the warning as a modal toast instead of an alert() so it doesn't break fullscreen
-        setViolationWarningModal(`Warning: ${warning}. This is violation ${res.data.violation_count}. After 2 violations, your exam will be locked.`);
-        if (violationWarningModalTimeoutRef.current) {
-          clearTimeout(violationWarningModalTimeoutRef.current);
-        }
-        violationWarningModalTimeoutRef.current = setTimeout(() => {
-          setViolationWarningModal('');
-        }, 5000);
-
-        // Reset cooldown after warning appears to prevent queued events from firing immediately
-        lastViolationTimeRef.current = Date.now();
+    // [#3] Cooldown TÁCH THEO TYPE (không còn global). Các type critical được miễn
+    // hoàn toàn để một sự kiện thường không thể "nuốt" mất recording_stopped/concurrent_session.
+    if (!COOLDOWN_EXEMPT_TYPES.has(type)) {
+      const last = violationCooldownByTypeRef.current[type] || 0;
+      if (now - last < VIOLATION_COOLDOWN_MS) {
         return false;
       }
+      violationCooldownByTypeRef.current[type] = now;
+    }
+
+    // [P1-1] Sinh event_id MỘT LẦN cho sự kiện này; giữ nguyên qua lần gửi đầu và mọi retry.
+    // Nhờ đó backend idempotent theo (student_id, event_id): retry sau khi server đã commit
+    // (chỉ response bị mất) KHÔNG bị đếm trùng → không auto-lock oan.
+    const eventId =
+      (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const metaWithId = { ...meta, eventId };
+
+    try {
+      return await sendViolationReport(type, metaWithId);
     } catch (error) {
-      console.error(error);
+      console.error('[violation] report failed:', type, error);
+      // [#7] Retry nền với backoff. An toàn nhờ event_id idempotent (P1-1): dù request đầu
+      // đã commit ở server, retry cùng event_id sẽ được backend nhận diện trùng và trả lại
+      // kết quả cũ. Không đụng cooldown vì đây là cùng một sự kiện đang gửi lại.
+      // Lưu ý giới hạn: retry chỉ cứu lỗi mạng TẠM THỜI — extension/proxy chặn /violation
+      // liên tục vẫn vô hiệu được telemetry (đây là signal, không phải bảo đảm tuyệt đối).
+      void (async () => {
+        for (let attempt = 1; attempt <= VIOLATION_RETRY_MAX; attempt++) {
+          const delay = VIOLATION_RETRY_BASE_MS * Math.pow(2, attempt - 1);
+          await new Promise((r) => setTimeout(r, delay));
+          if (lockedRef.current || submittingRef.current) return; // đã kết thúc, thôi retry
+          try {
+            await sendViolationReport(type, metaWithId);
+            return; // gửi lại thành công
+          } catch (retryErr) {
+            console.error(`[violation] retry ${attempt}/${VIOLATION_RETRY_MAX} failed:`, type, retryErr);
+          }
+        }
+      })();
       return false;
     }
-  }, [clearFullscreenExitTimeout, handleSubmit]);
+  }, [sendViolationReport]);
 
   const reconcileFullscreenState = useCallback(() => {
     if (!startedRef.current || lockedRef.current || submittingRef.current) {
@@ -674,8 +732,7 @@ function StudentExam() {
       }
     } catch (error: any) {
       if (error.response?.status === 410) {
-        const reason: BlockReason = error.response.data?.reason ?? 'submitted';
-        setBlockedReason(reason);
+        setBlockedReason(normalizeBlockReason(error.response.data?.reason));
         setLoading(false);
         document.exitFullscreen().catch(() => { });
         return;
@@ -724,9 +781,6 @@ function StudentExam() {
   // và độ dài thật để backend ghi forensic log.
   const handleSuspiciousPaste = useCallback((preview: string, textLength: number) => {
     if (!started || locked || submitting) return;
-    const now = Date.now();
-    if (now - suspiciousPasteCooldownRef.current < 10000) return; // 10s cooldown
-    suspiciousPasteCooldownRef.current = now;
     void handleViolation('suspicious_paste', {
       contentPreview: preview,
       textLength,
@@ -764,8 +818,9 @@ function StudentExam() {
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
 
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
+    if (debounceRef.current[order]) clearTimeout(debounceRef.current[order]);
+    debounceRef.current[order] = setTimeout(() => {
+      delete debounceRef.current[order];
       studentApi.saveAnswer(order, text).catch(console.error); // [C-4] token tự động
     }, 5000);
   }, []);
@@ -783,8 +838,9 @@ function StudentExam() {
         next = [key];
       }
       const serialized = JSON.stringify(next);
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(() => {
+      if (debounceRef.current[order]) clearTimeout(debounceRef.current[order]);
+      debounceRef.current[order] = setTimeout(() => {
+        delete debounceRef.current[order];
         studentApi.saveAnswer(order, serialized).catch(console.error);
       }, 500);
       return { ...prev, [order]: serialized };
@@ -845,24 +901,9 @@ function StudentExam() {
   }
 
   if (blockedReason) {
-    const blockedMessages: Record<BlockReason, { title: string; message: string; icon: string }> = {
-      timeout: {
-        icon: '⏰',
-        title: 'Time\'s Up',
-        message: 'Your exam time has expired. Your answers have been automatically submitted.'
-      },
-      absent_too_long: {
-        icon: '🚫',
-        title: 'Session Expired',
-        message: 'You were absent for more than 2 minutes. Your exam has been automatically submitted to prevent cheating.'
-      },
-      submitted: {
-        icon: '✅',
-        title: 'Exam Already Submitted',
-        message: 'Your exam has already been submitted. You cannot re-enter the exam.'
-      }
-    };
-    const { icon, title, message } = blockedMessages[blockedReason];
+    // getBlockReasonMessage normalizes again so rendering remains safe even if
+    // this state is ever hydrated from untyped external data in the future.
+    const { icon, title, message } = getBlockReasonMessage(blockedReason);
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
         <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-lg w-full text-center">
@@ -1037,6 +1078,7 @@ function StudentExam() {
                   <CodeEditor
                     ref={editorRef}
                     value={answers[currentQuestion.question_order] || ''}
+                    modelPath={`inmemory://exam/question/${encodeURIComponent(currentQuestion.id)}`}
                     onChange={(val) => saveAnswer(currentQuestion.question_order, val)}
                     onCopyAttempt={handleCopyAttempt}
                     onCutAttempt={handleCutAttempt}

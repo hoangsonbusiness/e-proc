@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
-import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound } from 'lucide-react';
+import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw } from 'lucide-react';
 import DOMPurify from 'dompurify';
 
 function Results() {
@@ -14,6 +14,7 @@ function Results() {
   const [editFeedback, setEditFeedback] = useState('');
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [resettingStudentId, setResettingStudentId] = useState<number | null>(null);
   // Forensic popup: xem chi tiết các lần vi phạm (kèm nội dung paste) của 1 học viên
   const [violationDetail, setViolationDetail] = useState<{ email: string; events: any[] } | null>(null);
 
@@ -70,6 +71,34 @@ function Results() {
       console.error(error);
     }
     setSaving(false);
+  };
+
+  const handleResetExam = async (student: any) => {
+    const rawDuration = window.prompt(
+      `How many minutes should ${student.email} receive to continue the saved exam?`,
+      String(batch?.duration || 30),
+    );
+    if (rawDuration === null) return;
+    const durationMinutes = Number(rawDuration);
+    if (!Number.isInteger(durationMinutes) || durationMinutes < 1 || durationMinutes > 480) {
+      window.alert('Duration must be a whole number between 1 and 480 minutes.');
+      return;
+    }
+    if (!window.confirm(
+      'This keeps all saved questions and answers, clears old scores/AI jobs, and revokes the old session. Continue?'
+    )) return;
+
+    setResettingStudentId(student.id);
+    try {
+      const response = await adminApi.resetStudentExam(student.id, durationMinutes);
+      window.alert(`${response.data.message}\nNew deadline: ${new Date(response.data.deadline).toLocaleString()}`);
+      setSelectedStudent(null);
+      await loadResults();
+    } catch (error: any) {
+      window.alert(error.response?.data?.error || error.message || 'Could not reset the exam.');
+    } finally {
+      setResettingStudentId(null);
+    }
   };
 
   const getAverageScore = (student: any) => {
@@ -234,22 +263,35 @@ function Results() {
                         </span>
                       </td>
                       <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => {
-                            setSelectedStudent(r);
-                            const firstQ = r.questions[0];
-                            setEditScore(firstQ?.trainer_score ?? firstQ?.ai_score ?? 0);
-                            setEditFeedback(firstQ?.trainer_feedback ?? '');
-                            // scroll to review section
-                            setTimeout(() => {
-                              document.getElementById('review-section')?.scrollIntoView({ behavior: 'smooth' });
-                            }, 100);
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
-                        >
-                          <Settings2 size={14} />
-                          Review
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-2">
+                          {r.student.status === 'submitted' && r.questions.length > 0 && (
+                            <button
+                              onClick={() => handleResetExam(r.student)}
+                              disabled={resettingStudentId === r.student.id}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-sm font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
+                              title="Continue with the saved questions and answers"
+                            >
+                              <RotateCcw size={14} />
+                              {resettingStudentId === r.student.id ? 'Resetting...' : 'Reset'}
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              setSelectedStudent(r);
+                              const firstQ = r.questions[0];
+                              setEditScore(firstQ?.trainer_score ?? firstQ?.ai_score ?? 0);
+                              setEditFeedback(firstQ?.trainer_feedback ?? '');
+                              // scroll to review section
+                              setTimeout(() => {
+                                document.getElementById('review-section')?.scrollIntoView({ behavior: 'smooth' });
+                              }, 100);
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
+                          >
+                            <Settings2 size={14} />
+                            Review
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

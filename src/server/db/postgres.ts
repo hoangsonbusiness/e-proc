@@ -36,7 +36,8 @@ async function initPostgres() {
   pgPool.on('connect', () => console.log('[DB] New PG connection'));
 
   const client = await pgPool.connect();
-  console.log('[DB] PostgreSQL connected!');
+  try {
+    console.log('[DB] PostgreSQL connected!');
   
   await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
   
@@ -223,6 +224,36 @@ await client.query(`
   `);
   console.log('[DB] violations ready');
 
+  // [P1-1][P2-2] UPSERT counter cần unique (student_id, type). CHỈ chạy merge legacy MỘT LẦN,
+  // khi index chưa tồn tại — nếu không mỗi cold-start Vercel sẽ quét full-table GROUP BY +
+  // UPDATE + DELETE vô ích (tốn query/lock Supabase, đi ngược free-tier). Sau lần đầu, index
+  // đã có → bỏ qua hoàn toàn. Việc dedupe legacy chuẩn nằm ở migration; đây chỉ là an toàn cho
+  // môi trường tự-init (SQLite dev / DB chưa migrate).
+  const violationsIdxExists = (await client.query(
+    `SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'ux_violations_student_type' LIMIT 1`
+  )).rows.length > 0;
+  if (!violationsIdxExists) {
+    // Merge legacy CHỈ khi index chưa có — dữ liệu bẩn có thể khiến merge lỗi nhưng đó là
+    // tình huống cần con người xử lý; không nuốt lỗi ở đây nữa vì CREATE INDEX bên dưới là
+    // BẮT BUỘC cho /violation. Nếu bước này lỗi, init fail → readiness fail (đúng ý đồ).
+    await client.query(`
+      WITH merged AS (
+        SELECT student_id, type, SUM(count) AS total, MIN(id) AS keep_id
+        FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+      )
+      UPDATE violations v SET count = m.total
+      FROM merged m WHERE v.id = m.keep_id
+    `);
+    await client.query(`
+      DELETE FROM violations v USING (
+        SELECT student_id, type, MIN(id) AS keep_id
+        FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+      ) d
+      WHERE v.student_id = d.student_id AND v.type = d.type AND v.id <> d.keep_id
+    `);
+    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_violations_student_type ON violations(student_id, type)');
+  }
+
   // Anti-Cheat: append-only forensic log — mỗi lần vi phạm một dòng (khác với
   // bảng violations vốn khóa theo (student_id, type) nên chỉ đếm được số lần).
   // content_preview chỉ có với suspicious_paste (500 ký tự đầu); focus_lost để NULL.
@@ -243,6 +274,12 @@ await client.query(`
   try {
     await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS metadata_json TEXT');
   } catch (_) { /* already exists */ }
+  // [P1-1][P1-review] Idempotency: event_id do client sinh, giữ nguyên qua retry. Unique một
+  // phần (chỉ khi NOT NULL) để row cũ / forensic tự-sinh (event_id NULL) không xung đột.
+  // KHÔNG nuốt lỗi — /violation bắt buộc index này tồn tại; nếu tạo lỗi thì init phải fail
+  // để readiness fail, tránh server healthy nhưng /violation luôn 500. Các câu đều idempotent.
+  await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64)');
+  await client.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS recording_parts (
@@ -309,8 +346,10 @@ await client.query(`
   } catch (_) { /* already exists */ }
   console.log('[DB] admin_users ready');
 
-  client.release();
-  console.log('[DB] All PostgreSQL tables initialized');
+    console.log('[DB] All PostgreSQL tables initialized');
+  } finally {
+    client.release();
+  }
 }
 
 function initSqlite() {
@@ -429,7 +468,28 @@ function initSqlite() {
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
       )
     `);
-    
+    // [P1-1][P2-2] Gộp row trùng rồi tạo unique index — CHỈ khi index chưa tồn tại, tránh
+    // quét full-table mỗi lần khởi động (xem ghi chú ở nhánh PostgreSQL). KHÔNG nuốt lỗi:
+    // index này bắt buộc cho /violation; lỗi phải làm init fail để readiness fail.
+    const violationsIdxExists = sqliteDb.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_violations_student_type' LIMIT 1"
+    ).get();
+    if (!violationsIdxExists) {
+      sqliteDb.exec(`
+        UPDATE violations SET count = (
+          SELECT SUM(v2.count) FROM violations v2
+          WHERE v2.student_id = violations.student_id AND v2.type = violations.type
+        )
+        WHERE id IN (
+          SELECT MIN(id) FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+        );
+        DELETE FROM violations WHERE id NOT IN (
+          SELECT MIN(id) FROM violations GROUP BY student_id, type
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_violations_student_type ON violations(student_id, type);
+      `);
+    }
+
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS violation_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -448,6 +508,11 @@ function initSqlite() {
     if (!violationEventCols.some((col) => col.name === 'metadata_json')) {
       sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN metadata_json TEXT');
     }
+    // [P1-1] event_id idempotency (xem bản PostgreSQL). SQLite: partial unique index hợp lệ.
+    if (!violationEventCols.some((col) => col.name === 'event_id')) {
+      sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN event_id TEXT');
+    }
+    sqliteDb.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
 
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS recording_parts (
@@ -550,6 +615,140 @@ export async function initDatabase() {
   }
 }
 
+/**
+ * [P1-review][P2-review] Xác minh hai index BẮT BUỘC không chỉ TỒN TẠI mà đúng ĐỊNH NGHĨA —
+ * /violation phụ thuộc cứng vào chúng (ON CONFLICT). Chỉ khớp tên là chưa đủ: một index cùng
+ * tên nhưng không unique / sai cột / thiếu predicate `WHERE event_id IS NOT NULL` sẽ khiến
+ * ON CONFLICT lỗi runtime dù readiness báo ready. Ta kiểm định nghĩa thật:
+ *  - PostgreSQL: pg_index.indisunique/indisvalid/indisready + pg_get_indexdef (chứa cột, UNIQUE,
+ *    và WHERE predicate).
+ *  - SQLite: PRAGMA index_list (unique) + index_info (cột) + sqlite_master.sql (predicate).
+ */
+export async function verifyRequiredSchema(): Promise<void> {
+  const fail = (msg: string): never => {
+    throw new Error(`[schema] ${msg}. Run migrations before serving.`);
+  };
+
+  if (USE_SQLITE) {
+    if (!sqliteDb) throw new Error('[schema] SQLite not initialized');
+    const checkSqlite = (table: string, indexName: string, cols: string[], predicate: string | null) => {
+      const list = sqliteDb!.prepare(`PRAGMA index_list(${table})`).all() as { name: string; unique: number }[];
+      const entry = list.find((i) => i.name === indexName);
+      if (!entry) fail(`index ${indexName} missing on ${table}`);
+      if (!entry!.unique) fail(`index ${indexName} is not UNIQUE`);
+      const info = sqliteDb!.prepare(`PRAGMA index_info(${indexName})`).all() as { seqno: number; name: string }[];
+      const actual = info.sort((a, b) => a.seqno - b.seqno).map((c) => c.name);
+      if (actual.join(',') !== cols.join(',')) fail(`index ${indexName} columns ${actual.join(',')} != expected ${cols.join(',')}`);
+      const row = sqliteDb!.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(indexName) as { sql: string } | undefined;
+      const sql = (row?.sql || '').toLowerCase();
+      if (predicate && !sql.includes(predicate.toLowerCase())) fail(`index ${indexName} missing partial predicate "${predicate}"`);
+      if (!predicate && sql.includes(' where ')) fail(`index ${indexName} unexpectedly has a WHERE predicate`);
+    };
+    checkSqlite('violations', 'ux_violations_student_type', ['student_id', 'type'], null);
+    checkSqlite('violation_events', 'ux_violation_events_student_event', ['student_id', 'event_id'], 'event_id is not null');
+  } else {
+    if (!pgPool) throw new Error('[schema] PostgreSQL pool not initialized');
+    const requiredColumns: Record<string, string[]> = {
+      students: [
+        'exam_started_at', 'exam_deadline', 'disconnected_at', 'recording_password',
+        'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
+        'recording_final_part_index', 'recording_incomplete',
+      ],
+      batches: ['record_mode', 'exam_type'],
+      exam_questions: ['option_order'],
+      violation_events: ['metadata_json', 'event_id'],
+      recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
+      exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
+      ai_queue: ['id', 'status', 'attempts', 'updated_at'],
+    };
+    const columnRows = await pgPool.query(
+      `SELECT table_name, column_name FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = ANY($1)`,
+      [Object.keys(requiredColumns)]
+    );
+    const columnSet = new Set(columnRows.rows.map((r: any) => `${r.table_name}.${r.column_name}`));
+    for (const [table, columns] of Object.entries(requiredColumns)) {
+      for (const column of columns) {
+        if (!columnSet.has(`${table}.${column}`)) fail(`required column ${table}.${column} missing`);
+      }
+    }
+
+    const checkPg = async (indexName: string, table: string, cols: string[], predicate: string | null) => {
+      const r = await pgPool!.query(
+        `SELECT i.indisunique, i.indisvalid, i.indisready,
+                c.relname AS index_name, t.relname AS table_name,
+                pg_get_indexdef(i.indexrelid) AS def,
+                pg_get_expr(i.indpred, i.indrelid) AS predicate,
+                ARRAY(
+                  SELECT a.attname
+                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a
+                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                  WHERE k.ord <= i.indnkeyatts
+                  ORDER BY k.ord
+                ) AS columns
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_class t ON t.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = $1 AND n.nspname = current_schema()`,
+        [indexName]
+      );
+      const row = r.rows[0];
+      if (!row) fail(`index ${indexName} missing`);
+      if (!row.indisunique) fail(`index ${indexName} is not UNIQUE`);
+      if (!row.indisvalid) fail(`index ${indexName} is INVALID`);
+      if (!row.indisready) fail(`index ${indexName} is not READY`);
+      if (row.table_name !== table) fail(`index ${indexName} on wrong table ${row.table_name} (expected ${table})`);
+      const actualCols = (row.columns as string[] | null) || [];
+      if (actualCols.join(',') !== cols.join(',')) {
+        fail(`index ${indexName} columns ${actualCols.join(',')} != expected ${cols.join(',')}`);
+      }
+      const actualPredicate = row.predicate == null
+        ? null
+        : String(row.predicate).toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
+      const expectedPredicate = predicate?.toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim() || null;
+      if (actualPredicate !== expectedPredicate) {
+        fail(`index ${indexName} predicate ${actualPredicate || '<none>'} != expected ${expectedPredicate || '<none>'}`);
+      }
+    };
+    const checkPgUniqueColumns = async (table: string, cols: string[]) => {
+      const r = await pgPool!.query(
+        `SELECT ARRAY(
+                  SELECT a.attname
+                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a
+                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                  WHERE k.ord <= i.indnkeyatts
+                  ORDER BY k.ord
+                ) AS columns
+         FROM pg_index i
+         JOIN pg_class t ON t.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE t.relname = $1 AND n.nspname = current_schema()
+           AND i.indisunique AND i.indisvalid AND i.indisready AND i.indpred IS NULL`,
+        [table]
+      );
+      const found = r.rows.some((row: any) => ((row.columns as string[] | null) || []).join(',') === cols.join(','));
+      if (!found) fail(`required UNIQUE index on ${table}(${cols.join(', ')}) missing`);
+    };
+    await checkPg('ux_violations_student_type', 'violations', ['student_id', 'type'], null);
+    await checkPg('ux_violation_events_student_event', 'violation_events', ['student_id', 'event_id'], 'event_id is not null');
+    await checkPgUniqueColumns('students', ['access_code']);
+    await checkPgUniqueColumns('exam_questions', ['student_id', 'question_order']);
+    await checkPgUniqueColumns('recording_parts', ['student_id', 'part_index']);
+    await checkPgUniqueColumns('exam_sessions', ['student_id', 'jti', 'ip']);
+  }
+  console.log('[DB] Required schema verified (definition-checked)');
+}
+
+/**
+ * Shared readiness promise. initDatabase → verifyRequiredSchema. Local server await trước
+ * listen(); request middleware (serverless) await trước khi chạm DB. Reject ⇒ server không
+ * phục vụ request thi thay vì trả 500 âm thầm.
+ */
+export const dbReady: Promise<void> = initDatabase().then(verifyRequiredSchema);
+
 interface DbResult {
   rows: any[];
   rowCount: number;
@@ -635,4 +834,4 @@ export function getPool() {
   return pgPool;
 }
 
-export default { initDatabase, query, withTransaction, getPool };
+export default { initDatabase, query, withTransaction, getPool, verifyRequiredSchema, dbReady };

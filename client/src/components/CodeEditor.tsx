@@ -8,8 +8,12 @@ import {
 } from 'react';
 import Editor, { OnMount, BeforeMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import { registerJavaCompletions } from '../hooks/useMonacoJavaCompletions';
+import { getJavaCompletions, registerJavaCompletions } from '../hooks/useMonacoJavaCompletions';
 import { useFrontendCompletions } from '../hooks/useFrontendCompletions';
+import { getHtmlCompletions } from '../hooks/htmlCompletions';
+import { getCssCompletions } from '../hooks/cssCompletions';
+import { getJsCompletions } from '../hooks/jsCompletions';
+import { matchesRegisteredSuggestion, type SuggestionTemplate } from '../services/suggestionMatcher';
 
 // ─── Language options displayed in the selector dropdown ──────────────────
 
@@ -50,6 +54,9 @@ export interface CodeEditorHandle {
 
 interface CodeEditorProps {
   value: string;
+  // Stable Monaco model URI for the current question. Different questions use
+  // different models so navigation never looks like one giant text edit.
+  modelPath: string;
   onChange: (value: string) => void;
   onCopyAttempt: () => void;
   onCutAttempt: () => void;
@@ -69,6 +76,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
   function CodeEditor(
     {
       value,
+      modelPath,
       onChange,
       onCopyAttempt,
       onCutAttempt,
@@ -83,8 +91,16 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
   ) {
     const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
     const monacoRef = useRef<typeof Monaco | null>(null);
+    // Updated during render, before @monaco-editor/react synchronizes its value
+    // prop in an effect. Equality after a content event means the edit came from
+    // React/model synchronization, not from student input.
+    const expectedExternalValueRef = useRef(value);
+    expectedExternalValueRef.current = value;
+    const revertingSuspiciousInsertionRef = useRef(false);
     const [monacoInstance, setMonacoInstance] = useState<typeof Monaco | null>(null);
     const [language, setLanguage] = useState<SupportedLanguage>(defaultLanguage);
+    const languageRef = useRef<SupportedLanguage>(language);
+    languageRef.current = language;
     const [showGuide, setShowGuide] = useState(false);
 
     // Register frontend completions (HTML/CSS/JS/Bootstrap 5)
@@ -93,6 +109,24 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
     useFrontendCompletions(monacoInstance);
 
     const toggleGuide = useCallback(() => setShowGuide(v => !v), []);
+
+    const getRegisteredSuggestionTemplates = useCallback((): SuggestionTemplate[] => {
+      const monaco = monacoRef.current;
+      if (!monaco) return [];
+
+      let items: Monaco.languages.CompletionItem[] = [];
+      const activeLanguage = languageRef.current;
+      if (activeLanguage === 'java') items = getJavaCompletions(monaco);
+      else if (activeLanguage === 'html') items = getHtmlCompletions(monaco);
+      else if (activeLanguage === 'css') items = getCssCompletions(monaco);
+      else if (activeLanguage === 'javascript') items = getJsCompletions(monaco);
+
+      const snippetRule = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+      return items.map((item) => ({
+        insertText: item.insertText,
+        isSnippet: ((item.insertTextRules ?? 0) & snippetRule) !== 0,
+      }));
+    }, []);
 
     // ── Prefix reference table data ────────────────────────────────────────
     const PREFIX_GROUPS = useMemo(() => [
@@ -1111,21 +1145,35 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         // an toàn. Nếu sau này bật lại chúng, phải kèm điều kiện loại snippet
         // (vd: check suggest widget đang mở) trước khi giữ ngưỡng 300.
         //
-        // isFlush: bỏ qua khi resume exam (setAnswers → value prop thay đổi)
+        // This signal remains forensic-only on the backend because insertion
+        // size is evidence for review, not proof of clipboard use.
         if (onSuspiciousPaste) {
-          let suspiciousPasteLastFired = 0;
-
           editor.onDidChangeModelContent((e) => {
-            // Bỏ qua flush: xảy ra khi value prop được set từ bên ngoài
-            if (e.isFlush) return;
-
-            const now = Date.now();
-            // Cooldown 10s: tránh report nhiều lần từ cùng 1 paste action
-            if (now - suspiciousPasteLastFired < 10000) return;
+            // @monaco-editor/react 4.7 uses executeEdits() for controlled value
+            // synchronization, so those events have isFlush=false. The equality
+            // guard also rejects navigation/resume updates.
+            if (
+              revertingSuspiciousInsertionRef.current ||
+              e.isFlush ||
+              editor.getValue() === expectedExternalValueRef.current
+            ) return;
 
             for (const change of e.changes) {
               if (change.text.length >= 300) {
-                suspiciousPasteLastFired = now;
+                const isRegisteredSuggestion = matchesRegisteredSuggestion(
+                  change.text,
+                  getRegisteredSuggestionTemplates()
+                );
+                if (isRegisteredSuggestion) continue;
+
+                // Revert the complete Monaco edit operation before reporting it.
+                // The nested undo content event is ignored by the ref guard.
+                revertingSuspiciousInsertionRef.current = true;
+                try {
+                  editor.trigger('anti-cheat', 'undo', null);
+                } finally {
+                  revertingSuspiciousInsertionRef.current = false;
+                }
                 onSuspiciousPaste(change.text.slice(0, 500), change.text.length);
                 break;
               }
@@ -1139,7 +1187,11 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
           const windowMs = 2500;
 
           editor.onDidChangeModelContent((e) => {
-            if (e.isFlush) return;
+            if (
+              revertingSuspiciousInsertionRef.current ||
+              e.isFlush ||
+              editor.getValue() === expectedExternalValueRef.current
+            ) return;
             const now = Date.now();
             const insertions = e.changes.map((change) => change.text.length).filter((length) => length > 0);
             if (insertions.length === 0) return;
@@ -1163,7 +1215,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
         // Auto-focus
         editor.focus();
       },
-      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste, onRapidInsertion]
+      [onCopyAttempt, onCutAttempt, onPasteAttempt, onSuspiciousPaste, onRapidInsertion, getRegisteredSuggestionTemplates]
     );
 
     // ── Language change handler ────────────────────────────────────────────
@@ -1267,6 +1319,7 @@ const CodeEditor = forwardRef<CodeEditorHandle, CodeEditorProps>(
             height={height}
             language={language}
             theme="vs-dark"
+            path={modelPath}
             value={value}
             options={{
               fontSize: 16,

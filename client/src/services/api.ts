@@ -125,6 +125,9 @@ export const adminApi = {
   
   deleteStudent: (studentId: number) =>
     api.delete(`/admin/students/${studentId}`),
+
+  resetStudentExam: (studentId: number, durationMinutes: number) =>
+    api.post(`/admin/students/${studentId}/reset`, { duration_minutes: durationMinutes }),
   
   exportStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students/export`, { responseType: 'blob' }),
@@ -172,10 +175,14 @@ export const studentApi = {
 
   reportViolation: (
     type: string,
-    meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number> }
+    meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number>; eventId?: string }
   ) =>
     api.post('/student/violation', {
       type,
+      // [P1-1] event_id sinh MỘT LẦN ở client, giữ nguyên qua mọi retry. Backend dùng
+      // unique (student_id, event_id) để idempotent: retry sau khi server đã commit không
+      // đếm trùng → không khóa oan. Bắt buộc có khi retry (xem handleViolation).
+      event_id: meta?.eventId,
       content_preview: meta?.contentPreview,
       text_length: meta?.textLength,
       question_id: meta?.questionId,

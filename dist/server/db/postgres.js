@@ -26,9 +26,10 @@ async function initPostgres() {
     pgPool.on('error', (err) => console.error('[DB] Pool error:', err.message));
     pgPool.on('connect', () => console.log('[DB] New PG connection'));
     const client = await pgPool.connect();
-    console.log('[DB] PostgreSQL connected!');
-    await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
-    await client.query(`
+    try {
+        console.log('[DB] PostgreSQL connected!');
+        await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
+        await client.query(`
     CREATE TABLE IF NOT EXISTS question_bank (
       id VARCHAR(50) PRIMARY KEY,
       type TEXT NOT NULL CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug')),
@@ -42,66 +43,66 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    // Migration: cập nhật CHECK constraint type cho DB cũ
-    // Dùng transaction atomic: check exists → chỉ drop+add nếu constraint chưa đúng
-    try {
-        await client.query('BEGIN');
-        const constraintCheck = await client.query(`
+        // Migration: cập nhật CHECK constraint type cho DB cũ
+        // Dùng transaction atomic: check exists → chỉ drop+add nếu constraint chưa đúng
+        try {
+            await client.query('BEGIN');
+            const constraintCheck = await client.query(`
       SELECT conname, pg_get_constraintdef(oid) AS condef
       FROM pg_constraint
       WHERE conrelid = 'question_bank'::regclass
         AND conname = 'question_bank_type_check'
     `);
-        const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text, 'SingleChoice'::text, 'MultipleChoice'::text])))`;
-        const existing = constraintCheck.rows[0];
-        if (!existing) {
-            // Constraint chưa tồn tại → ADD mới
-            console.log('[DB] question_bank_type_check: not found → adding');
-            await client.query(`
+            const targetDef = `CHECK ((type = ANY (ARRAY['Coding'::text, 'Conceptual'::text, 'Fill-in'::text, 'Debug'::text, 'SingleChoice'::text, 'MultipleChoice'::text])))`;
+            const existing = constraintCheck.rows[0];
+            if (!existing) {
+                // Constraint chưa tồn tại → ADD mới
+                console.log('[DB] question_bank_type_check: not found → adding');
+                await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
           CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
-        }
-        else if (existing.condef !== targetDef) {
-            // Constraint tồn tại nhưng định nghĩa cũ → DROP rồi ADD mới
-            console.log('[DB] question_bank_type_check: outdated →', existing.condef);
-            await client.query(`ALTER TABLE question_bank DROP CONSTRAINT question_bank_type_check`);
-            await client.query(`
+            }
+            else if (existing.condef !== targetDef) {
+                // Constraint tồn tại nhưng định nghĩa cũ → DROP rồi ADD mới
+                console.log('[DB] question_bank_type_check: outdated →', existing.condef);
+                await client.query(`ALTER TABLE question_bank DROP CONSTRAINT question_bank_type_check`);
+                await client.query(`
         ALTER TABLE question_bank
           ADD CONSTRAINT question_bank_type_check
           CHECK(type IN ('Coding', 'Conceptual', 'Fill-in', 'Debug', 'SingleChoice', 'MultipleChoice'))
       `);
+            }
+            else {
+                console.log('[DB] question_bank_type_check: already up-to-date, skipping');
+            }
+            await client.query('COMMIT');
         }
-        else {
-            console.log('[DB] question_bank_type_check: already up-to-date, skipping');
+        catch (err) {
+            await client.query('ROLLBACK');
+            console.error('[DB] question_bank_type_check migration error:', err);
         }
-        await client.query('COMMIT');
-    }
-    catch (err) {
-        await client.query('ROLLBACK');
-        console.error('[DB] question_bank_type_check migration error:', err);
-    }
-    // Migration: cột quiz (SingleChoice/MultipleChoice). Câu tự luận cũ để NULL.
-    // options: JSON [{"key":"A","text":"..."}], correct_answers: JSON ["A","C"], score mặc định 1.
-    const qbQuizCols = [
-        { col: 'options', def: 'TEXT' },
-        { col: 'correct_answers', def: 'TEXT' },
-        { col: 'score', def: 'REAL DEFAULT 1' },
-    ];
-    for (const { col, def } of qbQuizCols) {
+        // Migration: cột quiz (SingleChoice/MultipleChoice). Câu tự luận cũ để NULL.
+        // options: JSON [{"key":"A","text":"..."}], correct_answers: JSON ["A","C"], score mặc định 1.
+        const qbQuizCols = [
+            { col: 'options', def: 'TEXT' },
+            { col: 'correct_answers', def: 'TEXT' },
+            { col: 'score', def: 'REAL DEFAULT 1' },
+        ];
+        for (const { col, def } of qbQuizCols) {
+            try {
+                await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+            }
+            catch (_) { /* already exists */ }
+        }
+        // Migration: người upload question (FK → admin_users). Question cũ để NULL.
         try {
-            await client.query(`ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+            await client.query('ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS uploaded_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
         }
         catch (_) { /* already exists */ }
-    }
-    // Migration: người upload question (FK → admin_users). Question cũ để NULL.
-    try {
-        await client.query('ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS uploaded_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
-    }
-    catch (_) { /* already exists */ }
-    console.log('[DB] question_bank ready');
-    await client.query(`
+        console.log('[DB] question_bank ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS batches (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -114,32 +115,32 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
-    try {
-        await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
-    }
-    catch (_) { /* already exists */ }
-    // Migration: chế độ ghi màn hình 'none' | 'local' | 's3' (thay cho record_enabled bool).
-    // Chỉ admin đặt được mode khác 'none'. Backfill: batch có record_enabled=true → 's3'.
-    try {
-        await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_mode VARCHAR(16) DEFAULT 'none'");
-        await client.query("UPDATE batches SET record_mode = 's3' WHERE record_enabled = true AND (record_mode IS NULL OR record_mode = 'none')");
-    }
-    catch (_) { /* already exists */ }
-    // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
-    try {
-        await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
-    }
-    catch (_) { /* already exists */ }
-    // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
-    try {
-        await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
-    }
-    catch (_) { /* already exists */ }
-    const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
-    await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
-    console.log('[DB] batches ready');
-    await client.query(`
+        // Migration: cờ ghi màn hình lên S3 (chỉ admin bật được). Batch cũ mặc định false.
+        try {
+            await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_enabled BOOLEAN DEFAULT false');
+        }
+        catch (_) { /* already exists */ }
+        // Migration: chế độ ghi màn hình 'none' | 'local' | 's3' (thay cho record_enabled bool).
+        // Chỉ admin đặt được mode khác 'none'. Backfill: batch có record_enabled=true → 's3'.
+        try {
+            await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS record_mode VARCHAR(16) DEFAULT 'none'");
+            await client.query("UPDATE batches SET record_mode = 's3' WHERE record_enabled = true AND (record_mode IS NULL OR record_mode = 'none')");
+        }
+        catch (_) { /* already exists */ }
+        // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
+        try {
+            await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
+        }
+        catch (_) { /* already exists */ }
+        // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
+        try {
+            await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL');
+        }
+        catch (_) { /* already exists */ }
+        const seqCheck = await client.query("SELECT COALESCE(MAX(id), 0) + 1 as next_id FROM batches");
+        await client.query(`SELECT setval('batches_id_seq', ${seqCheck.rows[0].next_id})`);
+        console.log('[DB] batches ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS students (
       id SERIAL PRIMARY KEY,
       batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
@@ -159,27 +160,27 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    // Migration: thêm cột mới nếu chưa tồn tại (cho DB cũ)
-    const colChecks = [
-        { col: 'exam_started_at', def: 'TIMESTAMP' },
-        { col: 'exam_deadline', def: 'TIMESTAMP' },
-        { col: 'disconnected_at', def: 'TIMESTAMP' },
-        { col: 'recording_password', def: 'TEXT' },
-        { col: 'submitted_at', def: 'TIMESTAMP' },
-        { col: 'submit_reason', def: 'TEXT' },
-        { col: 'active_jti', def: 'TEXT' },
-        { col: 'recording_finalized_at', def: 'TIMESTAMP' },
-        { col: 'recording_final_part_index', def: 'INTEGER' },
-        { col: 'recording_incomplete', def: 'BOOLEAN DEFAULT FALSE' },
-    ];
-    for (const { col, def } of colChecks) {
-        try {
-            await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+        // Migration: thêm cột mới nếu chưa tồn tại (cho DB cũ)
+        const colChecks = [
+            { col: 'exam_started_at', def: 'TIMESTAMP' },
+            { col: 'exam_deadline', def: 'TIMESTAMP' },
+            { col: 'disconnected_at', def: 'TIMESTAMP' },
+            { col: 'recording_password', def: 'TEXT' },
+            { col: 'submitted_at', def: 'TIMESTAMP' },
+            { col: 'submit_reason', def: 'TEXT' },
+            { col: 'active_jti', def: 'TEXT' },
+            { col: 'recording_finalized_at', def: 'TIMESTAMP' },
+            { col: 'recording_final_part_index', def: 'INTEGER' },
+            { col: 'recording_incomplete', def: 'BOOLEAN DEFAULT FALSE' },
+        ];
+        for (const { col, def } of colChecks) {
+            try {
+                await client.query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS ${col} ${def}`);
+            }
+            catch (_) { /* already exists */ }
         }
-        catch (_) { /* already exists */ }
-    }
-    console.log('[DB] students ready');
-    await client.query(`
+        console.log('[DB] students ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS exam_questions (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -193,13 +194,13 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    // Migration: thứ tự option đã xáo cho riêng SV (quiz). JSON ["C","A","F","B"]. Câu tự luận để NULL.
-    try {
-        await client.query('ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS option_order TEXT');
-    }
-    catch (_) { /* already exists */ }
-    console.log('[DB] exam_questions ready');
-    await client.query(`
+        // Migration: thứ tự option đã xáo cho riêng SV (quiz). JSON ["C","A","F","B"]. Câu tự luận để NULL.
+        try {
+            await client.query('ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS option_order TEXT');
+        }
+        catch (_) { /* already exists */ }
+        console.log('[DB] exam_questions ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS violations (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -208,11 +209,38 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    console.log('[DB] violations ready');
-    // Anti-Cheat: append-only forensic log — mỗi lần vi phạm một dòng (khác với
-    // bảng violations vốn khóa theo (student_id, type) nên chỉ đếm được số lần).
-    // content_preview chỉ có với suspicious_paste (500 ký tự đầu); focus_lost để NULL.
-    await client.query(`
+        console.log('[DB] violations ready');
+        // [P1-1][P2-2] UPSERT counter cần unique (student_id, type). CHỈ chạy merge legacy MỘT LẦN,
+        // khi index chưa tồn tại — nếu không mỗi cold-start Vercel sẽ quét full-table GROUP BY +
+        // UPDATE + DELETE vô ích (tốn query/lock Supabase, đi ngược free-tier). Sau lần đầu, index
+        // đã có → bỏ qua hoàn toàn. Việc dedupe legacy chuẩn nằm ở migration; đây chỉ là an toàn cho
+        // môi trường tự-init (SQLite dev / DB chưa migrate).
+        const violationsIdxExists = (await client.query(`SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'ux_violations_student_type' LIMIT 1`)).rows.length > 0;
+        if (!violationsIdxExists) {
+            // Merge legacy CHỈ khi index chưa có — dữ liệu bẩn có thể khiến merge lỗi nhưng đó là
+            // tình huống cần con người xử lý; không nuốt lỗi ở đây nữa vì CREATE INDEX bên dưới là
+            // BẮT BUỘC cho /violation. Nếu bước này lỗi, init fail → readiness fail (đúng ý đồ).
+            await client.query(`
+      WITH merged AS (
+        SELECT student_id, type, SUM(count) AS total, MIN(id) AS keep_id
+        FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+      )
+      UPDATE violations v SET count = m.total
+      FROM merged m WHERE v.id = m.keep_id
+    `);
+            await client.query(`
+      DELETE FROM violations v USING (
+        SELECT student_id, type, MIN(id) AS keep_id
+        FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+      ) d
+      WHERE v.student_id = d.student_id AND v.type = d.type AND v.id <> d.keep_id
+    `);
+            await client.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_violations_student_type ON violations(student_id, type)');
+        }
+        // Anti-Cheat: append-only forensic log — mỗi lần vi phạm một dòng (khác với
+        // bảng violations vốn khóa theo (student_id, type) nên chỉ đếm được số lần).
+        // content_preview chỉ có với suspicious_paste (500 ký tự đầu); focus_lost để NULL.
+        await client.query(`
     CREATE TABLE IF NOT EXISTS violation_events (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -225,12 +253,18 @@ async function initPostgres() {
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    console.log('[DB] violation_events ready');
-    try {
-        await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS metadata_json TEXT');
-    }
-    catch (_) { /* already exists */ }
-    await client.query(`
+        console.log('[DB] violation_events ready');
+        try {
+            await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS metadata_json TEXT');
+        }
+        catch (_) { /* already exists */ }
+        // [P1-1][P1-review] Idempotency: event_id do client sinh, giữ nguyên qua retry. Unique một
+        // phần (chỉ khi NOT NULL) để row cũ / forensic tự-sinh (event_id NULL) không xung đột.
+        // KHÔNG nuốt lỗi — /violation bắt buộc index này tồn tại; nếu tạo lỗi thì init phải fail
+        // để readiness fail, tránh server healthy nhưng /violation luôn 500. Các câu đều idempotent.
+        await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64)');
+        await client.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS recording_parts (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -243,10 +277,10 @@ async function initPostgres() {
       UNIQUE(student_id, part_index)
     )
   `);
-    await client.query('ALTER TABLE recording_parts ADD COLUMN IF NOT EXISTS is_final BOOLEAN DEFAULT FALSE');
-    // Anti-Cheat: theo dõi phiên thi để phát hiện dùng đồng thời nhiều client/IP.
-    // Mỗi cặp (student × jti × ip) một dòng; đổi IP tạo dòng mới. last_seen cập nhật mỗi request.
-    await client.query(`
+        await client.query('ALTER TABLE recording_parts ADD COLUMN IF NOT EXISTS is_final BOOLEAN DEFAULT FALSE');
+        // Anti-Cheat: theo dõi phiên thi để phát hiện dùng đồng thời nhiều client/IP.
+        // Mỗi cặp (student × jti × ip) một dòng; đổi IP tạo dòng mới. last_seen cập nhật mỗi request.
+        await client.query(`
     CREATE TABLE IF NOT EXISTS exam_sessions (
       id SERIAL PRIMARY KEY,
       student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
@@ -259,12 +293,12 @@ async function initPostgres() {
       UNIQUE(student_id, jti, ip)
     )
   `);
-    try {
-        await client.query('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
-    }
-    catch (_) { /* ignore */ }
-    console.log('[DB] exam_sessions ready');
-    await client.query(`
+        try {
+            await client.query('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
+        }
+        catch (_) { /* ignore */ }
+        console.log('[DB] exam_sessions ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS ai_queue (
       id SERIAL PRIMARY KEY,
       exam_question_id INTEGER NOT NULL,
@@ -276,8 +310,8 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    console.log('[DB] ai_queue ready');
-    await client.query(`
+        console.log('[DB] ai_queue ready');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
@@ -287,14 +321,17 @@ async function initPostgres() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    // Migration: thêm cột role cho DB cũ (user cũ mặc định 'admin' để không mất quyền)
-    try {
-        await client.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'");
+        // Migration: thêm cột role cho DB cũ (user cũ mặc định 'admin' để không mất quyền)
+        try {
+            await client.query("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'admin'");
+        }
+        catch (_) { /* already exists */ }
+        console.log('[DB] admin_users ready');
+        console.log('[DB] All PostgreSQL tables initialized');
     }
-    catch (_) { /* already exists */ }
-    console.log('[DB] admin_users ready');
-    client.release();
-    console.log('[DB] All PostgreSQL tables initialized');
+    finally {
+        client.release();
+    }
 }
 function initSqlite() {
     console.log('[DB] Initializing SQLite...');
@@ -404,6 +441,25 @@ function initSqlite() {
         FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
       )
     `);
+        // [P1-1][P2-2] Gộp row trùng rồi tạo unique index — CHỈ khi index chưa tồn tại, tránh
+        // quét full-table mỗi lần khởi động (xem ghi chú ở nhánh PostgreSQL). KHÔNG nuốt lỗi:
+        // index này bắt buộc cho /violation; lỗi phải làm init fail để readiness fail.
+        const violationsIdxExists = sqliteDb.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='ux_violations_student_type' LIMIT 1").get();
+        if (!violationsIdxExists) {
+            sqliteDb.exec(`
+        UPDATE violations SET count = (
+          SELECT SUM(v2.count) FROM violations v2
+          WHERE v2.student_id = violations.student_id AND v2.type = violations.type
+        )
+        WHERE id IN (
+          SELECT MIN(id) FROM violations GROUP BY student_id, type HAVING COUNT(*) > 1
+        );
+        DELETE FROM violations WHERE id NOT IN (
+          SELECT MIN(id) FROM violations GROUP BY student_id, type
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_violations_student_type ON violations(student_id, type);
+      `);
+        }
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS violation_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -422,6 +478,11 @@ function initSqlite() {
         if (!violationEventCols.some((col) => col.name === 'metadata_json')) {
             sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN metadata_json TEXT');
         }
+        // [P1-1] event_id idempotency (xem bản PostgreSQL). SQLite: partial unique index hợp lệ.
+        if (!violationEventCols.some((col) => col.name === 'event_id')) {
+            sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN event_id TEXT');
+        }
+        sqliteDb.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS recording_parts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -524,6 +585,142 @@ export async function initDatabase() {
         await initPostgres();
     }
 }
+/**
+ * [P1-review][P2-review] Xác minh hai index BẮT BUỘC không chỉ TỒN TẠI mà đúng ĐỊNH NGHĨA —
+ * /violation phụ thuộc cứng vào chúng (ON CONFLICT). Chỉ khớp tên là chưa đủ: một index cùng
+ * tên nhưng không unique / sai cột / thiếu predicate `WHERE event_id IS NOT NULL` sẽ khiến
+ * ON CONFLICT lỗi runtime dù readiness báo ready. Ta kiểm định nghĩa thật:
+ *  - PostgreSQL: pg_index.indisunique/indisvalid/indisready + pg_get_indexdef (chứa cột, UNIQUE,
+ *    và WHERE predicate).
+ *  - SQLite: PRAGMA index_list (unique) + index_info (cột) + sqlite_master.sql (predicate).
+ */
+export async function verifyRequiredSchema() {
+    const fail = (msg) => {
+        throw new Error(`[schema] ${msg}. Run migrations before serving.`);
+    };
+    if (USE_SQLITE) {
+        if (!sqliteDb)
+            throw new Error('[schema] SQLite not initialized');
+        const checkSqlite = (table, indexName, cols, predicate) => {
+            const list = sqliteDb.prepare(`PRAGMA index_list(${table})`).all();
+            const entry = list.find((i) => i.name === indexName);
+            if (!entry)
+                fail(`index ${indexName} missing on ${table}`);
+            if (!entry.unique)
+                fail(`index ${indexName} is not UNIQUE`);
+            const info = sqliteDb.prepare(`PRAGMA index_info(${indexName})`).all();
+            const actual = info.sort((a, b) => a.seqno - b.seqno).map((c) => c.name);
+            if (actual.join(',') !== cols.join(','))
+                fail(`index ${indexName} columns ${actual.join(',')} != expected ${cols.join(',')}`);
+            const row = sqliteDb.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(indexName);
+            const sql = (row?.sql || '').toLowerCase();
+            if (predicate && !sql.includes(predicate.toLowerCase()))
+                fail(`index ${indexName} missing partial predicate "${predicate}"`);
+            if (!predicate && sql.includes(' where '))
+                fail(`index ${indexName} unexpectedly has a WHERE predicate`);
+        };
+        checkSqlite('violations', 'ux_violations_student_type', ['student_id', 'type'], null);
+        checkSqlite('violation_events', 'ux_violation_events_student_event', ['student_id', 'event_id'], 'event_id is not null');
+    }
+    else {
+        if (!pgPool)
+            throw new Error('[schema] PostgreSQL pool not initialized');
+        const requiredColumns = {
+            students: [
+                'exam_started_at', 'exam_deadline', 'disconnected_at', 'recording_password',
+                'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
+                'recording_final_part_index', 'recording_incomplete',
+            ],
+            batches: ['record_mode', 'exam_type'],
+            exam_questions: ['option_order'],
+            violation_events: ['metadata_json', 'event_id'],
+            recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
+            exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
+            ai_queue: ['id', 'status', 'attempts', 'updated_at'],
+        };
+        const columnRows = await pgPool.query(`SELECT table_name, column_name FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = ANY($1)`, [Object.keys(requiredColumns)]);
+        const columnSet = new Set(columnRows.rows.map((r) => `${r.table_name}.${r.column_name}`));
+        for (const [table, columns] of Object.entries(requiredColumns)) {
+            for (const column of columns) {
+                if (!columnSet.has(`${table}.${column}`))
+                    fail(`required column ${table}.${column} missing`);
+            }
+        }
+        const checkPg = async (indexName, table, cols, predicate) => {
+            const r = await pgPool.query(`SELECT i.indisunique, i.indisvalid, i.indisready,
+                c.relname AS index_name, t.relname AS table_name,
+                pg_get_indexdef(i.indexrelid) AS def,
+                pg_get_expr(i.indpred, i.indrelid) AS predicate,
+                ARRAY(
+                  SELECT a.attname
+                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a
+                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                  WHERE k.ord <= i.indnkeyatts
+                  ORDER BY k.ord
+                ) AS columns
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_class t ON t.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = $1 AND n.nspname = current_schema()`, [indexName]);
+            const row = r.rows[0];
+            if (!row)
+                fail(`index ${indexName} missing`);
+            if (!row.indisunique)
+                fail(`index ${indexName} is not UNIQUE`);
+            if (!row.indisvalid)
+                fail(`index ${indexName} is INVALID`);
+            if (!row.indisready)
+                fail(`index ${indexName} is not READY`);
+            if (row.table_name !== table)
+                fail(`index ${indexName} on wrong table ${row.table_name} (expected ${table})`);
+            const actualCols = row.columns || [];
+            if (actualCols.join(',') !== cols.join(',')) {
+                fail(`index ${indexName} columns ${actualCols.join(',')} != expected ${cols.join(',')}`);
+            }
+            const actualPredicate = row.predicate == null
+                ? null
+                : String(row.predicate).toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
+            const expectedPredicate = predicate?.toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim() || null;
+            if (actualPredicate !== expectedPredicate) {
+                fail(`index ${indexName} predicate ${actualPredicate || '<none>'} != expected ${expectedPredicate || '<none>'}`);
+            }
+        };
+        const checkPgUniqueColumns = async (table, cols) => {
+            const r = await pgPool.query(`SELECT ARRAY(
+                  SELECT a.attname
+                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a
+                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                  WHERE k.ord <= i.indnkeyatts
+                  ORDER BY k.ord
+                ) AS columns
+         FROM pg_index i
+         JOIN pg_class t ON t.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE t.relname = $1 AND n.nspname = current_schema()
+           AND i.indisunique AND i.indisvalid AND i.indisready AND i.indpred IS NULL`, [table]);
+            const found = r.rows.some((row) => (row.columns || []).join(',') === cols.join(','));
+            if (!found)
+                fail(`required UNIQUE index on ${table}(${cols.join(', ')}) missing`);
+        };
+        await checkPg('ux_violations_student_type', 'violations', ['student_id', 'type'], null);
+        await checkPg('ux_violation_events_student_event', 'violation_events', ['student_id', 'event_id'], 'event_id is not null');
+        await checkPgUniqueColumns('students', ['access_code']);
+        await checkPgUniqueColumns('exam_questions', ['student_id', 'question_order']);
+        await checkPgUniqueColumns('recording_parts', ['student_id', 'part_index']);
+        await checkPgUniqueColumns('exam_sessions', ['student_id', 'jti', 'ip']);
+    }
+    console.log('[DB] Required schema verified (definition-checked)');
+}
+/**
+ * Shared readiness promise. initDatabase → verifyRequiredSchema. Local server await trước
+ * listen(); request middleware (serverless) await trước khi chạm DB. Reject ⇒ server không
+ * phục vụ request thi thay vì trả 500 âm thầm.
+ */
+export const dbReady = initDatabase().then(verifyRequiredSchema);
 function postgresText(text, params) {
     if (!params?.length || text.includes('$1'))
         return text;
@@ -600,4 +797,4 @@ export function getPool() {
         return sqliteDb;
     return pgPool;
 }
-export default { initDatabase, query, withTransaction, getPool };
+export default { initDatabase, query, withTransaction, getPool, verifyRequiredSchema, dbReady };

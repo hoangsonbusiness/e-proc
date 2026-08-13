@@ -10,9 +10,23 @@ import rateLimit from 'express-rate-limit';
 import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTracker.js';
 import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError, ExamGuardError } from '../services/examGuard.js';
 import { parseBlueprintCompat } from '../services/blueprint.js';
+import { persistViolation, computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
 dotenv.config();
-const USE_SQLITE = process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production';
+// Phải khớp chính xác với DB layer: có DATABASE_URL => PostgreSQL, không có => SQLite.
+// Dựa vào NODE_ENV làm local PostgreSQL bỏ qua FOR UPDATE và tái tạo race violation.
+const USE_SQLITE = !process.env.DATABASE_URL;
 const router = Router();
+// [P2-4] Throttle ghi forensic 'concurrent_session': tránh append một row mỗi lần
+// autosave answer khi student ở trạng thái suspicious kéo dài (vd 2 jti cùng IP, hoặc
+// đổi mạng tuần tự — suspicious nhưng không lock). Chỉ ghi khi FINGERPRINT bằng chứng
+// đổi, hoặc đã quá FORENSIC_DEDUP_MS kể từ lần ghi cuối cho cùng fingerprint.
+// In-memory: mỗi serverless instance giữ riêng — xấu nhất là vài row trùng khi scale,
+// vẫn tốt hơn nhiều so với ghi mỗi answer. Không phải cache bền vững, chỉ để giảm nhiễu.
+const FORENSIC_DEDUP_MS = 60_000;
+const lastConcurrentForensic = new Map(); // key: `${studentId}:${fingerprint}` → ts
+// [P2-3] Các key đang có INSERT forensic chạy dở (in-flight) — chặn hai request cùng instance
+// cùng vượt gate rồi cùng ghi. Thêm key TRƯỚC await, xóa trong finally.
+const inflightConcurrentForensic = new Set();
 // [SEC] Rate-limit riêng cho /verify — chống brute-force access code.
 // 10 lần / phút / IP đủ cho retry hợp lệ nhưng chặn dò mã hàng loạt.
 const verifyRateLimit = rateLimit({
@@ -67,7 +81,7 @@ async function finalizeSubmission(studentId) {
         for (const eq of examQuestionsResult.rows) {
             const queued = await db.query('SELECT id FROM ai_queue WHERE exam_question_id = ?', [eq.id]);
             if (queued.rows.length === 0)
-                cache.addToQueue(eq.id, studentId);
+                await cache.addToQueue(eq.id, studentId);
         }
     }
 }
@@ -189,29 +203,59 @@ async function startExamAtomically(studentId) {
  */
 async function enforceConcurrentSession(studentId, batchId) {
     try {
+        // [P2-4] Short-circuit nếu đã nộp — sau lần overlap đầu tiên auto-submit, client vẫn có
+        // thể spam /answer|/questions|/violation; sessionTracker vẫn upsert và overlap còn trong
+        // cửa sổ 60s, không được để mỗi request đó tạo thêm row.
+        const statusRow0 = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
+        if (statusRow0.rows[0]?.status !== 'in_progress')
+            return false;
         const ev = await detectConcurrentSession(studentId);
         if (!ev.suspicious)
             return false;
-        // Ghi forensic một lần cho mỗi lần phát hiện (append-only)
-        try {
-            const metadataJson = JSON.stringify({
-                ips: ev.ips,
-                userAgents: ev.userAgents,
-                jtis: ev.jtis,
-                overlap: ev.overlap,
-            }).slice(0, 2000);
-            await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [studentId, batchId, 'concurrent_session', ev.ips.length, `IPs: ${ev.ips.join(', ')}`.slice(0, 500), null, metadataJson]);
-        }
-        catch (logErr) {
-            console.error('[concurrent_session] forensic log failed (non-fatal):', logErr?.message);
+        // [P2-3][P2-4] Dedupe theo fingerprint bằng chứng — áp dụng cho CẢ overlap (không còn ghi
+        // trên mọi request khi overlap). "Lần overlap đầu tiên luôn ghi" được bảo đảm bằng cách
+        // đưa overlap vào chính fingerprint: fingerprint có overlap:true là mới ⇒ chưa có trong map
+        // ⇒ ghi ngay; các request overlap tiếp theo cùng fingerprint bị throttle 60s.
+        const fingerprint = JSON.stringify({
+            ips: [...ev.ips].sort(),
+            userAgents: [...ev.userAgents].sort(),
+            jtis: [...ev.jtis].sort(),
+            overlap: ev.overlap,
+        });
+        const dedupKey = `${studentId}:${fingerprint}`;
+        const nowMs = Date.now();
+        const lastMs = lastConcurrentForensic.get(dedupKey) || 0;
+        // [P2-3] Chặn race nội-instance: nếu key đang có INSERT chạy dở thì bỏ qua — không thì hai
+        // request đồng thời cùng đọc lastMs=0, cùng vượt gate, cùng ghi. `shouldLog` gồm cả điều
+        // kiện in-flight để không đợi INSERT xong mới biết trùng.
+        const shouldLog = !inflightConcurrentForensic.has(dedupKey) &&
+            (nowMs - lastMs >= FORENSIC_DEDUP_MS || lastMs === 0);
+        if (shouldLog) {
+            inflightConcurrentForensic.add(dedupKey); // đánh dấu TRƯỚC await
+            try {
+                const metadataJson = JSON.stringify({
+                    ips: ev.ips,
+                    userAgents: ev.userAgents,
+                    jtis: ev.jtis,
+                    overlap: ev.overlap,
+                }).slice(0, 2000);
+                await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [studentId, batchId, 'concurrent_session', ev.ips.length, `IPs: ${ev.ips.join(', ')}`.slice(0, 500), null, metadataJson]);
+                // [P2-3] CHỈ set timestamp SAU khi insert thành công — insert lỗi tạm thời không được
+                // suppress 60s và làm mất cơ hội ghi lại evidence ở request kế.
+                lastConcurrentForensic.set(dedupKey, nowMs);
+            }
+            catch (logErr) {
+                console.error('[concurrent_session] forensic log failed (non-fatal):', logErr?.message);
+            }
+            finally {
+                inflightConcurrentForensic.delete(dedupKey); // dọn dù thành công hay lỗi
+            }
         }
         if (ev.lockable) {
-            const statusRow = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
-            if (statusRow.rows[0]?.status === 'in_progress') {
-                await submitExamAtomically(studentId, 'concurrent_session');
-                console.log('[concurrent_session] Auto-submitted (overlap) student:', studentId, 'ips:', ev.ips);
-                return true;
-            }
+            // status đã xác nhận in_progress ở đầu hàm.
+            await submitExamAtomically(studentId, 'concurrent_session');
+            console.log('[concurrent_session] Auto-submitted (overlap) student:', studentId, 'ips:', ev.ips);
+            return true;
         }
         return false;
     }
@@ -219,6 +263,24 @@ async function enforceConcurrentSession(studentId, batchId) {
         console.error('[enforceConcurrentSession] failed:', err?.message);
         throw err;
     }
+}
+/**
+ * [P1-2] Đường cưỡng chế lock DUY NHẤT, dùng chung cho cả event mới lẫn replay.
+ * Nếu đạt ngưỡng khóa và student còn 'in_progress' thì auto-submit — kể cả khi request
+ * TRƯỚC đã tính locked nhưng submitExamAtomically lỗi tạm thời rồi client retry vào nhánh
+ * replay. Vì submitExamAtomically idempotent (return { already } nếu đã submitted), gọi lại
+ * an toàn. Ném lỗi ra ngoài để caller trả 500 → client tiếp tục retry cho tới khi lock chốt.
+ */
+async function ensureViolationLock(studentId, type, currentCount, total, forensicOnly) {
+    const locked = computeViolationLock(type, currentCount, total, forensicOnly);
+    if (!locked)
+        return false;
+    const statusRow = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
+    if (statusRow.rows[0]?.status === 'in_progress') {
+        await submitExamAtomically(studentId, type === 'recording_stopped' ? 'recording_stopped' : 'violation');
+        console.log('[violation] Auto-submitted (locked) student:', studentId, 'type:', type);
+    }
+    return true;
 }
 router.post('/verify', verifyRateLimit, async (req, res) => {
     try {
@@ -593,6 +655,24 @@ router.post('/exam/answer', studentAuthMiddleware, sessionTracker, async (req, r
             }
             answer = JSON.stringify(selected);
         }
+        // [#4][P1-2] Đánh giá đa phiên TRƯỚC khi ghi answer. Nếu để sau UPDATE thì request
+        // của client thứ hai (chính request gây phát hiện multi-IP) vẫn kịp ghi đè answer,
+        // rồi auto-submit lại chấm đúng answer bẩn đó. sessionTracker (middleware) đã upsert
+        // last_seen cho request này nên detect thấy phiên hiện tại. Answer request đã tồn tại
+        // sẵn → piggyback, không tạo request/heartbeat mới (an toàn free tier).
+        try {
+            const autoLocked = await enforceConcurrentSession(parseInt(studentId), req.studentPayload.batchId);
+            if (autoLocked) {
+                return res.status(410).json({
+                    error: 'Multiple concurrent sessions detected. Your exam has been automatically submitted.',
+                    reason: 'concurrent_session',
+                });
+            }
+        }
+        catch (concErr) {
+            // Không để lỗi detect làm hỏng luồng answer
+            console.error('[answer] concurrent-session check failed (non-fatal):', concErr?.message);
+        }
         // Lưu vào buffer trước
         const saved = await db.query(`
       UPDATE exam_questions
@@ -660,9 +740,9 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req, res
         }
         const { type, content_preview, text_length, question_id, metadata } = req.body;
         // Validate violation type — chỉ chấp nhận các loại hợp lệ.
-        // suspicious_paste & focus_lost giờ là lockable (không còn log-only) —
-        // suspicious_paste dùng threshold 300 ký tự + focus_lost đo qua blur/focus
-        // với đệm 3s nên đủ tin cậy để tính vào ngưỡng khóa như mọi type khác.
+        // suspicious_paste is accepted as forensic evidence but never auto-locks:
+        // insertion size alone cannot prove clipboard use. focus_lost remains
+        // lockable because it is measured through blur/focus with a grace period.
         const validTypes = [
             'tab_switch',
             'fullscreen_exit',
@@ -684,59 +764,42 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req, res
         if (!type || !validTypes.includes(type)) {
             return res.status(400).json({ error: 'Invalid violation type' });
         }
-        const forensicOnly = type === 'rapid_text_insertion' || type === 'multiple_display_detected';
-        const existingResult = await db.query('SELECT * FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
-        if (!forensicOnly && existingResult.rows.length === 0) {
-            await db.query('INSERT INTO violations (student_id, type, count) VALUES (?, ?, 1)', [parseInt(studentId), type]);
-        }
-        else if (!forensicOnly) {
-            await db.query('UPDATE violations SET count = count + 1 WHERE id = ?', [existingResult.rows[0].id]);
-        }
-        // Anti-Cheat forensic log: ghi từng lần vi phạm (append-only) để admin review.
-        // content_preview chỉ lưu tối đa 500 ký tự đầu, chỉ có với suspicious_paste.
-        // QUAN TRỌNG: forensic log là phụ trợ — KHÔNG được để lỗi ghi log (vd bảng chưa
-        // tồn tại trên DB cũ) làm hỏng logic lock/auto-submit của MỌI loại vi phạm.
-        // Vì vậy bọc riêng try/catch, nuốt lỗi và chỉ log ra console.
-        try {
-            const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
-            const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
-            const qId = typeof question_id === 'string' ? question_id : null;
-            const metadataJson = metadata && typeof metadata === 'object'
-                ? JSON.stringify(metadata).slice(0, 2000)
-                : null;
-            await db.query('INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)', [parseInt(studentId), batchId, type, textLen, preview, qId, metadataJson]);
-        }
-        catch (logErr) {
-            console.error('[violation] forensic log insert failed (non-fatal):', logErr?.message);
-        }
-        const totalResult = await db.query('SELECT SUM(count) as total FROM violations WHERE student_id = ?', [parseInt(studentId)]);
-        const total = parseInt(totalResult.rows[0]?.total) || 0;
-        const currentResult = await db.query('SELECT count FROM violations WHERE student_id = ? AND type = ?', [parseInt(studentId), type]);
-        const currentCount = parseInt(currentResult.rows[0]?.count) || 0;
-        // recording_stopped: dừng chia sẻ màn hình = cố ý trốn giám sát → khóa NGAY lần đầu.
-        // Các type khác: khóa khi 1 type đạt >= 2 lần HOẶC tổng vi phạm >= 2 (mọi type đều tính).
-        const locked = !forensicOnly && (type === 'recording_stopped' || currentCount >= 2 || total >= 2);
-        // [SEC] Cưỡng chế nộp bài ở BACKEND khi đạt ngưỡng khóa — không phụ thuộc frontend auto-submit.
-        // Trước đây chỉ trả cờ `locked` cho client; một client bị điều khiển (automation) có thể phớt lờ
-        // response và tiếp tục làm bài. Giờ server tự set status='submitted' + chấm điểm ngay.
-        if (locked) {
-            try {
-                const statusRow = await db.query('SELECT status FROM students WHERE id = ?', [parseInt(studentId)]);
-                if (statusRow.rows[0]?.status === 'in_progress') {
-                    await submitExamAtomically(parseInt(studentId), type === 'recording_stopped' ? 'recording_stopped' : 'violation');
-                    console.log('[violation] Auto-submitted (locked) student:', studentId, 'type:', type);
-                }
-            }
-            catch (lockErr) {
-                console.error('[violation] auto-submit on lock failed:', lockErr?.message);
-                throw lockErr;
-            }
-        }
+        const forensicOnly = isForensicOnlyViolation(type);
+        const eventId = typeof req.body?.event_id === 'string' ? req.body.event_id.slice(0, 64) : null;
+        const preview = typeof content_preview === 'string' ? content_preview.slice(0, 500) : null;
+        const textLen = Number.isFinite(text_length) ? Math.trunc(text_length) : null;
+        const qId = typeof question_id === 'string' ? question_id : null;
+        const metadataJson = metadata && typeof metadata === 'object'
+            ? JSON.stringify(metadata).slice(0, 2000)
+            : null;
+        // [P1-1] Claim event + upsert counter + đọc total/current TRONG MỘT TRANSACTION, qua module
+        // dùng chung `persistViolation` (route và regression test gọi CHUNG hàm này — test không
+        // sao chép SQL). Nguyên tử: event + counter cùng commit/rollback (không còn half-commit).
+        // KHÔNG có fallback non-idempotent: migration (event_id + 2 unique index) bắt buộc trước
+        // deploy; transaction lỗi → propagate ra catch ngoài → 500 → client retry CÙNG event_id.
+        const { replay, total, currentCount } = await db.withTransaction((tx) => persistViolation(tx, {
+            studentId: parseInt(studentId),
+            batchId,
+            type,
+            eventId,
+            forensicOnly,
+            textLength: textLen,
+            contentPreview: preview,
+            questionId: qId,
+            metadataJson,
+            lockStudentRow: !USE_SQLITE, // Postgres: khóa row student trong tx; SQLite tự serialize
+        }));
+        // [P1-2] CẢ event mới lẫn replay đều đi qua CHUNG một đường cưỡng chế lock. Nếu request
+        // trước tính locked nhưng submitExamAtomically lỗi tạm thời (student vẫn in_progress),
+        // replay sẽ thử lại tại đây thay vì chỉ trả locked:true mà bỏ qua auto-submit. Lỗi ở
+        // ensureViolationLock ném ra ngoài → 500 → client retry tiếp cho tới khi lock chốt.
+        const locked = await ensureViolationLock(parseInt(studentId), type, currentCount, total, forensicOnly);
         res.json({
             violation_count: currentCount,
             total_violations: total,
             locked,
             forensic_only: forensicOnly,
+            ...(replay ? { idempotent_replay: true } : {}),
         });
     }
     catch (error) {

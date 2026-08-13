@@ -4,5 +4,9 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 .env
+.env.test.local
 *.log
 .DS_Store
+
+# Claude Code per-machine local settings (permission allowlist, not shared config)
+.claude/settings.local.json

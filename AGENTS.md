@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -60,7 +60,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 - HTTP server entry: `src/server/server.ts`
 - Express app setup: `src/server/index.ts`
   - mounts `/api/admin` and `/api/student`
-  - exposes readiness health (`/api/health`) and internal diagnostic endpoints (admin JWT; queue processing also accepts Vercel `CRON_SECRET`)
+  - exposes health (`/api/health`) and internal diagnostic endpoints (require admin JWT)
 - Admin routes: `src/server/routes/admin.ts`
 - Student routes: `src/server/routes/student.ts`
 - Middleware:
@@ -285,11 +285,9 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Vercel build cache gotcha (confirmed 2026-07-21):** a fix was correctly committed to `src/server/routes/student.ts` and `dist/server/routes/student.js` (verified present via `git show <commit>:<path>`), Vercel auto-deployed the correct commit, yet the live deployment still served the old behavior. Redeploying with **"Use existing Build Cache" = OFF** resolved it. If a change appears correctly committed and deployed from the right commit but still doesn't take effect live, try a cache-disabled redeploy before assuming the code itself is wrong.
 
 ### Queue / AI grading
-- AI queue orchestration lives in `src/server/cache.ts`; DB state transitions shared with tests live in `src/server/services/queueStore.ts`
+- Queue and answer-buffer orchestration live in `src/server/cache.ts`
 - AI evaluation provider settings are also read there (`ai_settings` plus env fallback)
-- Startup readiness initializes/verifies DB schema and loads cache state, but deliberately does **not** call AI. Vercel queue work runs through `/api/queue/process`; process-local intervals are disabled on Vercel.
-- Queue enqueue is awaited before submit returns. Workers atomically claim `pending -> processing` in DB, and stale `processing` jobs are recovered after `AI_QUEUE_STALE_MS`.
-- `vercel.json` registers one daily Hobby-compatible cron. The route accepts either Vercel `CRON_SECRET` or an admin JWT. Hobby cron is not immediate; use the admin endpoint manually when results are needed sooner.
+- The server initializes DB, cache, and queue processing on startup in `src/server/index.ts`
 - Supported AI providers: `gemini`, `openai`, `azure`, `deepseek`, `groq`, `openrouter`, `ollama`
 - AI API keys are stored in the `ai_settings` table in the database
 
@@ -308,12 +306,10 @@ Batches support two blueprint formats for question assignment:
 | `DATABASE_URL` | Prod | — | PostgreSQL connection string. Absent = SQLite mode. |
 | `ALLOWED_ORIGINS` | No | `http://localhost:5173` | CORS whitelist, comma-separated |
 | `SESSION_SECRET` | No | `'secret'` | Express session secret. **Set this in production.** |
-| `CRON_SECRET` | Production | none | Protects `/api/queue/process`; Vercel Cron sends it as a Bearer token. |
 | `SKIP_TIME_CHECK` | No | — | Set to `'true'` to bypass exam time-window validation in any mode |
 | `GEMINI_API_KEY` | No | — | Fallback AI key if `ai_settings` table is empty |
 | `ANSWER_FLUSH_INTERVAL` | Legacy | `5000` | The exam answer endpoint now persists directly; retained only for the unused legacy buffer code. |
-| `QUEUE_PROCESS_INTERVAL` | Self-host/local only | `10000` | Milliseconds between process-local AI queue ticks; ignored on Vercel. |
-| `AI_QUEUE_STALE_MS` | No | `900000` | Requeues a DB job left in `processing` after a crashed/timed-out worker. Keep this above the maximum grading duration. |
+| `QUEUE_PROCESS_INTERVAL` | No | `10000` | Milliseconds between AI queue processing ticks |
 | `DB_POOL_MAX` | No | `2` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
 | `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
 | `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
@@ -325,15 +321,14 @@ Batches support two blueprint formats for question assignment:
 
 - There is drift between current TypeScript source and legacy/generated JS checked into the repo. Prefer `src/**` and `client/src/**` when reasoning about behavior.
 - The frontend build uses hashed filenames, so any manual static sync to `public/` must update `public/index.html` to the new hash.
-- `npm test` uses Node's default test discovery under `test/`. SQLite regression tests require a working `better-sqlite3` native binding. For PostgreSQL races, copy `.env.test.example` to ignored `.env.test.local`, set a non-production Transaction Pooler URL, and run `npm run test:postgres`; the wrapper requires a real URL and runs only the five PostgreSQL tests.
+- There is no dedicated lint or test script in the current package files. Validation is primarily via `npx tsc --noEmit` (both backend and frontend) and manual runtime verification.
 - For frontend changes that affect actual exam behavior, verify against the runtime path being served, not just against source edits or `client/dist` output.
-- Database mode is selected consistently by `DATABASE_URL`: absent means local SQLite; present means PostgreSQL, including local PostgreSQL integration runs.
+- **`USE_SQLITE` logic is inconsistent across files** — `postgres.ts` and `admin.ts` use `!process.env.DATABASE_URL`; `student.ts` uses `process.env.USE_SQLITE === 'true' || process.env.NODE_ENV !== 'production'`. Before changing DB queries, verify which runtime path is intended.
 - The DB layer auto-converts `?` placeholders to `$1/$2/...` style when running in PostgreSQL mode (see `query()` in `postgres.ts`). Do not mix placeholder styles in a single query string.
 - If a frontend fix appears correct in source but has no effect in manual testing, check `public/index.html`, the hashed asset filename under `public/assets`, and the built bundle contents before debugging the React code further.
 - The `admin_users` table is not listed in the DB-layer table descriptions of older doc, but it is created at startup alongside the others.
-- Excel imports use Multer `memoryStorage()` with a 5 MiB/one-file limit. Keep the cap because Vercel functions parse the workbook in memory.
-- SheetJS is pinned to the official `xlsx@0.20.3` tarball because the stale npm registry release `0.18.5` has known High advisories. Do not change it back to `^0.18.5`; keep treating uploaded workbooks as untrusted input.
-- Root and client production dependency audits currently have zero findings. Run both `npm audit --omit=dev` commands when changing dependencies. The obfuscation plugin was removed: minification and disabled source maps remain, but client obfuscation is not a security boundary.
+- `multer` is configured with `memoryStorage()` only (no disk writes). File size limit is not currently set — consider adding a `limits: { fileSize }` option for production.
+- The `xlsx` package (`v0.18.5`) is end-of-life with known vulnerabilities. Treat uploaded Excel files as untrusted input.
 
 ## Verification expectations
 
@@ -358,7 +353,6 @@ Batches support two blueprint formats for question assignment:
 - Before deploying the 2026-08-08 schema changes to Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually and confirm its verification query returns both expected rows.
 - Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
 - Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and AI queue jobs are preserved. Atomic start + the unique question-order index prevent new start races, while deterministic AI queue primary ids and existence checks make new enqueue retries idempotent without forcing destructive cleanup. Confirm the final verification queries return six student columns and two unique indexes.
-- Also run `migrations/20260810_violation_event_idempotency.sql` before deploying the idempotent violation handler. Startup schema readiness verifies the required columns and exact unique-index definitions; a half-migrated database remains unavailable (`503`) instead of serving exam traffic.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -380,7 +374,7 @@ Batches support two blueprint formats for question assignment:
 - **Free-tier integrity hardening (2026-08-10):** no periodic heartbeat, Realtime channel, challenge table, or append-only activity stream was added. Existing exam requests remain the only session activity source, avoiding recurring Vercel invocations and Supabase writes.
 - A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.
 - Exam start now runs through a single-connection transaction with a student row lock. The deadline is `min(started_at + duration, batch.end_time)` and resume never extends it. A unique index on `(student_id, question_order)` is supplied by the 2026-08-10 migration; historical duplicate question assignments are not destructively rewritten.
-- Essay answers debounce for 5 seconds with a separate timer per question, so editing another question cannot cancel a pending save. All current answers are flushed before manual submit. The backend persists answers directly with an atomic `status='in_progress' AND exam_deadline > CURRENT_TIMESTAMP` condition; it no longer relies on the process-local answer buffer for exam writes.
+- Essay answers debounce for 5 seconds and all current answers are flushed before manual submit. The backend persists answers directly with an atomic `status='in_progress' AND exam_deadline > CURRENT_TIMESTAMP` condition; it no longer relies on the process-local answer buffer for exam writes.
 - Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome; deterministic AI queue ids avoid duplicate grading jobs on retries.
 - S3 recording remains direct browser-to-S3. `stopAndSave()` serializes/awaits outstanding part uploads, then calls `/exam/recording-finalize` once with the last part index. The backend requires a contiguous `0..finalPartIndex` set before setting `recording_finalized_at`. Manual S3 submit returns `409 recording_incomplete` until finalized; forced/timeout submit proceeds and sets `recording_incomplete=true`. An incomplete forced submission gets a 15-minute recording-only grace window for URL/complete/finalize calls so the browser can upload its last buffered part after the backend lock; answers/questions remain blocked.
 - Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
@@ -398,4 +392,4 @@ Batches support two blueprint formats for question assignment:
 - Student API authentication uses JWT (`studentToken`), not the `x-student-id` header. Any code that still reads `x-student-id` from request headers on student endpoints is stale and should be replaced.
 - `POST /api/student/exam/start` requires `studentAuthMiddleware` and derives `studentId` from the verified JWT; the legacy `student_id` body field sent by the frontend is ignored for identity.
 - There is intentionally no pre-exam checkbox/acknowledgement API or DB gate. Controls must use automatically observed browser/server signals; candidate self-attestation was removed as non-enforcing.
-- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/stats`, `/api/cache/flush`, `/api/stats`) require admin JWT. `/api/queue/process` accepts either admin JWT or the exact Vercel `CRON_SECRET`. All operational endpoints await startup readiness. `/api/init-tables` has been removed.
+- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) require admin JWT. `/api/init-tables` has been removed — DB init runs automatically on server startup.

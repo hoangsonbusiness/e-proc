@@ -41,6 +41,15 @@ function StudentConfirm() {
       return;
     }
 
+    // [#6] Fail-closed: nếu trình duyệt KHÔNG hỗ trợ screen.isExtended thì ta không thể
+    // xác minh chỉ có một màn hình → trước đây trả null và vẫn cho thi (lọt).
+    // Chrome/Edge desktop đều hỗ trợ field này, nên chặn ở đây cũng ép HV dùng đúng browser.
+    if (environment.screenExtended === null) {
+      setError('Your browser cannot verify your display setup. Please use a recent version of Google Chrome or Microsoft Edge on a desktop to take the exam.');
+      setLoading(false);
+      return;
+    }
+
     // Chỉ yêu cầu ghi màn hình khi batch bật record (local/s3). Mode 'none' → thi thẳng.
     if (recordMode !== 'none') {
       if (!examRecorder.isSupported(recordMode)) {

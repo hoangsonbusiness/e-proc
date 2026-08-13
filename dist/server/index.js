@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 import dotenv from 'dotenv';
-import { initDatabase } from './db/postgres.js';
+import { dbReady } from './db/postgres.js';
 import adminRoutes from './routes/admin.js';
 import studentRoutes from './routes/student.js';
 import { cache } from './cache.js';
@@ -76,16 +76,61 @@ app.use(session({
     saveUninitialized: false,
     cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 }
 }));
-app.use('/api/admin', adminRoutes);
-app.use('/api/student', studentRoutes);
-app.get('/api/health', (req, res) => {
-    res.json({
+// [P1-review] Readiness gate. dbReady = initDatabase → verifyRequiredSchema. Trên serverless
+// (Vercel), một cold-start instance có thể nhận request TRƯỚC khi init xong; các route thi phụ
+// thuộc cứng vào schema mới (/violation đã bỏ fallback). Middleware await dbReady và trả 503
+// nếu chưa/không sẵn sàng, thay vì để /violation trả 500 âm thầm rồi mất telemetry.
+// [P2-review] startupReady = DB init → schema verify → cache init. Health/gate/listen đều dựa
+// vào promise CHUNG này để không báo ready trước khi cả cache sẵn sàng.
+const startupReady = dbReady
+    .then(() => console.log('Database initialized and schema verified'))
+    .then(() => cache.init())
+    .then(() => { console.log('Cache initialized'); });
+let startupResolved = false;
+let startupError = null;
+startupReady.then(() => { startupResolved = true; }, (err) => { startupError = err instanceof Error ? err : new Error(String(err)); console.error('[startup] FAILED:', startupError.message); });
+async function requireDbReady(_req, res, next) {
+    if (startupResolved)
+        return next();
+    if (startupError)
+        return res.status(503).json({ error: 'Service not ready: startup failed' });
+    try {
+        await startupReady;
+        next();
+    }
+    catch {
+        res.status(503).json({ error: 'Service not ready: startup failed' });
+    }
+}
+function cronOrAdminAuth(req, res, next) {
+    const cronSecret = process.env.CRON_SECRET;
+    const authorization = req.headers.authorization;
+    if (cronSecret && authorization === `Bearer ${cronSecret}`)
+        return next();
+    return authMiddleware(req, res, next);
+}
+app.use('/api/admin', requireDbReady, adminRoutes);
+app.use('/api/student', requireDbReady, studentRoutes);
+app.get('/api/health', (_req, res) => {
+    // [P2-review] Readiness probe: CHỈ trả 200 khi startup thực sự xong. Pending → 503 not_ready,
+    // lỗi → 503 degraded. Trước đây pending trả 200 + status:ok khiến probe coi instance sẵn sàng
+    // quá sớm (và cache có thể chưa init).
+    if (startupError) {
+        return res.status(503).json({ status: 'degraded', db: 'error', timestamp: new Date().toISOString() });
+    }
+    if (!startupResolved) {
+        return res.status(503).json({ status: 'not_ready', db: 'initializing', timestamp: new Date().toISOString() });
+    }
+    return res.status(200).json({
         status: 'ok',
+        db: 'ready',
         timestamp: new Date().toISOString(),
         cache: 'active',
-        queue: cache.getQueueStats()
+        queue: cache.getQueueStats(),
     });
 });
+// Operational endpoints bên dưới cũng chạm DB/cache; serverless phải chờ readiness như routers.
+app.use('/api', requireDbReady);
 // [C-2] Internal diagnostic/operational endpoints — require admin JWT
 // [C-3] POST /api/init-tables đã bị xóa (DB init tự động khi server start)
 app.get('/api/test-db', authMiddleware, async (req, res) => {
@@ -105,9 +150,10 @@ app.get('/api/test-db', authMiddleware, async (req, res) => {
         res.status(500).json({ error: 'Database connection test failed' });
     }
 });
-app.get('/api/queue/process', authMiddleware, async (req, res) => {
+app.get('/api/queue/process', cronOrAdminAuth, async (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 5;
+        const requested = parseInt(req.query.limit) || 5;
+        const limit = Math.max(1, Math.min(requested, 5));
         const processed = await cache.processQueue(limit);
         res.json({ processed, timestamp: new Date().toISOString() });
     }
@@ -139,20 +185,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
         timestamp: new Date().toISOString(),
     });
 });
-process.on('SIGINT', () => {
-    console.log('Shutting down...');
-    cache.destroy();
-    process.exit(0);
-});
-process.on('SIGTERM', () => {
-    console.log('Shutting down...');
-    cache.destroy();
-    process.exit(0);
-});
-initDatabase()
-    .then(() => console.log('Database initialized'))
-    .then(() => cache.init())
-    .then(() => cache.processQueue(5))
-    .then(() => console.log('Initial queue processed'))
-    .catch(err => console.error('Init error:', err));
+// startupReady (định nghĩa phía trên) đã lo init DB→schema→cache một lần. Không lặp lại
+// ở đây để tránh init hai lần. Server.ts await startupReady trước khi listen().
+export { dbReady, startupReady };
 export default app;

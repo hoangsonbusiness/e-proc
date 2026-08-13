@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import db from './db/postgres.js';
+import { claimQueueJob, enqueueQueueJob, recoverStaleQueueJobs, updateQueueJob } from './services/queueStore.js';
 
 dotenv.config();
 
@@ -48,23 +50,32 @@ class FileCache {
   private queueFlushInterval: NodeJS.Timeout | null = null;
   private cachedAISettings: AISettings | null = null;
   private settingsLastFetched: number = 0;
+  private initialized = false;
   
   private dataDir: string;
   private queueFile: string;
 
   constructor() {
-    this.ensureDataDir();
-    // Call loadQueue - for async DB load we need to handle separately
-    this.loadQueue();
-    this.startFlushInterval();
-    this.startQueueProcessor();
+    this.dataDir = path.join(process.cwd(), 'data');
+    this.queueFile = path.join(this.dataDir, 'queue.json');
   }
 
   async init(): Promise<void> {
-    // For production, load from database
+    if (this.initialized) return;
+
     if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
       await this.loadQueueFromDB();
+    } else {
+      this.ensureDataDir();
+      this.loadQueue();
     }
+
+    // Vercel có thể freeze instance sau response; interval nền không phải scheduler tin cậy.
+    if (!process.env.VERCEL) {
+      this.startFlushInterval();
+      this.startQueueProcessor();
+    }
+    this.initialized = true;
   }
 
   private ensureDataDir() {
@@ -275,7 +286,7 @@ class FileCache {
     }, interval);
   }
 
-  addToQueue(examQuestionId: number, studentId: number): string {
+  async addToQueue(examQuestionId: number, studentId: number): Promise<string> {
     // Deterministic id makes submission/finalization retries idempotent.
     const dbId = examQuestionId;
     const id = `job_${dbId}`;
@@ -289,36 +300,53 @@ class FileCache {
       updatedAt: Date.now()
     };
     
+    // Persist trước khi trả về. Fire-and-forget có thể bị Vercel freeze sau response và mất job.
+    await this.saveQueueToDB(job, dbId);
     this.queue.set(id, job);
-    
-    // Save to database instead of file
-    this.saveQueueToDB(job, dbId);
     
     console.log(`[Queue] Added job ${id} for exam_question ${examQuestionId}`);
     return id;
   }
 
   private async saveQueueToDB(job: QueueJob, dbId: number): Promise<void> {
-    try {
-      const { query } = await import('../server/db/postgres.js');
-      await query(
-        `INSERT INTO ai_queue (id, exam_question_id, student_id, status, attempts, created_at, updated_at) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (id) DO NOTHING`,
-        [dbId, job.examQuestionId, job.studentId, job.status, job.attempts, new Date(job.createdAt), new Date(job.updatedAt)]
-      );
-    } catch (err) {
-      console.error('[Queue] Failed to save to DB:', err);
+    await enqueueQueueJob(db, {
+      id: dbId,
+      examQuestionId: job.examQuestionId,
+      studentId: job.studentId,
+      status: job.status,
+      attempts: job.attempts,
+      createdAt: new Date(job.createdAt),
+      updatedAt: new Date(job.updatedAt),
+    });
+  }
+
+  async flushStudentAnswers(studentId: number): Promise<void> {
+    const answers = Array.from(this.answerBuffer.entries())
+      .filter(([, answer]) => answer.studentId === studentId);
+    if (answers.length === 0) return;
+
+    console.log(`[Cache] Flushing ${answers.length} answers for student ${studentId}`);
+    for (const [key, answer] of answers) {
+      try {
+        await db.query(
+          'UPDATE exam_questions SET answer = ? WHERE student_id = ? AND question_order = ?',
+          [answer.answer, answer.studentId, answer.questionOrder],
+        );
+        this.answerBuffer.delete(key);
+      } catch (err) {
+        console.error('[Cache] Failed to flush student answer:', err);
+        throw err;
+      }
+    }
+  }
+
+  discardQueueForStudent(studentId: number): void {
+    for (const [id, job] of this.queue) {
+      if (job.studentId === studentId) this.queue.delete(id);
     }
   }
 
   private loadQueue() {
-    // On Vercel/production, load from database instead of file
-    if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-      this.loadQueueFromDB();
-      return;
-    }
-    
     try {
       if (fs.existsSync(this.queueFile)) {
         const data = JSON.parse(fs.readFileSync(this.queueFile, 'utf-8'));
@@ -333,42 +361,67 @@ class FileCache {
   }
   
   private async loadQueueFromDB(): Promise<void> {
-    try {
-      const { query } = await import('../server/db/postgres.js');
-      const result = await query('SELECT id, exam_question_id, student_id, status, attempts, created_at, updated_at FROM ai_queue WHERE status IN ($1, $2)', ['pending', 'processing']);
-      
-      for (const row of result.rows) {
-        const id = `job_${row.id}`;
-        this.queue.set(id, {
-          id,
-          examQuestionId: row.exam_question_id,
-          studentId: row.student_id,
-          status: row.status,
-          attempts: row.attempts,
-          createdAt: new Date(row.created_at).getTime(),
-          updatedAt: new Date(row.updated_at).getTime()
-        });
-      }
-      console.log(`[Queue] Loaded ${this.queue.size} jobs from database`);
-    } catch (err) {
-      console.error('[Queue] Failed to load from DB:', err);
+    const { query } = await import('../server/db/postgres.js');
+    const result = await query(
+      `SELECT id, exam_question_id, student_id, status, attempts, created_at, updated_at
+       FROM ai_queue WHERE status = ?`,
+      ['pending']
+    );
+
+    for (const [id, job] of this.queue) {
+      if (job.status === 'pending' || job.status === 'processing') this.queue.delete(id);
     }
+    for (const row of result.rows) {
+      const id = `job_${row.id}`;
+      this.queue.set(id, {
+        id,
+        examQuestionId: row.exam_question_id,
+        studentId: row.student_id,
+        status: row.status,
+        attempts: row.attempts,
+        createdAt: new Date(row.created_at).getTime(),
+        updatedAt: new Date(row.updated_at).getTime()
+      });
+    }
+    console.log(`[Queue] Loaded ${result.rows.length} pending jobs from database`);
   }
 
   private async updateQueueInDB(job: QueueJob): Promise<void> {
-    try {
-      const dbId = parseInt(job.id.replace('job_', ''));
-      const { query } = await import('../server/db/postgres.js');
-      await query(
-        `UPDATE ai_queue SET status = $1, attempts = $2, updated_at = $3 WHERE id = $4`,
-        [job.status, job.attempts, new Date(job.updatedAt), dbId]
-      );
-    } catch (err) {
-      console.error('[Queue] Failed to update in DB:', err);
-    }
+    const dbId = parseInt(job.id.replace('job_', ''));
+    await updateQueueJob(db, {
+      id: dbId,
+      status: job.status,
+      attempts: job.attempts,
+      updatedAt: new Date(job.updatedAt),
+    });
+  }
+
+  /** Atomic DB claim: nhiều Vercel instance chỉ một instance đổi pending -> processing. */
+  private async claimQueueJob(job: QueueJob): Promise<boolean> {
+    const dbId = parseInt(job.id.replace('job_', ''));
+    const now = new Date();
+    const claimed = await claimQueueJob(db, dbId, now);
+    if (!claimed) return false;
+    job.status = 'processing';
+    job.attempts += 1;
+    job.updatedAt = now.getTime();
+    return true;
+  }
+
+  private async recoverStaleProcessingJobs(): Promise<void> {
+    const parsed = parseInt(process.env.AI_QUEUE_STALE_MS || String(15 * 60_000));
+    const staleMs = Number.isFinite(parsed) && parsed >= 60_000 ? parsed : 15 * 60_000;
+    const cutoff = new Date(Date.now() - staleMs);
+    await recoverStaleQueueJobs(db, cutoff, new Date());
   }
 
   async processQueue(limit: number = 5): Promise<number> {
+    const usesDatabaseQueue = !!process.env.VERCEL || process.env.NODE_ENV === 'production';
+    if (usesDatabaseQueue) {
+      await this.recoverStaleProcessingJobs();
+      await this.loadQueueFromDB();
+    }
+
     const pendingJobs = Array.from(this.queue.values())
       .filter(j => j.status === 'pending')
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -382,10 +435,12 @@ class FileCache {
     let processed = 0;
     const promises = pendingJobs.map(async (job) => {
       try {
-        job.status = 'processing';
-        job.attempts++;
-        job.updatedAt = Date.now();
-        await this.updateQueueInDB(job);
+        const claimed = await this.claimQueueJob(job);
+        if (!claimed) {
+          this.queue.delete(job.id);
+          return;
+        }
+        processed += 1;
 
         const { query } = await import('../server/db/postgres.js');
         
@@ -403,10 +458,14 @@ class FileCache {
         const eq = examResult.rows[0];
         
         if (!eq.answer) {
-          await query(`UPDATE exam_questions SET ai_score = 0.0, ai_feedback = 'No answer provided' WHERE id = ?`, [job.examQuestionId]);
+          await query(`UPDATE exam_questions SET ai_score = 0.0, ai_feedback = 'No answer provided'
+            WHERE id = ? AND EXISTS (
+              SELECT 1 FROM ai_queue aq WHERE aq.id = ? AND aq.status = 'processing'
+            )`, [job.examQuestionId, parseInt(job.id.replace('job_', ''))]);
           job.status = 'completed';
           job.updatedAt = Date.now();
           await this.updateQueueInDB(job);
+          console.log(`[Queue] Job ${job.id} completed: no answer`);
           return;
         }
 
@@ -429,8 +488,10 @@ Provide a JSON response with "score" (0-10) and "feedback" (detailed feedback):
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
           
-          await query(`UPDATE exam_questions SET ai_score = ?, ai_feedback = ? WHERE id = ?`, 
-            [parsed.score, parsed.feedback, job.examQuestionId]);
+          await query(`UPDATE exam_questions SET ai_score = ?, ai_feedback = ?
+            WHERE id = ? AND EXISTS (
+              SELECT 1 FROM ai_queue aq WHERE aq.id = ? AND aq.status = 'processing'
+            )`, [parsed.score, parsed.feedback, job.examQuestionId, parseInt(job.id.replace('job_', ''))]);
           
           job.status = 'completed';
           job.result = { score: parsed.score, feedback: parsed.feedback };
@@ -449,8 +510,11 @@ Provide a JSON response with "score" (0-10) and "feedback" (detailed feedback):
           job.updatedAt = Date.now();
           
           const { query } = await import('../server/db/postgres.js');
-          await query(`UPDATE exam_questions SET ai_score = 0.0, ai_feedback = ? WHERE id = ?`, 
-            ['AI Evaluation Failed: ' + error.message, job.examQuestionId]);
+          await query(`UPDATE exam_questions SET ai_score = 0.0, ai_feedback = ?
+            WHERE id = ? AND EXISTS (
+              SELECT 1 FROM ai_queue aq WHERE aq.id = ? AND aq.status = 'processing'
+            )`, ['AI Evaluation Failed: ' + error.message, job.examQuestionId, parseInt(job.id.replace('job_', ''))]);
+          await this.updateQueueInDB(job);
         } else {
           job.status = 'pending';
           job.updatedAt = Date.now();
@@ -460,7 +524,7 @@ Provide a JSON response with "score" (0-10) and "feedback" (detailed feedback):
     });
 
     await Promise.all(promises);
-    return pendingJobs.length;
+    return processed;
   }
 
   private startQueueProcessor() {

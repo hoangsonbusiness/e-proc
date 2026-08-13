@@ -44,15 +44,48 @@ let dirHandle: any = null;              // FileSystemDirectoryHandle (chỉ mode
 let localPassword: string | null = null; // password mã hóa zip (chỉ mode 'local')
 let sessionStamp = '';
 
-// Hàng đợi upload lỗi cần thử lại (chỉ mode 's3')
-let retryQueue: PendingPart[] = [];
-let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let uploadChain: Promise<void> = Promise.resolve();
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/**
+ * [#6] Chỉ cho phép Chromium desktop (Chrome/Edge). Tài liệu nói chặn Safari/Firefox
+ * nhưng trước đây code chỉ kiểm tra sự tồn tại API — Firefox có getDisplayMedia nên lọt.
+ * Firefox không hỗ trợ displaySurface constraint đáng tin và không có showDirectoryPicker.
+ * Loại luôn mobile (không thể ghi toàn màn hình đúng nghĩa).
+ */
+export function isChromeOrEdgeDesktop(): boolean {
+  const ua = navigator.userAgent;
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+  if (isMobile) return false;
+
+  // [P2-5] Chỉ chấp nhận ĐÍCH DANH Google Chrome hoặc Microsoft Edge. Brand "Chromium"
+  // chung KHÔNG đủ — Brave/Opera/Vivaldi đều là Chromium fork và sẽ lọt nếu chỉ khớp
+  // "Chromium". uaData.brands là đáng tin nhất (Brave báo brand riêng, không có "Google Chrome").
+  const brands = (navigator as any).userAgentData?.brands as { brand: string }[] | undefined;
+  if (brands && brands.length) {
+    const names = brands.map((b) => b.brand.toLowerCase());
+    // Loại các fork có brand riêng lộ diện (Brave đôi khi thêm "Brave"; Opera "Opera").
+    const isFork = names.some((n) => n.includes('brave') || n.includes('opera') || n.includes('opr') || n.includes('vivaldi'));
+    if (isFork) return false;
+    return names.some((n) => n.includes('google chrome') || n.includes('microsoft edge'));
+  }
+
+  // Fallback UA (trình duyệt không hỗ trợ userAgentData): loại fork lộ diện trong UA,
+  // rồi yêu cầu chuỗi "Chrome/" (Chrome) hoặc "Edg/" (Edge). Không hoàn hảo — UA có thể
+  // spoof — nhưng đây chỉ là client-side signal, không phải bảo đảm (xem ghi chú dưới).
+  const isFork = /(Brave|OPR\/|Opera|Vivaldi|SamsungBrowser|YaBrowser)/i.test(ua);
+  if (isFork) return false;
+  const isFirefox = /Firefox\//.test(ua);
+  const isChromeOrEdge = /Edg\//.test(ua) || /Chrome\//.test(ua);
+  return isChromeOrEdge && !isFirefox;
+}
+
 /** Trình duyệt có đủ API để ghi hình cho mode tương ứng không. */
 export function isSupported(forMode: RecordMode = 's3'): boolean {
+  // [#6][P2-5] Bắt buộc Chrome/Edge desktop — không chỉ dựa vào sự tồn tại của API,
+  // và không chấp nhận Chromium fork (Brave/Opera/Vivaldi).
+  if (!isChromeOrEdgeDesktop()) return false;
   const base =
     !!navigator.mediaDevices?.getDisplayMedia &&
     typeof MediaRecorder !== 'undefined' &&
@@ -99,40 +132,6 @@ async function uploadPart(part: PendingPart): Promise<boolean> {
     console.error('[examRecorder] uploadPart failed:', err);
     return false;
   }
-}
-
-/** Đưa 1 phần vào hàng đợi và thử upload; lỗi thì lên lịch retry nền. */
-function enqueueAndUpload(part: PendingPart): void {
-  void (async () => {
-    const ok = await uploadPart(part);
-    if (!ok) {
-      part.attempts += 1;
-      if (part.attempts <= MAX_RETRY) {
-        retryQueue.push(part);
-        scheduleRetry();
-      } else {
-        console.error(`[examRecorder] bỏ phần ${part.partIndex} sau ${MAX_RETRY} lần thử`);
-      }
-    }
-  })();
-}
-
-/** Lên lịch xử lý hàng đợi retry với backoff tăng dần. */
-function scheduleRetry(): void {
-  if (retryTimer || retryQueue.length === 0) return;
-  const next = retryQueue[0];
-  const delay = RETRY_BASE_MS * Math.pow(2, Math.min(next.attempts - 1, 4)); // tối đa ~48s
-  retryTimer = setTimeout(async () => {
-    retryTimer = null;
-    const part = retryQueue.shift();
-    if (!part) return;
-    const ok = await uploadPart(part);
-    if (!ok) {
-      part.attempts += 1;
-      if (part.attempts <= MAX_RETRY) retryQueue.push(part);
-    }
-    if (retryQueue.length > 0) scheduleRetry();
-  }, delay);
 }
 
 // ── Mode Local: nén + mã hóa AES rồi ghi file .zip ─────────────────────────
@@ -230,7 +229,10 @@ export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: bo
 
   const track = stream.getVideoTracks()[0];
   const surface = (track.getSettings() as any).displaySurface;
-  if (surface && surface !== 'monitor') {
+  // [#6] Fail-closed: chỉ chấp nhận đúng 'monitor'. Trước đây `surface && surface !== 'monitor'`
+  // cho lọt khi displaySurface undefined (một số cấu hình/trình duyệt không báo cáo field này),
+  // nghĩa là HV chia sẻ tab/cửa sổ vẫn vào thi được. Giờ thiếu/không phải monitor đều bị chặn.
+  if (surface !== 'monitor') {
     track.stop();
     stream = null;
     dirHandle = forMode === 'local' ? null : dirHandle;
@@ -257,7 +259,6 @@ export function start(opts?: { mode?: RecordMode; password?: string | null }): v
 
   chunkBuffer = [];
   partIndex = 0;
-  retryQueue = [];
   uploadChain = Promise.resolve();
   sessionStamp = makeStamp();
 
