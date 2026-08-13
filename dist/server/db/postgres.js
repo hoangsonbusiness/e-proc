@@ -653,7 +653,7 @@ export async function verifyRequiredSchema() {
                 pg_get_indexdef(i.indexrelid) AS def,
                 pg_get_expr(i.indpred, i.indrelid) AS predicate,
                 ARRAY(
-                  SELECT a.attname
+                  SELECT a.attname::text
                   FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
                   JOIN pg_attribute a
                     ON a.attrelid = i.indrelid AND a.attnum = k.attnum
@@ -690,7 +690,7 @@ export async function verifyRequiredSchema() {
         };
         const checkPgUniqueColumns = async (table, cols) => {
             const r = await pgPool.query(`SELECT ARRAY(
-                  SELECT a.attname
+                  SELECT a.attname::text
                   FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
                   JOIN pg_attribute a
                     ON a.attrelid = i.indrelid AND a.attnum = k.attnum
