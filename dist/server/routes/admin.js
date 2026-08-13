@@ -12,6 +12,9 @@ import crypto from 'crypto';
 import { parseBlueprintCompat } from '../services/blueprint.js';
 import cache from '../cache.js';
 import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
+import { runWithDbMetrics } from '../observability/dbMetrics.js';
+import { loadBatchExportData, loadBatchResultsLegacy, loadBatchResultsSummary, loadStudentResultDetail, } from '../services/adminResults.js';
+import { loadPagedQuestions, loadQuestionCatalogSummary } from '../services/adminQuestions.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
@@ -27,6 +30,35 @@ const router = Router();
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MAX_IMPORT_FILE_BYTES, files: 1 },
+});
+// Enable full baseline logs with ADMIN_PERF_LOGS=true. Without it, only requests slower
+// than ADMIN_SLOW_REQUEST_MS (default 1000 ms) are logged to keep production noise bounded.
+router.use((req, res, next) => {
+    const requestId = String(req.headers['x-request-id'] || crypto.randomUUID());
+    const startedAt = performance.now();
+    const instanceUptimeAtStart = Math.round(process.uptime() * 1000);
+    res.setHeader('x-request-id', requestId);
+    runWithDbMetrics((metrics) => {
+        res.once('finish', () => {
+            const totalMs = performance.now() - startedAt;
+            const slowThreshold = Math.max(0, Number(process.env.ADMIN_SLOW_REQUEST_MS || 1000));
+            if (process.env.ADMIN_PERF_LOGS !== 'true' && totalMs < slowThreshold)
+                return;
+            console.log('[admin-perf]', JSON.stringify({
+                requestId,
+                method: req.method,
+                path: req.originalUrl.split('?')[0],
+                status: res.statusCode,
+                totalMs: Math.round(totalMs * 10) / 10,
+                dbMs: Math.round(metrics.dbMs * 10) / 10,
+                queryCount: metrics.queryCount,
+                responseBytes: Number(res.getHeader('content-length') || 0),
+                instanceUptimeAtStart,
+                region: process.env.VERCEL_REGION || null,
+            }));
+        });
+        next();
+    });
 });
 // Rate limit riêng cho login: 10 request/phút
 const loginRateLimit = rateLimit({
@@ -514,6 +546,38 @@ router.post('/questions/quiz/import', upload.single('file'), async (req, res) =>
     }
     catch (error) {
         console.error('Quiz import error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+router.get('/questions/paged', async (req, res) => {
+    try {
+        const requestedPage = Number(req.query.page || 1);
+        const pageSize = Number(req.query.pageSize || 25);
+        const moduleName = typeof req.query.module === 'string' ? req.query.module.trim() : '';
+        const category = typeof req.query.category === 'string' ? req.query.category : 'all';
+        const allowedPageSizes = new Set([10, 25, 50]);
+        if (!Number.isInteger(requestedPage) || requestedPage < 1)
+            return res.status(400).json({ error: 'Invalid page' });
+        if (!allowedPageSizes.has(pageSize))
+            return res.status(400).json({ error: 'Invalid page size' });
+        if (!['all', 'essay', 'quiz'].includes(category))
+            return res.status(400).json({ error: 'Invalid category' });
+        res.json(await loadPagedQuestions(db, {
+            page: requestedPage,
+            pageSize,
+            moduleName,
+            category: category,
+        }));
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+router.get('/questions/catalog-summary', async (_req, res) => {
+    try {
+        res.json(await loadQuestionCatalogSummary(db));
+    }
+    catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
@@ -1078,75 +1142,50 @@ router.post('/students/:studentId/reset', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.get('/batches/:id/results/summary', async (req, res) => {
+    try {
+        const batchId = Number(req.params.id);
+        const requestedPage = Number(req.query.page || 1);
+        const requestedPageSize = Number(req.query.pageSize || 25);
+        const allowedPageSizes = new Set([10, 25, 50]);
+        if (!Number.isInteger(batchId) || batchId < 1)
+            return res.status(400).json({ error: 'Invalid batch id' });
+        if (!Number.isInteger(requestedPage) || requestedPage < 1)
+            return res.status(400).json({ error: 'Invalid page' });
+        if (!allowedPageSizes.has(requestedPageSize))
+            return res.status(400).json({ error: 'Invalid page size' });
+        const result = await loadBatchResultsSummary(db, batchId, {
+            page: requestedPage,
+            pageSize: requestedPageSize,
+        });
+        res.json(result);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+router.get('/students/:studentId/result-detail', async (req, res) => {
+    try {
+        const studentId = Number(req.params.studentId);
+        if (!Number.isInteger(studentId) || studentId < 1)
+            return res.status(400).json({ error: 'Invalid student id' });
+        const detail = await loadStudentResultDetail(db, studentId);
+        if (!detail)
+            return res.status(404).json({ error: 'Student not found' });
+        res.json(detail);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+// Backward-compatible endpoint for older clients. It keeps the old response contract,
+// but uses five bulk queries instead of five queries for every student.
 router.get('/batches/:id/results', async (req, res) => {
     try {
-        const { id } = req.params;
-        const batchId = parseInt(id);
-        const studentsResult = await db.query(`
-      SELECT s.*, 
-        AVG(eq.ai_score) as avg_ai_score,
-        COUNT(eq.id) as questions_count
-      FROM students s
-      LEFT JOIN exam_questions eq ON s.id = eq.student_id
-      WHERE s.batch_id = ?
-      GROUP BY s.id
-    `, [batchId]);
-        const results = [];
-        for (const student of studentsResult.rows) {
-            const questionsResult = await db.query(`
-        SELECT eq.*, q.type, q.level, q.module, q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
-        FROM exam_questions eq
-        JOIN question_bank q ON eq.question_id = q.id
-        WHERE eq.student_id = ?
-        ORDER BY eq.question_order
-      `, [student.id]);
-            // [Anti-Cheat v2] Trả về cả tổng lẫn breakdown theo type để admin review
-            const violationsResult = await db.query(`
-        SELECT SUM(count) as total FROM violations WHERE student_id = ?
-      `, [student.id]);
-            const violationsBreakdownResult = await db.query(`
-        SELECT type, count FROM violations WHERE student_id = ? ORDER BY count DESC
-      `, [student.id]);
-            // Chuyển array [{type, count}, ...] thành object {tab_switch: 2, suspicious_paste: 1, ...}
-            const violationsBreakdown = {};
-            for (const row of violationsBreakdownResult.rows) {
-                violationsBreakdown[row.type] = parseInt(row.count) || 0;
-            }
-            // Forensic log: từng lần vi phạm kèm preview (500 ký tự) để admin xem qua popup.
-            // Bọc riêng: nếu bảng chưa tồn tại (DB cũ chưa migrate) thì trả mảng rỗng
-            // thay vì làm sập cả endpoint results.
-            let violationEvents = [];
-            try {
-                const violationEventsResult = await db.query(`
-          SELECT type, text_length, content_preview, question_id, metadata_json, created_at
-          FROM violation_events WHERE student_id = ? ORDER BY created_at DESC
-        `, [student.id]);
-                violationEvents = violationEventsResult.rows;
-            }
-            catch (evErr) {
-                console.error('[results] violation_events query failed (non-fatal):', evErr?.message);
-            }
-            let recordingParts = [];
-            try {
-                const recordingPartsResult = await db.query(`
-          SELECT part_index, object_key, byte_size, uploaded_at
-          FROM recording_parts WHERE student_id = ? ORDER BY part_index
-        `, [student.id]);
-                recordingParts = recordingPartsResult.rows;
-            }
-            catch (recordErr) {
-                console.error('[results] recording_parts query failed (non-fatal):', recordErr?.message);
-            }
-            results.push({
-                student,
-                questions: questionsResult.rows,
-                violations: parseInt(violationsResult.rows[0]?.total) || 0,
-                violations_breakdown: violationsBreakdown,
-                violation_events: violationEvents,
-                recording_parts: recordingParts,
-            });
-        }
-        res.json(results);
+        const batchId = Number(req.params.id);
+        if (!Number.isInteger(batchId) || batchId < 1)
+            return res.status(400).json({ error: 'Invalid batch id' });
+        res.json(await loadBatchResultsLegacy(db, batchId));
     }
     catch (error) {
         res.status(500).json({ error: error.message });
@@ -1156,14 +1195,15 @@ router.put('/results/:studentId', async (req, res) => {
     try {
         const { studentId } = req.params;
         const { trainer_score, trainer_feedback } = req.body;
-        const questionsResult = await db.query('SELECT id FROM exam_questions WHERE student_id = ?', [parseInt(studentId)]);
-        for (const q of questionsResult.rows) {
-            await db.query(`
-        UPDATE exam_questions 
-        SET trainer_score = ?, trainer_feedback = ?
-        WHERE id = ?
-      `, [trainer_score, trainer_feedback, q.id]);
+        const parsedStudentId = Number(studentId);
+        if (!Number.isInteger(parsedStudentId) || parsedStudentId < 1) {
+            return res.status(400).json({ error: 'Invalid student id' });
         }
+        await db.query(`
+      UPDATE exam_questions
+      SET trainer_score = ?, trainer_feedback = ?
+      WHERE student_id = ?
+    `, [trainer_score, trainer_feedback, parsedStudentId]);
         res.json({ success: true });
     }
     catch (error) {
@@ -1173,22 +1213,15 @@ router.put('/results/:studentId', async (req, res) => {
 router.get('/batches/:id/results/export', async (req, res) => {
     try {
         const { id } = req.params;
-        const batchId = parseInt(id);
-        const studentsResult = await db.query('SELECT id, email FROM students WHERE batch_id = ?', [batchId]);
+        const batchId = Number(id);
+        if (!Number.isInteger(batchId) || batchId < 1)
+            return res.status(400).json({ error: 'Invalid batch id' });
+        const exportResults = await loadBatchExportData(db, batchId);
         const workbook = XLSX.utils.book_new();
-        for (const student of studentsResult.rows) {
-            const questionsResult = await db.query(`
-        SELECT eq.*, q.type, q.level, q.module, q.question_sample, 
-          q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
-        FROM exam_questions eq
-        JOIN question_bank q ON eq.question_id = q.id
-        WHERE eq.student_id = ?
-        ORDER BY eq.question_order
-      `, [student.id]);
-            const violationsResult = await db.query(`
-        SELECT SUM(count) as total FROM violations WHERE student_id = ?
-      `, [student.id]);
-            const data = questionsResult.rows.map((q) => ({
+        const usedSheetNames = new Set();
+        for (const result of exportResults) {
+            const student = result.student;
+            const data = result.questions.map((q) => ({
                 ID: q.question_id,
                 Type: q.type,
                 Level: q.level,
@@ -1202,11 +1235,25 @@ router.get('/batches/:id/results/export', async (req, res) => {
                 'AI Score': q.ai_score || 0,
                 'Trainer Feedback': q.trainer_feedback || '',
                 'Trainer Score': (q.trainer_score ?? q.ai_score) || 0,
-                'Violation Count': parseInt(violationsResult.rows[0]?.total) || 0
+                'Violation Count': result.violations
             }));
             const sheet = XLSX.utils.json_to_sheet(data);
-            const sheetName = student.email.split('@')[0] || `Student_${student.id}`;
-            XLSX.utils.book_append_sheet(workbook, sheet, sheetName.substring(0, 31));
+            const rawBase = (student.email.split('@')[0] || `Student_${student.id}`)
+                .replace(/[\\/?*\[\]:]/g, '_')
+                .trim();
+            let sheetName = (rawBase || `Student_${student.id}`).substring(0, 31);
+            if (usedSheetNames.has(sheetName)) {
+                const suffix = `_${student.id}`;
+                sheetName = `${sheetName.substring(0, 31 - suffix.length)}${suffix}`;
+            }
+            let duplicate = 2;
+            const uniqueBase = sheetName;
+            while (usedSheetNames.has(sheetName)) {
+                const suffix = `_${duplicate++}`;
+                sheetName = `${uniqueBase.substring(0, 31 - suffix.length)}${suffix}`;
+            }
+            usedSheetNames.add(sheetName);
+            XLSX.utils.book_append_sheet(workbook, sheet, sheetName);
         }
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename=results-${id}.xlsx`);

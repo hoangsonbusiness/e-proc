@@ -78,6 +78,12 @@ export const adminApi = {
   
   getQuestions: () =>
     api.get('/admin/questions'),
+
+  getPagedQuestions: (params: { page: number; pageSize: number; module?: string; category?: 'all' | 'essay' | 'quiz' }) =>
+    api.get('/admin/questions/paged', { params }),
+
+  getQuestionCatalogSummary: () =>
+    api.get('/admin/questions/catalog-summary'),
   
   getModules: () =>
     api.get('/admin/questions/modules'),
@@ -135,6 +141,12 @@ export const adminApi = {
   // --- Results endpoints ---
   getResults: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/results`),
+
+  getResultsSummary: (batchId: number, page: number, pageSize: number) =>
+    api.get(`/admin/batches/${batchId}/results/summary`, { params: { page, pageSize } }),
+
+  getStudentResultDetail: (studentId: number) =>
+    api.get(`/admin/students/${studentId}/result-detail`),
   
   updateResult: (studentId: number, data: any) =>
     api.put(`/admin/results/${studentId}`, data),

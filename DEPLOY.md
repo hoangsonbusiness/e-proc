@@ -25,7 +25,7 @@ Không deploy code trước rồi mới sửa database. Thứ tự an toàn cho 
 1. Cài dependency và chạy SQLite regression test.
 2. Chạy PostgreSQL integration test trên **database test riêng**.
 3. Dừng tạo kỳ thi mới/chọn thời gian không có học viên đang thi.
-4. Chạy bốn migration trên Supabase production theo đúng thứ tự.
+4. Chạy các migration trên Supabase production theo đúng thứ tự.
 5. Cấu hình/kiểm tra environment variables trên Vercel.
 6. Build lại cả backend và frontend artifact.
 7. Deploy Vercel, kiểm tra health và chạy một bài smoke test hoàn chỉnh.
@@ -59,7 +59,7 @@ Năm integration test cần PostgreSQL thật để kiểm tra những hành vi 
 - rollback xóa đồng thời event và counter;
 - hai Vercel worker đồng thời chỉ một worker claim được AI queue job.
 
-Test tạo schema tạm tên `test_violation`, tạo các bảng tối thiểu trong schema đó, rồi `DROP SCHEMA test_violation CASCADE` khi kết thúc. Nó không chạy bốn migration và không chạm schema `public`, nhưng **không được trỏ vào production**.
+Test tạo schema tạm tên `test_violation`, tạo các bảng tối thiểu trong schema đó, rồi `DROP SCHEMA test_violation CASCADE` khi kết thúc. Nó không chạy bộ migration production và không chạm schema `public`, nhưng **không được trỏ vào production**.
 
 `postgresql://.../dedicated_test_db` trước đây chỉ là placeholder minh họa, không phải chuỗi có thể chạy. `...` phải được thay bằng toàn bộ connection string thật của một PostgreSQL test riêng.
 
@@ -119,7 +119,7 @@ Connection string chứa database password. Hard-code nó trong `package.json`, 
 - Chọn thời gian không có học viên đang thi; migration tạo unique index và có thể cần lock bảng ngắn hạn.
 - Xác nhận đang mở đúng **project production**, không phải project test.
 - Nếu dữ liệu quan trọng, tạo backup/export phù hợp với plan trước khi thay đổi. Free Plan không có automatic database backup.
-- Không deploy source mới trước khi cả bốn migration thành công; source mới fail readiness nếu schema bắt buộc chưa đủ.
+- Không deploy source mới trước khi toàn bộ migration áp dụng cho đợt phát hành thành công; source mới fail readiness nếu schema bắt buộc chưa đủ.
 
 ### 3.2. Chạy thủ công bằng SQL Editor
 
@@ -143,6 +143,11 @@ Chạy đúng thứ tự:
 4. `migrations/20260810_violation_event_idempotency.sql`
    - Mong đợi result set đầu: 1 row — `violation_events.event_id`.
    - Mong đợi result set sau: 2 index — `ux_violation_events_student_event`, `ux_violations_student_type`.
+5. `migrations/20260813_ai_grading_controls.sql`
+   - Bổ sung trạng thái điều khiển AI grading/queue và index session cần thiết.
+6. `migrations/20260813_admin_query_performance.sql`
+   - Mong đợi verification trả 2 index — `idx_students_batch_id`, `idx_violation_events_student_created_at`.
+   - Chạy lúc ít tải vì `CREATE INDEX` thông thường có thể phải chờ hoặc chặn write xung đột trong thời gian ngắn.
 
 Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Tuy nhiên file cuối có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
@@ -207,6 +212,8 @@ Biến khuyến nghị:
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
 - `AI_QUEUE_STALE_MS=900000` — recover job bị kẹt `processing` sau 15 phút; không đặt thấp hơn thời gian tối đa một lần gọi AI.
+- `ADMIN_PERF_LOGS=true` — tùy chọn, log timing cho mọi API admin trong giai đoạn lấy baseline; tắt sau khi đo xong.
+- `ADMIN_SLOW_REQUEST_MS=1000` — khi không bật full perf logs, chỉ log API admin chậm hơn ngưỡng này.
 - `GEMINI_API_KEY` hoặc cấu hình provider trong admin UI.
 
 Nếu dùng S3 recording:

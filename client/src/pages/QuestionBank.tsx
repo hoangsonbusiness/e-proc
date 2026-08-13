@@ -23,6 +23,9 @@ function QuestionBank() {
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'essay' | 'quiz'>('all');
   const [pageSize, setPageSize] = useState<PageSize>(25);
   const [currentPage, setCurrentPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const pageRequestRef = useRef(0);
 
   // Bulk delete
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -30,23 +33,37 @@ function QuestionBank() {
 
   useEffect(() => {
     loadQuestions();
+  }, [currentPage, pageSize, selectedModule, selectedCategory]);
+
+  useEffect(() => {
     loadModules();
   }, []);
 
   const loadQuestions = async () => {
+    const requestId = ++pageRequestRef.current;
     try {
-      const res = await adminApi.getQuestions();
-      setQuestions(res.data);
+      const res = await adminApi.getPagedQuestions({
+        page: currentPage,
+        pageSize,
+        module: selectedModule || undefined,
+        category: selectedCategory,
+      });
+      if (requestId !== pageRequestRef.current) return;
+      setQuestions(res.data.items);
+      setTotal(Number(res.data.total) || 0);
+      setTotalPages(Number(res.data.totalPages) || 1);
+      if (res.data.page !== currentPage) setCurrentPage(res.data.page);
       setSelectedIds(new Set());
     } catch (error) {
+      if (requestId !== pageRequestRef.current) return;
       console.error(error);
     }
   };
 
   const loadModules = async () => {
     try {
-      const res = await adminApi.getModules();
-      setModules(res.data);
+      const res = await adminApi.getQuestionCatalogSummary();
+      setModules(res.data.modules);
     } catch (error) {
       console.error(error);
     }
@@ -70,8 +87,7 @@ function QuestionBank() {
         setIsError(true);
       }
       setMessage(msg);
-      loadQuestions();
-      loadModules();
+      await Promise.all([loadQuestions(), loadModules()]);
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
     } catch (error: any) {
@@ -85,7 +101,7 @@ function QuestionBank() {
     if (!confirm('Delete this question?')) return;
     try {
       await adminApi.deleteQuestion(id);
-      loadQuestions();
+      await Promise.all([loadQuestions(), loadModules()]);
     } catch (error) {
       console.error(error);
     }
@@ -97,7 +113,7 @@ function QuestionBank() {
     setBulkDeleting(true);
     try {
       await adminApi.deleteQuestions(Array.from(selectedIds));
-      loadQuestions();
+      await Promise.all([loadQuestions(), loadModules()]);
       setSelectedIds(new Set());
     } catch (error: any) {
       alert('Error: ' + (error.response?.data?.error || error.message));
@@ -111,29 +127,10 @@ function QuestionBank() {
   /** Với mod: chỉ cho chọn checkbox những question của mình */
   const isSelectable = (q: any) => isAdmin || q.uploaded_by === userId;
 
-  // ── Derived data ──────────────────────────────────────────────────────────
-  const QUIZ_TYPES = ['SingleChoice', 'MultipleChoice'];
-  const filtered = useMemo(() =>
-    questions.filter(q => {
-      if (selectedModule && q.module !== selectedModule) return false;
-      if (selectedCategory === 'quiz') return QUIZ_TYPES.includes(q.type);
-      if (selectedCategory === 'essay') return !QUIZ_TYPES.includes(q.type);
-      return true;
-    }),
-    [questions, selectedModule, selectedCategory]
-  );
-
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-
-  const paginated = useMemo(() =>
-    filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filtered, currentPage, pageSize]
-  );
-
   // Chỉ những question mod có quyền select (mình upload hoặc admin)
   const selectablePageIds = useMemo(() =>
-    paginated.filter((q: any) => isSelectable(q)).map((q: any) => q.id as string),
-    [paginated, isAdmin, userId]
+    questions.filter((q: any) => isSelectable(q)).map((q: any) => q.id as string),
+    [questions, isAdmin, userId]
   );
   const allPageSelected = selectablePageIds.length > 0 && selectablePageIds.every(id => selectedIds.has(id));
   const somePageSelected = selectablePageIds.some(id => selectedIds.has(id));
@@ -279,7 +276,7 @@ function QuestionBank() {
             <Database size={18} className="text-slate-500" />
             Questions Library
             <span className="bg-slate-200 text-slate-700 py-0.5 px-2 rounded-full text-xs font-medium ml-2">
-              {filtered.length} {selectedModule ? `in ${selectedModule}` : 'total'}
+              {total} {selectedModule ? `in ${selectedModule}` : 'total'}
             </span>
           </h3>
           
@@ -366,7 +363,7 @@ function QuestionBank() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginated.map((q: any) => {
+              {questions.map((q: any) => {
                 const deletable = canDeleteQuestion(q);
                 const selectable = isSelectable(q);
                 const isSelected = selectedIds.has(q.id);
@@ -423,12 +420,12 @@ function QuestionBank() {
                   </tr>
                 );
               })}
-              {paginated.length === 0 && (
+              {questions.length === 0 && (
                 <tr>
                   <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <Search size={32} className="text-slate-300" />
-                      <p>{questions.length === 0 ? 'No questions yet. Import from Excel to get started.' : 'No questions match the selected filters.'}</p>
+                      <p>{modules.length === 0 ? 'No questions yet. Import from Excel to get started.' : 'No questions match the selected filters.'}</p>
                     </div>
                   </td>
                 </tr>
@@ -441,7 +438,7 @@ function QuestionBank() {
         {totalPages > 1 && (
           <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex flex-col sm:flex-row items-center justify-between gap-4">
             <span className="text-sm text-slate-500 font-medium">
-              Showing <span className="text-slate-900">{(currentPage - 1) * pageSize + 1}</span> to <span className="text-slate-900">{Math.min(currentPage * pageSize, filtered.length)}</span> of <span className="text-slate-900">{filtered.length}</span> questions
+              Showing <span className="text-slate-900">{(currentPage - 1) * pageSize + 1}</span> to <span className="text-slate-900">{Math.min(currentPage * pageSize, total)}</span> of <span className="text-slate-900">{total}</span> questions
             </span>
             <div className="flex items-center gap-1">
               <button

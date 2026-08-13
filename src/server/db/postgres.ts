@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { recordDbQuery } from '../observability/dbMetrics.js';
 
 dotenv.config();
 
@@ -484,6 +485,7 @@ function initSqlite() {
     for (const [name, def] of studentAdds) {
       if (!colNames.includes(name)) sqliteDb.exec(`ALTER TABLE students ADD COLUMN ${name} ${def}`);
     }
+    sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_students_batch_id ON students(batch_id)');
     
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_questions (
@@ -556,6 +558,7 @@ function initSqlite() {
       sqliteDb.exec('ALTER TABLE violation_events ADD COLUMN event_id TEXT');
     }
     sqliteDb.exec('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
+    sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_violation_events_student_created_at ON violation_events(student_id, created_at DESC)');
 
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS recording_parts (
@@ -830,8 +833,9 @@ function postgresText(text: string, params?: any[]): string {
 }
 
 export async function query(text: string, params?: any[]): Promise<DbResult> {
-  if (USE_SQLITE && sqliteDb) {
-    try {
+  const startedAt = performance.now();
+  try {
+    if (USE_SQLITE && sqliteDb) {
       const stmt = sqliteDb.prepare(text);
       if (text.trim().toUpperCase().startsWith('SELECT')) {
         return { rows: stmt.all(...(params || [])), rowCount: 0 };
@@ -839,22 +843,24 @@ export async function query(text: string, params?: any[]): Promise<DbResult> {
         const result = stmt.run(...(params || []));
         return { rows: [], rowCount: result.changes, lastInsertRowid: result.lastInsertRowid };
       }
-    } catch (err) {
-      console.error('[DB] SQLite query error:', err);
-      throw err;
     }
-  }
-  
-  if (pgPool) {
-    if (params && params.length > 0) {
-      const result = await pgPool.query(postgresText(text, params), params);
+
+    if (pgPool) {
+      if (params && params.length > 0) {
+        const result = await pgPool.query(postgresText(text, params), params);
+        return { rows: result.rows, rowCount: result.rowCount || 0, lastInsertRowid: undefined };
+      }
+      const result = await pgPool.query(text);
       return { rows: result.rows, rowCount: result.rowCount || 0, lastInsertRowid: undefined };
     }
-    const result = await pgPool.query(text);
-    return { rows: result.rows, rowCount: result.rowCount || 0, lastInsertRowid: undefined };
+
+    throw new Error('No database connection available');
+  } catch (err) {
+    if (USE_SQLITE) console.error('[DB] SQLite query error:', err);
+    throw err;
+  } finally {
+    recordDbQuery(performance.now() - startedAt);
   }
-  
-  throw new Error('No database connection available');
 }
 
 /** Run all statements on one physical connection. Required for row locks and atomic exam state changes. */
@@ -876,8 +882,13 @@ export async function withTransaction<T>(work: (tx: DbExecutor) => Promise<T>): 
   const client = await pgPool.connect();
   const tx: DbExecutor = {
     query: async (text: string, params?: any[]) => {
-      const result = await client.query(postgresText(text, params), params);
-      return { rows: result.rows, rowCount: result.rowCount || 0 };
+      const startedAt = performance.now();
+      try {
+        const result = await client.query(postgresText(text, params), params);
+        return { rows: result.rows, rowCount: result.rowCount || 0 };
+      } finally {
+        recordDbQuery(performance.now() - startedAt);
+      }
     },
   };
   try {

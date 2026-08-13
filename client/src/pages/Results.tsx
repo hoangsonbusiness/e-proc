@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
-import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw } from 'lucide-react';
+import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react';
 import DOMPurify from 'dompurify';
 
 function Results() {
@@ -15,13 +15,27 @@ function Results() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [resettingStudentId, setResettingStudentId] = useState<number | null>(null);
+  const [detailLoadingStudentId, setDetailLoadingStudentId] = useState<number | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const detailCacheRef = useRef(new Map<number, any>());
+  const summaryRequestRef = useRef(0);
   // Forensic popup: xem chi tiết các lần vi phạm (kèm nội dung paste) của 1 học viên
   const [violationDetail, setViolationDetail] = useState<{ email: string; events: any[] } | null>(null);
 
   useEffect(() => {
+    detailCacheRef.current.clear();
+    setSelectedStudent(null);
+    setViolationDetail(null);
+    setCurrentPage(1);
     loadBatch();
-    loadResults();
   }, [id]);
+
+  useEffect(() => {
+    loadResults();
+  }, [id, currentPage, pageSize]);
 
   const loadBatch = async () => {
     try {
@@ -33,14 +47,58 @@ function Results() {
   };
 
   const loadResults = async () => {
+    const requestId = ++summaryRequestRef.current;
     setLoading(true);
     try {
-      const res = await adminApi.getResults(parseInt(id!));
-      setResults(res.data);
+      const res = await adminApi.getResultsSummary(parseInt(id!), currentPage, pageSize);
+      if (requestId !== summaryRequestRef.current) return;
+      setResults(res.data.items);
+      setTotal(Number(res.data.total) || 0);
+      setTotalPages(Number(res.data.totalPages) || 1);
+      if (res.data.page !== currentPage) setCurrentPage(res.data.page);
+    } catch (error) {
+      if (requestId !== summaryRequestRef.current) return;
+      console.error(error);
+    } finally {
+      if (requestId === summaryRequestRef.current) setLoading(false);
+    }
+  };
+
+  const loadStudentDetail = async (result: any) => {
+    const studentId = Number(result.student.id);
+    const cached = detailCacheRef.current.get(studentId);
+    if (cached) return cached;
+    setDetailLoadingStudentId(studentId);
+    try {
+      const response = await adminApi.getStudentResultDetail(studentId);
+      const detail = { ...result, ...response.data, student: result.student };
+      detailCacheRef.current.set(studentId, detail);
+      return detail;
+    } finally {
+      setDetailLoadingStudentId(null);
+    }
+  };
+
+  const handleReview = async (result: any) => {
+    try {
+      const detail = await loadStudentDetail(result);
+      setSelectedStudent(detail);
+      const firstQ = detail.questions[0];
+      setEditScore(firstQ?.trainer_score ?? firstQ?.ai_score ?? 0);
+      setEditFeedback(firstQ?.trainer_feedback ?? '');
+      setTimeout(() => document.getElementById('review-section')?.scrollIntoView({ behavior: 'smooth' }), 100);
     } catch (error) {
       console.error(error);
     }
-    setLoading(false);
+  };
+
+  const handleViolationDetail = async (result: any) => {
+    try {
+      const detail = await loadStudentDetail(result);
+      setViolationDetail({ email: result.student.email, events: detail.violation_events });
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   const handleExport = async () => {
@@ -65,8 +123,9 @@ function Results() {
         trainer_score: editScore,
         trainer_feedback: editFeedback
       });
+      detailCacheRef.current.delete(studentId);
       setSelectedStudent(null);
-      loadResults();
+      await loadResults();
     } catch (error) {
       console.error(error);
     }
@@ -93,6 +152,7 @@ function Results() {
       const response = await adminApi.resetStudentExam(student.id, durationMinutes);
       window.alert(`${response.data.message}\nNew deadline: ${new Date(response.data.deadline).toLocaleString()}`);
       setSelectedStudent(null);
+      detailCacheRef.current.delete(student.id);
       await loadResults();
     } catch (error: any) {
       window.alert(error.response?.data?.error || error.message || 'Could not reset the exam.');
@@ -102,9 +162,8 @@ function Results() {
   };
 
   const getAverageScore = (student: any) => {
-    const scores = student.questions?.filter((q: any) => q.ai_score !== null).map((q: any) => q.trainer_score ?? q.ai_score) || [];
-    if (scores.length === 0) return '0.0';
-    return (scores.reduce((a: number, b: number) => a + Number(b), 0) / scores.length).toFixed(1);
+    const score = student.student?.avg_score;
+    return score == null ? '0.0' : Number(score).toFixed(1);
   };
 
   const sanitizeQuestion = (html: string): string => {
@@ -142,15 +201,26 @@ function Results() {
       <AdminNav />
 
       <div className="flex justify-between items-center mb-6">
-        <h2 className="text-lg font-bold text-slate-800 m-0 border-none pb-0">Student Results ({results.length})</h2>
-        <button
-          onClick={handleExport}
-          disabled={results.length === 0}
-          className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium text-sm hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
-        >
-          <Download size={16} />
-          Export Excel
-        </button>
+        <h2 className="text-lg font-bold text-slate-800 m-0 border-none pb-0">Student Results ({total})</h2>
+        <div className="flex items-center gap-3">
+          <select
+            value={pageSize}
+            onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}
+            className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-700"
+          >
+            <option value={10}>10 / page</option>
+            <option value={25}>25 / page</option>
+            <option value={50}>50 / page</option>
+          </select>
+          <button
+            onClick={handleExport}
+            disabled={total === 0}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium text-sm hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
+          >
+            <Download size={16} />
+            Export Excel
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -187,9 +257,9 @@ function Results() {
                           </div>
                         )}
                         {batch?.record_mode === 's3' && (
-                          <div className={`mt-1.5 text-xs font-semibold ${r.recording_parts?.length ? 'text-emerald-700' : 'text-red-700'}`}>
-                            {r.recording_parts?.length
-                              ? `Recording evidence: ${r.recording_parts.length} part(s), ${r.recording_parts.reduce((sum: number, part: any) => sum + Number(part.byte_size || 0), 0).toLocaleString()} bytes`
+                          <div className={`mt-1.5 text-xs font-semibold ${r.recording_part_count ? 'text-emerald-700' : 'text-red-700'}`}>
+                            {r.recording_part_count
+                              ? `Recording evidence: ${r.recording_part_count} part(s), ${Number(r.recording_total_bytes || 0).toLocaleString()} bytes`
                               : 'Recording evidence missing'}
                           </div>
                         )}
@@ -204,12 +274,19 @@ function Results() {
                         </span>
                       </td>
                       <td className="px-6 py-4">
-                        {r.violations > 0 ? (
+                        {r.violations > 0 || r.violation_event_count > 0 ? (
                           <div className="space-y-2">
-                            <span className="inline-flex items-center gap-1.5 text-red-600 font-semibold text-sm">
-                              <ShieldAlert size={14} />
-                              {r.violations} total
-                            </span>
+                            {r.violations > 0 ? (
+                              <span className="inline-flex items-center gap-1.5 text-red-600 font-semibold text-sm">
+                                <ShieldAlert size={14} />
+                                {r.violations} total
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1.5 text-orange-600 font-semibold text-sm">
+                                <ShieldAlert size={14} />
+                                Forensic events only
+                              </span>
+                            )}
                             {/* Breakdown chi tiết theo type — mọi type đều lockable (badge cam) */}
                             {r.violations_breakdown && Object.keys(r.violations_breakdown).length > 0 && (
                               <div className="flex flex-wrap gap-1.5 mt-1">
@@ -224,32 +301,22 @@ function Results() {
                               </div>
                             )}
                             {/* Cảnh báo nổi bật: phát hiện phiên thi đồng thời từ nhiều IP/client */}
-                            {r.violation_events && (() => {
-                              const cs = (r.violation_events as any[]).filter((e) => e.type === 'concurrent_session');
-                              if (cs.length === 0) return null;
-                              const ipSet = new Set<string>();
-                              cs.forEach((e) => {
-                                try {
-                                  const m = typeof e.metadata_json === 'string' ? JSON.parse(e.metadata_json) : e.metadata_json;
-                                  (m?.ips || []).forEach((ip: string) => ipSet.add(ip));
-                                } catch (_) { /* ignore */ }
-                              });
-                              return (
-                                <div className="mt-1.5">
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 border border-red-300 text-red-800 rounded text-[10px] font-bold">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse"></span>
-                                    ⚠️ Multi-session{ipSet.size > 0 ? ` (${ipSet.size} IP)` : ''} ×{cs.length}
-                                  </span>
-                                </div>
-                              );
-                            })()}
+                            {r.concurrent_session_count > 0 && (
+                              <div className="mt-1.5">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 border border-red-300 text-red-800 rounded text-[10px] font-bold">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-600 animate-pulse"></span>
+                                  ⚠️ Multi-session ×{r.concurrent_session_count}
+                                </span>
+                              </div>
+                            )}
                             {/* Forensic: xem nội dung paste / thời điểm từng lần vi phạm */}
-                            {r.violation_events && r.violation_events.length > 0 && (
+                            {r.violation_event_count > 0 && (
                               <button
-                                onClick={() => setViolationDetail({ email: r.student.email, events: r.violation_events })}
+                                onClick={() => handleViolationDetail(r)}
+                                disabled={detailLoadingStudentId === r.student.id}
                                 className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded transition-colors"
                               >
-                                <Search size={12} /> View details ({r.violation_events.length})
+                                <Search size={12} /> {detailLoadingStudentId === r.student.id ? 'Loading...' : `View details (${r.violation_event_count})`}
                               </button>
                             )}
                           </div>
@@ -264,7 +331,7 @@ function Results() {
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="inline-flex items-center justify-end gap-2">
-                          {r.student.status === 'submitted' && r.questions.length > 0 && (
+                          {r.student.status === 'submitted' && r.student.questions_count > 0 && (
                             <button
                               onClick={() => handleResetExam(r.student)}
                               disabled={resettingStudentId === r.student.id}
@@ -276,20 +343,12 @@ function Results() {
                             </button>
                           )}
                           <button
-                            onClick={() => {
-                              setSelectedStudent(r);
-                              const firstQ = r.questions[0];
-                              setEditScore(firstQ?.trainer_score ?? firstQ?.ai_score ?? 0);
-                              setEditFeedback(firstQ?.trainer_feedback ?? '');
-                              // scroll to review section
-                              setTimeout(() => {
-                                document.getElementById('review-section')?.scrollIntoView({ behavior: 'smooth' });
-                              }, 100);
-                            }}
+                            onClick={() => handleReview(r)}
+                            disabled={detailLoadingStudentId === r.student.id}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
                           >
                             <Settings2 size={14} />
-                            Review
+                            {detailLoadingStudentId === r.student.id ? 'Loading...' : 'Review'}
                           </button>
                         </div>
                       </td>
@@ -309,6 +368,31 @@ function Results() {
               </table>
             </div>
           </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mb-8 px-1">
+              <span className="text-sm text-slate-500">
+                Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, total)} of {total}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
+                  disabled={currentPage === 1}
+                  className="inline-flex items-center gap-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm disabled:opacity-50"
+                >
+                  <ChevronLeft size={16} /> Previous
+                </button>
+                <span className="text-sm font-medium text-slate-600">Page {currentPage} / {totalPages}</span>
+                <button
+                  onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
+                  disabled={currentPage === totalPages}
+                  className="inline-flex items-center gap-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm disabled:opacity-50"
+                >
+                  Next <ChevronRight size={16} />
+                </button>
+              </div>
+            </div>
+          )}
 
           {selectedStudent && (
             <div id="review-section" className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden scroll-mt-24">

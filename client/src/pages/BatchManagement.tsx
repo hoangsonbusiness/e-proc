@@ -173,10 +173,7 @@ function BatchManagement() {
 
   useEffect(() => {
     loadBatches();
-    loadModules();
-    loadModuleStats();
-    loadTypeStats();
-    loadModuleTypeStats();
+    loadCatalogSummary();
   }, []);
 
 
@@ -200,43 +197,15 @@ function BatchManagement() {
     }
   };
 
-  const loadModules = async () => {
+  const loadCatalogSummary = async () => {
     try {
-      const res = await adminApi.getModules();
-      console.log('[BatchManagement] Modules loaded:', res.data);
-      setModules(res.data);
+      const res = await adminApi.getQuestionCatalogSummary();
+      setModules(res.data.modules);
+      setModuleStats(res.data.moduleStats);
+      setTypeStats(res.data.typeStats);
+      setModuleTypeStats(res.data.moduleTypeStats);
     } catch (error) {
-      console.error('[BatchManagement] loadModules error:', error);
-    }
-  };
-
-  const loadModuleStats = async () => {
-    try {
-      const res = await adminApi.getModuleStats();
-      console.log('[BatchManagement] Module stats loaded:', res.data);
-      setModuleStats(res.data);
-    } catch (error) {
-      console.error('[BatchManagement] loadModuleStats error:', error);
-    }
-  };
-
-  const loadTypeStats = async () => {
-    try {
-      const res = await adminApi.getTypeStats();
-      console.log('[BatchManagement] Type stats loaded:', res.data);
-      setTypeStats(res.data);
-    } catch (error) {
-      console.error('[BatchManagement] loadTypeStats error:', error);
-    }
-  };
-
-  const loadModuleTypeStats = async () => {
-    try {
-      const res = await adminApi.getModuleTypeStats();
-      console.log('[BatchManagement] Module-type stats loaded:', res.data);
-      setModuleTypeStats(res.data);
-    } catch (error) {
-      console.error('[BatchManagement] loadModuleTypeStats error:', error);
+      console.error('[BatchManagement] loadCatalogSummary error:', error);
     }
   };
 
