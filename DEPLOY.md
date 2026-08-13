@@ -204,6 +204,8 @@ Biến khuyến nghị:
 
 - `DB_POOL_MAX=2`
 - `DB_POOL_MIN=0`
+- `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
+- `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
 - `AI_QUEUE_STALE_MS=900000` — recover job bị kẹt `processing` sau 15 phút; không đặt thấp hơn thời gian tối đa một lần gọi AI.
 - `GEMINI_API_KEY` hoặc cấu hình provider trong admin UI.
 

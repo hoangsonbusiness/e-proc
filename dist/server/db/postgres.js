@@ -15,17 +15,39 @@ async function initPostgres() {
     console.log('[DB] Attempting PostgreSQL connection...');
     const poolMax = parseInt(process.env.DB_POOL_MAX || '2');
     const poolMin = parseInt(process.env.DB_POOL_MIN || '0');
+    const connectionTimeoutMs = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '15000') || 15000);
+    const connectionAttempts = Math.max(1, Math.min(5, parseInt(process.env.DB_CONNECT_ATTEMPTS || '2') || 2));
     pgPool = new Pool({
         connectionString: process.env.DATABASE_URL,
         max: poolMax,
         min: poolMin,
         idleTimeoutMillis: 10000,
-        connectionTimeoutMillis: 5000,
+        connectionTimeoutMillis: connectionTimeoutMs,
         ssl: { rejectUnauthorized: false }
     });
     pgPool.on('error', (err) => console.error('[DB] Pool error:', err.message));
     pgPool.on('connect', () => console.log('[DB] New PG connection'));
-    const client = await pgPool.connect();
+    let client = null;
+    let lastConnectionError;
+    for (let attempt = 1; attempt <= connectionAttempts; attempt++) {
+        try {
+            client = await pgPool.connect();
+            break;
+        }
+        catch (error) {
+            lastConnectionError = error;
+            const message = error instanceof Error ? error.message : String(error);
+            console.error(`[DB] PostgreSQL connection attempt ${attempt}/${connectionAttempts} failed: ${message}`);
+            if (attempt < connectionAttempts) {
+                await new Promise((resolve) => setTimeout(resolve, attempt * 1000));
+            }
+        }
+    }
+    if (!client) {
+        throw lastConnectionError instanceof Error
+            ? lastConnectionError
+            : new Error('PostgreSQL connection failed');
+    }
     try {
         console.log('[DB] PostgreSQL connected!');
         await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
