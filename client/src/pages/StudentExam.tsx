@@ -5,6 +5,13 @@ import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
 import { getBlockReasonMessage, normalizeBlockReason, type BlockReason } from '../services/examBlockReason';
+import {
+  clearFullscreenBaselineWidth,
+  completeSidePanelReport,
+  createSidePanelDetectorState,
+  observeSidePanel,
+  readFullscreenBaselineWidth,
+} from '../services/sidePanelDetector';
 import CodeEditor, { detectLanguage } from '../components/CodeEditor';
 import type { CodeEditorHandle } from '../components/CodeEditor';
 
@@ -23,6 +30,9 @@ const VIOLATION_COOLDOWN_MS = 3000;
 const COOLDOWN_EXEMPT_TYPES = new Set<string>([
   'recording_stopped',
   'concurrent_session',
+  // The side-panel state machine already caps this at two sustained reports.
+  // A generic time cooldown must not swallow the second lockable report.
+  'extension_panel',
   // Rejected text is reverted immediately and every occurrence is useful
   // forensic evidence. event_id keeps transport retries idempotent.
   'suspicious_paste',
@@ -31,9 +41,7 @@ const COOLDOWN_EXEMPT_TYPES = new Set<string>([
 // (extension/proxy chặn /violation không được phép âm thầm vô hiệu telemetry).
 const VIOLATION_RETRY_MAX = 5;
 const VIOLATION_RETRY_BASE_MS = 1000;
-const VIEWPORT_SHRINK_THRESHOLD_PX = 80;
 const VIEWPORT_CHECK_INTERVAL_MS = 1500;
-const VIEWPORT_SUSTAIN_POLLS = 2;
 
 interface QuizOption {
   key: string;
@@ -80,8 +88,7 @@ function StudentExam() {
   const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenExitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const fullscreenAutoSubmitTriggeredRef = useRef(false);
-  const viewportShrinkPollCountRef = useRef(0);
-  const documentWidthBaselineRef = useRef<number | null>(null);
+  const sidePanelDetectorStateRef = useRef(createSidePanelDetectorState());
   const devtoolsViolationCooldownRef = useRef<number>(0);
   // [Anti-Cheat v2] focus heartbeat refs
   const focusLostTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -94,6 +101,7 @@ function StudentExam() {
   const currentQuestionIdRef = useRef<string | undefined>(undefined);
   const answersRef = useRef<{ [key: number]: string }>({});
   const navigate = useNavigate();
+  const [documentWidthBaseline] = useState(() => readFullscreenBaselineWidth());
 
   // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
   const [watermarkTime, setWatermarkTime] = useState(() => new Date());
@@ -106,7 +114,9 @@ function StudentExam() {
   const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
 
   useEffect(() => {
-    if (!studentId || !studentToken) {
+    if (!studentId || !studentToken || documentWidthBaseline === null) {
+      clearFullscreenBaselineWidth();
+      document.exitFullscreen().catch(() => { });
       navigate('/');
       return;
     }
@@ -147,18 +157,23 @@ function StudentExam() {
         console.error('[Exam] Error:', error);
         // Xử lý trường hợp bị block (410 Gone)
         if (error.response?.status === 410) {
+          startedRef.current = false;
+          setStarted(false);
           setBlockedReason(normalizeBlockReason(error.response.data?.reason));
           setLoading(false);
+          clearFullscreenBaselineWidth();
           document.exitFullscreen().catch(() => { });
           return;
         }
         alert('Error: ' + (error.response?.data?.error || error.message));
+        clearFullscreenBaselineWidth();
+        document.exitFullscreen().catch(() => { });
         navigate('/');
       }
     };
 
     initExam();
-  }, [navigate, studentId]);
+  }, [documentWidthBaseline, navigate, studentId, studentToken]);
 
 
   useEffect(() => {
@@ -242,6 +257,7 @@ function StudentExam() {
       recordingFinalization?.catch((recErr) => {
         console.error('[exam] stopAndSave failed:', recErr);
       });
+      clearFullscreenBaselineWidth();
       document.exitFullscreen().catch(() => { });
       navigate('/submit', { state: { recordingFinalizing: Boolean(recordingFinalization) } });
     } catch (error) {
@@ -359,8 +375,6 @@ function StudentExam() {
     if (document.fullscreenElement) {
       clearFullscreenExitTimeout();
       fullscreenAutoSubmitTriggeredRef.current = false;
-      documentWidthBaselineRef.current = document.documentElement.getBoundingClientRect().width;
-      viewportShrinkPollCountRef.current = 0;
       return;
     }
 
@@ -410,49 +424,52 @@ function StudentExam() {
     return () => clearInterval(interval);
   }, [started, locked, submitting, reconcileFullscreenState]);
 
-  // Phát hiện extension side-panel (vd: Monica AI) che một phần viewport
-  // mà không thoát Fullscreen API thực sự, nên fullscreenchange không bắn.
-  // Lưu ý: window.innerWidth/window.screen.width KHÔNG đổi khi Chrome Side Panel
-  // mở trong lúc đang fullscreen (đã đo thực nghiệm) — chỉ document.documentElement/
-  // body mới phản ánh đúng shrink thật, nên phải so với baseline ghi lúc vào fullscreen.
-  // Yêu cầu shrink kéo dài qua nhiều lần poll để tránh false positive
-  // trong lúc chuyển đổi fullscreen (giống lý do devtools window-size check cũ đã bị gỡ).
+  // Detect a browser extension side panel (for example Monica AI). The canonical
+  // width was captured once on /confirm immediately after entering fullscreen and
+  // survives F5 in sessionStorage. Neither this effect nor the fullscreen watchdog
+  // is allowed to replace it with a potentially shrunken width.
   useEffect(() => {
-    if (!started || locked || submitting) {
-      viewportShrinkPollCountRef.current = 0;
-      return;
-    }
+    if (!started || locked || submitting || documentWidthBaseline === null) return;
 
     const interval = setInterval(() => {
-      if (!document.fullscreenElement) {
-        viewportShrinkPollCountRef.current = 0;
-        return;
-      }
+      const active =
+        startedRef.current &&
+        !lockedRef.current &&
+        !submittingRef.current &&
+        Boolean(document.fullscreenElement);
+      const currentWidth = active
+        ? document.documentElement.getBoundingClientRect().width
+        : 0;
+      const decision = observeSidePanel(sidePanelDetectorStateRef.current, {
+        active,
+        baselineWidth: documentWidthBaseline,
+        currentWidth,
+      });
+      sidePanelDetectorStateRef.current = decision.state;
 
-      const currentWidth = document.documentElement.getBoundingClientRect().width;
+      const reportNumber = decision.reportNumber;
+      if (!decision.shouldReport || reportNumber === null) return;
 
-      // Trường hợp effect mount sau khi fullscreen đã bật sẵn (vd: resume sau reload)
-      // thì fullscreenchange không bắn lại, nên baseline chưa được ghi — ghi ngay tại đây.
-      if (documentWidthBaselineRef.current === null) {
-        documentWidthBaselineRef.current = currentWidth;
-        viewportShrinkPollCountRef.current = 0;
-        return;
-      }
-
-      const widthShrink = documentWidthBaselineRef.current - currentWidth;
-      if (widthShrink > VIEWPORT_SHRINK_THRESHOLD_PX) {
-        viewportShrinkPollCountRef.current += 1;
-        if (viewportShrinkPollCountRef.current >= VIEWPORT_SUSTAIN_POLLS) {
-          viewportShrinkPollCountRef.current = 0;
-          void handleViolation('extension_panel');
+      void (async () => {
+        try {
+          await handleViolation('extension_panel', {
+            metadata: {
+              baselineWidth: documentWidthBaseline,
+              currentWidth,
+              widthShrink: decision.widthShrink,
+              detectorReportNumber: reportNumber,
+            },
+          });
+        } finally {
+          sidePanelDetectorStateRef.current = completeSidePanelReport(
+            sidePanelDetectorStateRef.current
+          );
         }
-      } else {
-        viewportShrinkPollCountRef.current = 0;
-      }
+      })();
     }, VIEWPORT_CHECK_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [started, locked, submitting, handleViolation]);
+  }, [documentWidthBaseline, started, locked, submitting, handleViolation]);
 
   // [Anti-Cheat] Focus detection: bắt việc mất focus cửa sổ (mở Notes/Maccy/app khác trên macOS
   // song song mà không thoát fullscreen — visibilitychange & fullscreenchange đều không bắn).
@@ -739,8 +756,11 @@ function StudentExam() {
       }
     } catch (error: any) {
       if (error.response?.status === 410) {
+        startedRef.current = false;
+        setStarted(false);
         setBlockedReason(normalizeBlockReason(error.response.data?.reason));
         setLoading(false);
+        clearFullscreenBaselineWidth();
         document.exitFullscreen().catch(() => { });
         return;
       }

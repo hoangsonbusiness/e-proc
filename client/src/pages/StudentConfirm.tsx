@@ -2,7 +2,15 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import * as examRecorder from '../services/examRecorder';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
+import {
+  clearFullscreenBaselineWidth,
+  storeFullscreenBaselineWidth,
+} from '../services/sidePanelDetector';
 import { UserCheck, AlertTriangle } from 'lucide-react';
+
+function waitForNextPaint(): Promise<void> {
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
 
 function StudentConfirm() {
   const [loading, setLoading] = useState(false);
@@ -22,6 +30,7 @@ function StudentConfirm() {
   useEffect(() => {
     // Redirect to login if no state or missing token
     if (!studentId || !email || !studentToken) {
+      clearFullscreenBaselineWidth();
       navigate('/');
     }
   }, [studentId, email, studentToken, navigate]);
@@ -76,6 +85,9 @@ function StudentConfirm() {
       examRecorder.start({ mode: recordMode, password: recordingPassword });
     }
 
+    // A new attempt must never inherit a baseline from an older attempt in the same tab.
+    clearFullscreenBaselineWidth();
+
     // Keep fullscreen request before any network call so the original click still supplies user activation.
     try {
       await document.documentElement.requestFullscreen();
@@ -83,6 +95,20 @@ function StudentConfirm() {
     } catch (e) {
       if (recordMode !== 'none') await examRecorder.stopAndSave().catch(() => undefined);
       setError('Fullscreen is required. Allow fullscreen access to start the exam.');
+      setLoading(false);
+      return;
+    }
+
+    // Fullscreen is activated on /confirm before /exam mounts. Wait for the browser to
+    // finish the transition, then capture the canonical width exactly once for this attempt.
+    // StudentExam only reads this value; it never re-captures it after reload/re-entry.
+    await waitForNextPaint();
+    await waitForNextPaint();
+    const fullscreenBaselineWidth = document.documentElement.getBoundingClientRect().width;
+    if (!storeFullscreenBaselineWidth(fullscreenBaselineWidth)) {
+      if (recordMode !== 'none') await examRecorder.stopAndSave().catch(() => undefined);
+      await document.exitFullscreen().catch(() => undefined);
+      setError('Could not initialize the secure fullscreen session. Please allow session storage and try again.');
       setLoading(false);
       return;
     }
@@ -166,6 +192,7 @@ function StudentConfirm() {
             <button 
               onClick={() => {
                 localStorage.clear();
+                clearFullscreenBaselineWidth();
                 navigate('/');
               }}
               className="w-full bg-white text-slate-700 border-2 border-slate-200 font-medium text-base py-3 rounded-xl hover:bg-slate-50 focus:ring-4 focus:ring-slate-100 transition-all"
