@@ -24,6 +24,7 @@ async function initPostgres() {
   const poolMin = parseInt(process.env.DB_POOL_MIN || '0');
   const connectionTimeoutMs = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '15000') || 15000);
   const connectionAttempts = Math.max(1, Math.min(5, parseInt(process.env.DB_CONNECT_ATTEMPTS || '2') || 2));
+  console.log('[DB] Pool config:', { max: poolMax, min: poolMin, connectionTimeoutMs });
   
   pgPool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -147,6 +148,7 @@ await client.query(`
       blueprint JSONB,
       record_enabled BOOLEAN DEFAULT false,
       record_mode VARCHAR(16) DEFAULT 'none',
+      ai_grading_enabled BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -163,6 +165,10 @@ await client.query(`
   // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
   try {
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
+  } catch (_) { /* already exists */ }
+  // AI grading is an explicit per-batch decision. API credentials never imply ON/OFF.
+  try {
+    await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_enabled BOOLEAN NOT NULL DEFAULT false');
   } catch (_) { /* already exists */ }
   // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
   try {
@@ -334,6 +340,7 @@ await client.query(`
   `);
   try {
     await client.query('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
+    await client.query('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student_last_seen ON exam_sessions(student_id, last_seen)');
   } catch (_) { /* ignore */ }
   console.log('[DB] exam_sessions ready');
 
@@ -350,6 +357,20 @@ await client.query(`
     )
   `);
   console.log('[DB] ai_queue ready');
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS ai_settings (
+      id INTEGER PRIMARY KEY,
+      provider TEXT NOT NULL,
+      apiKey TEXT,
+      model TEXT NOT NULL,
+      temperature REAL DEFAULT 0.3,
+      maxTokens INTEGER DEFAULT 2048,
+      worker_enabled BOOLEAN NOT NULL DEFAULT true
+    )
+  `);
+  await client.query('ALTER TABLE ai_settings ADD COLUMN IF NOT EXISTS worker_enabled BOOLEAN NOT NULL DEFAULT true');
+  console.log('[DB] ai_settings ready');
   
   await client.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
@@ -413,6 +434,7 @@ function initSqlite() {
         blueprint TEXT,
         record_enabled INTEGER DEFAULT 0,
         record_mode TEXT DEFAULT 'none',
+        ai_grading_enabled INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -567,6 +589,7 @@ function initSqlite() {
       )
     `);
     sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student ON exam_sessions(student_id)');
+    sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student_last_seen ON exam_sessions(student_id, last_seen)');
 
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS ai_queue (
@@ -580,6 +603,22 @@ function initSqlite() {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS ai_settings (
+        id INTEGER PRIMARY KEY,
+        provider TEXT NOT NULL,
+        apiKey TEXT,
+        model TEXT NOT NULL,
+        temperature REAL DEFAULT 0.3,
+        maxTokens INTEGER DEFAULT 2048,
+        worker_enabled INTEGER NOT NULL DEFAULT 1
+      )
+    `);
+    const aiSettingsCols = (sqliteDb.prepare("PRAGMA table_info(ai_settings)").all() as { name: string }[]).map(c => c.name);
+    if (!aiSettingsCols.includes('worker_enabled')) {
+      sqliteDb.exec('ALTER TABLE ai_settings ADD COLUMN worker_enabled INTEGER NOT NULL DEFAULT 1');
+    }
     
     sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS admin_users (
@@ -607,6 +646,9 @@ function initSqlite() {
     }
     if (!batchCols.includes('created_by')) {
       sqliteDb.exec('ALTER TABLE batches ADD COLUMN created_by INTEGER');
+    }
+    if (!batchCols.includes('ai_grading_enabled')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_grading_enabled INTEGER NOT NULL DEFAULT 0');
     }
     const adminCols = (sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[]).map(c => c.name);
     if (!adminCols.includes('role')) {
@@ -675,12 +717,13 @@ export async function verifyRequiredSchema(): Promise<void> {
         'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
         'recording_final_part_index', 'recording_incomplete',
       ],
-      batches: ['record_mode', 'exam_type'],
+      batches: ['record_mode', 'exam_type', 'ai_grading_enabled'],
       exam_questions: ['option_order'],
       violation_events: ['metadata_json', 'event_id'],
       recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
       exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
       ai_queue: ['id', 'status', 'attempts', 'updated_at'],
+      ai_settings: ['worker_enabled'],
     };
     const columnRows = await pgPool.query(
       `SELECT table_name, column_name FROM information_schema.columns

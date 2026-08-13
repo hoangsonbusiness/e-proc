@@ -62,7 +62,11 @@ before(async () => {
   await pool.query('CREATE SCHEMA test_violation');
   // Bảng tối thiểu khớp production (students cần có để FOR UPDATE khóa được row).
   await pool.query(`
-    CREATE TABLE test_violation.students (id INTEGER PRIMARY KEY);
+    CREATE TABLE test_violation.batches (
+      id INTEGER PRIMARY KEY, ai_grading_enabled BOOLEAN NOT NULL DEFAULT false
+    );
+    CREATE TABLE test_violation.students (id INTEGER PRIMARY KEY, batch_id INTEGER);
+    CREATE TABLE test_violation.exam_questions (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL);
     CREATE TABLE test_violation.violations (
       id SERIAL PRIMARY KEY, student_id INTEGER NOT NULL, type TEXT NOT NULL, count INTEGER DEFAULT 0
     );
@@ -90,9 +94,12 @@ after(async () => {
 
 beforeEach(async () => {
   if (SKIP) return;
-  await pool.query('TRUNCATE test_violation.violations, test_violation.violation_events, test_violation.ai_queue RESTART IDENTITY');
+  await pool.query('TRUNCATE test_violation.violations, test_violation.violation_events, test_violation.ai_queue, test_violation.exam_questions RESTART IDENTITY');
   await pool.query('DELETE FROM test_violation.students');
-  await pool.query('INSERT INTO test_violation.students (id) VALUES (1)');
+  await pool.query('DELETE FROM test_violation.batches');
+  await pool.query('INSERT INTO test_violation.batches (id, ai_grading_enabled) VALUES (1, true)');
+  await pool.query('INSERT INTO test_violation.students (id, batch_id) VALUES (1, 1)');
+  await pool.query('INSERT INTO test_violation.exam_questions (id, student_id) VALUES (101, 1)');
 });
 
 function input(type, eventId, forensicOnly = false) {
@@ -172,4 +179,26 @@ test('[queue] hai worker đồng thời chỉ một worker claim được job', 
   )).rows[0];
   assert.equal(row.status, 'processing');
   assert.equal(row.attempts, 1);
+});
+
+test('[queue] batch OFF cancels pending job instead of claiming it', { skip: SKIP }, async () => {
+  const now = new Date();
+  await withTransaction((tx) => enqueueQueueJob(tx, {
+    id: 101,
+    examQuestionId: 101,
+    studentId: 1,
+    status: 'pending',
+    attempts: 0,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  await pool.query('UPDATE test_violation.batches SET ai_grading_enabled = false WHERE id = 1');
+
+  const claimed = await withTransaction((tx) => claimQueueJob(tx, 101, new Date()));
+  assert.equal(claimed, false);
+  const row = (await pool.query(
+    'SELECT status, attempts FROM test_violation.ai_queue WHERE id = 101'
+  )).rows[0];
+  assert.equal(row.status, 'cancelled');
+  assert.equal(row.attempts, 0);
 });

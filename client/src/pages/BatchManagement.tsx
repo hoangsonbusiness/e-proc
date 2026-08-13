@@ -106,6 +106,7 @@ function BatchManagement() {
     blueprintByType: [] as BlueprintItemByType[],
     record_mode: 'none' as 'none' | 'local' | 's3',
     exam_type: 'essay' as 'essay' | 'quiz',
+    ai_grading_enabled: false,
   });
   // Edit form state
   const [editBlueprintMode, setEditBlueprintMode] = useState<BlueprintMode>('module');
@@ -395,6 +396,7 @@ function BatchManagement() {
         blueprint: blueprintPayload,
         record_mode: editingBatch.record_mode || 'none',
         exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
+        ai_grading_enabled: Boolean(editingBatch.ai_grading_enabled),
       });
       loadBatches();
       setEditingBatch(null);
@@ -445,11 +447,12 @@ function BatchManagement() {
         blueprint: blueprintPayload,
         record_mode: formData.record_mode,
         exam_type: formData.exam_type,
+        ai_grading_enabled: formData.ai_grading_enabled,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay' });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay', ai_grading_enabled: false });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -838,12 +841,16 @@ function BatchManagement() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 p-4 bg-slate-50 border border-slate-200 rounded-xl">
                 <div className="space-y-2">
                   <label className="block text-sm font-bold text-slate-700">Exam Type</label>
                   <select
                     value={formData.exam_type}
-                    onChange={e => setFormData(prev => ({ ...prev, exam_type: e.target.value as 'essay' | 'quiz' }))}
+                    onChange={e => setFormData(prev => ({
+                      ...prev,
+                      exam_type: e.target.value as 'essay' | 'quiz',
+                      ai_grading_enabled: e.target.value === 'quiz' ? false : prev.ai_grading_enabled,
+                    }))}
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
                   >
                     <option value="essay">Tự luận / Coding (Essay)</option>
@@ -851,6 +858,20 @@ function BatchManagement() {
                   </select>
                 </div>
                 
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">AI Grading</label>
+                  <select
+                    value={formData.ai_grading_enabled ? 'on' : 'off'}
+                    disabled={formData.exam_type === 'quiz'}
+                    onChange={e => setFormData(prev => ({ ...prev, ai_grading_enabled: e.target.value === 'on' }))}
+                    className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none disabled:opacity-60 disabled:bg-slate-100"
+                  >
+                    <option value="off">OFF — Manual grading</option>
+                    <option value="on">ON — Queue AI grading</option>
+                  </select>
+                  <p className="text-xs text-slate-500">Quiz exams are scored automatically without AI.</p>
+                </div>
+
                 <div className="space-y-2">
                   <label className="block text-sm font-bold text-slate-700">Screen Recording</label>
                   <select
@@ -1421,7 +1442,11 @@ function BatchManagement() {
                 <label className="block text-sm font-bold text-slate-700 mb-1">Exam Type</label>
                 <select
                   value={editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay'}
-                  onChange={e => setEditingBatch({ ...editingBatch, exam_type: e.target.value })}
+                  onChange={e => setEditingBatch({
+                    ...editingBatch,
+                    exam_type: e.target.value,
+                    ai_grading_enabled: e.target.value === 'quiz' ? false : Boolean(editingBatch.ai_grading_enabled),
+                  })}
                   className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900 min-w-[200px]"
                 >
                   <option value="essay">Tự luận / Coding</option>
@@ -1430,6 +1455,20 @@ function BatchManagement() {
               </div>
 
               {/* Chế độ ghi màn hình */}
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-1">AI Grading</label>
+                <select
+                  value={editingBatch.ai_grading_enabled ? 'on' : 'off'}
+                  disabled={editingBatch.exam_type === 'quiz'}
+                  onChange={e => setEditingBatch({ ...editingBatch, ai_grading_enabled: e.target.value === 'on' })}
+                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-slate-900 min-w-[300px] disabled:bg-slate-50 disabled:text-slate-500"
+                >
+                  <option value="off">OFF — Manual grading</option>
+                  <option value="on">ON — Queue AI grading</option>
+                </select>
+                <p className="mt-2 text-sm text-slate-500">Turning this OFF cancels unfinished AI jobs for the batch.</p>
+              </div>
+
               <div>
                 <label className="block text-sm font-bold text-slate-700 mb-1">Screen Recording</label>
                 <select

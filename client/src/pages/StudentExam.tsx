@@ -74,6 +74,7 @@ function StudentExam() {
   const editorRef = useRef<CodeEditorHandle>(null);
   // Mỗi câu một timer: dùng chung một debounce khiến sửa câu B hủy lần lưu đang chờ của câu A.
   const debounceRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const dirtyAnswersRef = useRef<Record<number, string>>({});
   const clipboardCooldownRef = useRef<Record<string, number>>({});
   const clipboardWarningTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const violationWarningModalTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -199,6 +200,21 @@ function StudentExam() {
     }
   }, []);
 
+  const flushDirtyAnswers = useCallback(async () => {
+    const entries = Object.entries(dirtyAnswersRef.current);
+    if (entries.length === 0) return;
+    dirtyAnswersRef.current = {};
+    const payload = entries.map(([order, answer]) => ({ question_order: Number(order), answer }));
+    try {
+      await studentApi.saveAnswers(payload);
+    } catch (error) {
+      for (const { question_order, answer } of payload) {
+        if (dirtyAnswersRef.current[question_order] === undefined) dirtyAnswersRef.current[question_order] = answer;
+      }
+      throw error;
+    }
+  }, []);
+
   const handleSubmit = useCallback(async (force = false) => {
     if (submittingRef.current) return;
     if (!force && !confirm('Are you sure you want to submit?')) return;
@@ -213,37 +229,28 @@ function StudentExam() {
 
     Object.values(debounceRef.current).forEach(clearTimeout);
     debounceRef.current = {};
-    try {
-      await Promise.all(
-        Object.entries(answersRef.current).map(([order, answer]) => studentApi.saveAnswer(Number(order), answer))
-      );
-    } catch (saveError) {
-      console.error('[exam] final answer flush failed:', saveError);
-      if (!force) {
-        alert('Your latest answer could not be saved. Please check the connection and submit again.');
-        setSubmitting(false);
-        return;
-      }
-    }
-
-    // Dừng ghi màn hình và lưu nốt file cuối TRƯỚC khi submit — bao trọn mọi đường
-    // (thủ công / cheating / timeout). Bọc try/catch để lỗi ghi file không chặn submit.
-    try {
-      await examRecorder.stopAndSave();
-    } catch (recErr) {
-      console.error('[exam] stopAndSave failed (non-fatal):', recErr);
-    }
 
     try {
-      await studentApi.submit(); // [C-4] token tự động qua interceptor
+      const finalAnswers = Object.entries(answersRef.current).map(([order, answer]) => ({
+        question_order: Number(order),
+        answer,
+      }));
+      await studentApi.submit(finalAnswers);
+
+      // Answers are now durable. Finalize evidence in the browser without extending submit latency.
+      const recordingFinalization = recordEnabled ? examRecorder.stopAndSave() : null;
+      recordingFinalization?.catch((recErr) => {
+        console.error('[exam] stopAndSave failed:', recErr);
+      });
       document.exitFullscreen().catch(() => { });
-      navigate('/submit');
+      navigate('/submit', { state: { recordingFinalizing: Boolean(recordingFinalization) } });
     } catch (error) {
       console.error(error);
       alert('Error submitting exam. Please contact support.');
+      submittingRef.current = false;
       setSubmitting(false);
     }
-  }, [navigate]);
+  }, [navigate, recordEnabled]);
 
   // [#3][#7] Gửi báo cáo vi phạm + xử lý kết quả lock. Tách riêng khỏi cooldown gate
   // để retry có thể tái sử dụng. Trả về true nếu bài đã bị khóa.
@@ -817,13 +824,14 @@ function StudentExam() {
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
+    dirtyAnswersRef.current[order] = text;
 
     if (debounceRef.current[order]) clearTimeout(debounceRef.current[order]);
     debounceRef.current[order] = setTimeout(() => {
       delete debounceRef.current[order];
-      studentApi.saveAnswer(order, text).catch(console.error); // [C-4] token tự động
+      flushDirtyAnswers().catch(console.error);
     }, 5000);
-  }, []);
+  }, [flushDirtyAnswers]);
 
   // Chọn/bỏ chọn đáp án trắc nghiệm. answer được lưu dưới dạng JSON mảng key, VD ["A","C"].
   // Single: thay thế; Multiple: toggle. Lưu ngay (debounce ngắn) qua studentApi.saveAnswer.
@@ -838,14 +846,15 @@ function StudentExam() {
         next = [key];
       }
       const serialized = JSON.stringify(next);
+      dirtyAnswersRef.current[order] = serialized;
       if (debounceRef.current[order]) clearTimeout(debounceRef.current[order]);
       debounceRef.current[order] = setTimeout(() => {
         delete debounceRef.current[order];
-        studentApi.saveAnswer(order, serialized).catch(console.error);
+        flushDirtyAnswers().catch(console.error);
       }, 500);
       return { ...prev, [order]: serialized };
     });
-  }, []);
+  }, [flushDirtyAnswers]);
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);

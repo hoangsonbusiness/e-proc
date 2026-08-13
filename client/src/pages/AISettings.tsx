@@ -10,6 +10,7 @@ interface AISettings {
   model: string;
   temperature: number;
   maxTokens: number;
+  worker_enabled: boolean;
 }
 
 const PROVIDERS = [
@@ -30,7 +31,8 @@ function AISettings() {
     apiKey: '',
     model: 'gemini-2.0-flash',
     temperature: 0.3,
-    maxTokens: 2048
+    maxTokens: 2048,
+    worker_enabled: true,
   });
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -45,7 +47,10 @@ function AISettings() {
     try {
       const res = await adminApi.getAISettings();
       if (res.data) {
-        setSettings(res.data);
+        setSettings({
+          ...res.data,
+          worker_enabled: res.data.worker_enabled !== false && res.data.worker_enabled !== 0,
+        });
       }
     } catch (error) {
       console.error('Error loading settings:', error);
@@ -119,6 +124,19 @@ function AISettings() {
             </div>
             
             <div className="p-6 space-y-6">
+              <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4 cursor-pointer">
+                <div>
+                  <span className="block text-sm font-bold text-slate-800">AI queue worker</span>
+                  <span className="block text-xs text-slate-500 mt-1">Operational switch for processing queued jobs. Batch flags still decide whether jobs are created.</span>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.worker_enabled}
+                  onChange={e => setSettings(prev => ({ ...prev, worker_enabled: e.target.checked }))}
+                  className="h-5 w-5 accent-blue-600"
+                />
+              </label>
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-2">AI Provider</label>

@@ -15,6 +15,13 @@ import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+function parseBooleanFlag(value, fallback = false) {
+    if (value === true || value === 1 || value === '1' || value === 'true')
+        return true;
+    if (value === false || value === 0 || value === '0' || value === 'false')
+        return false;
+    return fallback;
+}
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
 const router = Router();
 const upload = multer({
@@ -661,9 +668,10 @@ router.delete('/questions/:id', async (req, res) => {
 });
 router.post('/batches', async (req, res) => {
     try {
-        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
-        console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
+        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type, ai_grading_enabled } = req.body;
+        console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode, ai_grading_enabled });
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
+        const aiGradingEnabled = parseBooleanFlag(ai_grading_enabled, false);
         if (!name || !start_time || !end_time || !duration) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
@@ -690,15 +698,15 @@ router.post('/batches', async (req, res) => {
         let result;
         if (USE_SQLITE) {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, ai_grading_enabled, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, aiGradingEnabled ? 1 : 0, createdBy]);
         }
         else {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, ai_grading_enabled, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, aiGradingEnabled, createdBy]);
         }
         console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
         res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -748,12 +756,17 @@ router.get('/batches/:id', async (req, res) => {
 router.put('/batches/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+        const batchId = parseInt(id);
+        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type, ai_grading_enabled } = req.body;
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
+        const currentResult = await db.query('SELECT created_by, record_mode, ai_grading_enabled FROM batches WHERE id = ?', [batchId]);
+        const currentBatch = currentResult.rows[0];
+        if (!currentBatch)
+            return res.status(404).json({ error: 'Batch not found' });
+        const aiGradingEnabled = parseBooleanFlag(ai_grading_enabled, parseBooleanFlag(currentBatch.ai_grading_enabled, false));
         // Kiểm tra quyền: mod chỉ được sửa batch của mình
         if (req.adminUser?.role !== 'admin') {
-            const own = await db.query('SELECT created_by FROM batches WHERE id = ?', [parseInt(id)]);
-            if (!own.rows[0] || own.rows[0].created_by !== req.adminUser?.id) {
+            if (currentBatch.created_by !== req.adminUser?.id) {
                 return res.status(403).json({ error: 'Forbidden: You can only edit batches you created' });
             }
         }
@@ -766,22 +779,23 @@ router.put('/batches/:id', async (req, res) => {
             recordMode = RECORD_MODES.includes(record_mode) ? record_mode : 'none';
         }
         else {
-            const cur = await db.query('SELECT record_mode FROM batches WHERE id = ?', [parseInt(id)]);
-            recordMode = cur.rows[0]?.record_mode || 'none';
+            recordMode = currentBatch.record_mode || 'none';
         }
         const recordFlag = recordMode === 's3' ? 1 : 0;
-        if (USE_SQLITE) {
-            await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+        await db.withTransaction(async (tx) => {
+            await tx.query(`
+        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?, ai_grading_enabled = ?
         WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), recordFlag, recordMode, examType, parseInt(id)]);
-        }
-        else {
-            await db.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
-        WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), !!recordFlag, recordMode, examType, parseInt(id)]);
-        }
+      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, examType, USE_SQLITE ? (aiGradingEnabled ? 1 : 0) : aiGradingEnabled, batchId]);
+            if (!aiGradingEnabled) {
+                await tx.query(`
+          UPDATE ai_queue
+          SET status = 'cancelled', updated_at = ?
+          WHERE status IN ('pending', 'processing')
+            AND student_id IN (SELECT id FROM students WHERE batch_id = ?)
+        `, [new Date(), batchId]);
+            }
+        });
         res.json({ success: true });
     }
     catch (error) {
@@ -1212,7 +1226,8 @@ router.get('/settings/ai', async (req, res) => {
           apiKey TEXT,
           model TEXT NOT NULL,
           temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048
+          maxTokens INTEGER DEFAULT 2048,
+          worker_enabled BOOLEAN NOT NULL DEFAULT true
         )
       `);
         }
@@ -1226,7 +1241,8 @@ router.get('/settings/ai', async (req, res) => {
                 apiKey: '',
                 model: 'gemini-2.0-flash',
                 temperature: 0.3,
-                maxTokens: 2048
+                maxTokens: 2048,
+                worker_enabled: true
             });
         }
     }
@@ -1236,7 +1252,8 @@ router.get('/settings/ai', async (req, res) => {
 });
 router.post('/settings/ai', async (req, res) => {
     try {
-        const { provider, apiKey, model, temperature, maxTokens } = req.body;
+        const { provider, apiKey, model, temperature, maxTokens, worker_enabled } = req.body;
+        const workerEnabled = parseBooleanFlag(worker_enabled, true);
         if (USE_SQLITE) {
             await db.query(`
         CREATE TABLE IF NOT EXISTS ai_settings (
@@ -1245,13 +1262,14 @@ router.post('/settings/ai', async (req, res) => {
           apiKey TEXT,
           model TEXT NOT NULL,
           temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048
+          maxTokens INTEGER DEFAULT 2048,
+          worker_enabled INTEGER NOT NULL DEFAULT 1
         )
       `);
             await db.query(`
-        INSERT OR REPLACE INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens)
-        VALUES (1, ?, ?, ?, ?, ?)
-      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048]);
+        INSERT OR REPLACE INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens, worker_enabled)
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048, workerEnabled ? 1 : 0]);
         }
         else {
             await db.query(`
@@ -1261,19 +1279,21 @@ router.post('/settings/ai', async (req, res) => {
           apiKey TEXT,
           model TEXT NOT NULL,
           temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048
+          maxTokens INTEGER DEFAULT 2048,
+          worker_enabled BOOLEAN NOT NULL DEFAULT true
         )
       `);
             await db.query(`
-        INSERT INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens)
-        VALUES (1, $1, $2, $3, $4, $5)
+        INSERT INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens, worker_enabled)
+        VALUES (1, $1, $2, $3, $4, $5, $6)
         ON CONFLICT (id) DO UPDATE SET
           provider = EXCLUDED.provider,
           apiKey = EXCLUDED.apiKey,
           model = EXCLUDED.model,
           temperature = EXCLUDED.temperature,
-          maxTokens = EXCLUDED.maxTokens
-      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048]);
+          maxTokens = EXCLUDED.maxTokens,
+          worker_enabled = EXCLUDED.worker_enabled
+      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048, workerEnabled]);
         }
         res.json({ success: true });
     }

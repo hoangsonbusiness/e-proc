@@ -45,16 +45,19 @@ class FileCache {
             fs.mkdirSync(this.dataDir, { recursive: true });
         }
     }
-    async getAISettings() {
+    async getAISettings(forceRefresh = false) {
         const now = Date.now();
-        if (this.cachedAISettings && (now - this.settingsLastFetched) < 60000) {
+        if (!forceRefresh && this.cachedAISettings && (now - this.settingsLastFetched) < 60000) {
             return this.cachedAISettings;
         }
         try {
             const { query } = await import('../server/db/postgres.js');
             const result = await query('SELECT * FROM ai_settings WHERE id = 1');
             if (result.rows.length > 0) {
-                this.cachedAISettings = result.rows[0];
+                this.cachedAISettings = {
+                    ...result.rows[0],
+                    worker_enabled: result.rows[0].worker_enabled !== false && result.rows[0].worker_enabled !== 0,
+                };
             }
             else {
                 this.cachedAISettings = {
@@ -62,7 +65,8 @@ class FileCache {
                     apiKey: process.env.GEMINI_API_KEY || '',
                     model: 'gemini-2.0-flash',
                     temperature: 0.3,
-                    maxTokens: 2048
+                    maxTokens: 2048,
+                    worker_enabled: true
                 };
             }
             this.settingsLastFetched = now;
@@ -75,7 +79,8 @@ class FileCache {
                 apiKey: process.env.GEMINI_API_KEY || '',
                 model: 'gemini-2.0-flash',
                 temperature: 0.3,
-                maxTokens: 2048
+                maxTokens: 2048,
+                worker_enabled: true
             };
         }
     }
@@ -352,7 +357,12 @@ class FileCache {
             .slice(0, limit);
         if (pendingJobs.length === 0)
             return 0;
-        const aiSettings = await this.getAISettings();
+        // Worker control is operational state, so do not use the 60-second settings cache here.
+        const aiSettings = await this.getAISettings(true);
+        if (!aiSettings.worker_enabled) {
+            console.log('[Queue] Worker is disabled; pending jobs remain untouched');
+            return 0;
+        }
         console.log(`[Queue] Processing ${pendingJobs.length} jobs with ${aiSettings.provider}`);
         let processed = 0;
         const promises = pendingJobs.map(async (job) => {
@@ -365,15 +375,25 @@ class FileCache {
                 processed += 1;
                 const { query } = await import('../server/db/postgres.js');
                 const examResult = await query(`
-          SELECT eq.*, q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
+          SELECT eq.*, q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional,
+                 b.ai_grading_enabled
           FROM exam_questions eq
           JOIN question_bank q ON eq.question_id = q.id
+          JOIN students s ON s.id = eq.student_id
+          JOIN batches b ON b.id = s.batch_id
           WHERE eq.id = ?
         `, [job.examQuestionId]);
                 if (examResult.rows.length === 0) {
                     throw new Error('Question not found');
                 }
                 const eq = examResult.rows[0];
+                if (eq.ai_grading_enabled === false || eq.ai_grading_enabled === 0) {
+                    job.status = 'cancelled';
+                    job.updatedAt = Date.now();
+                    await this.updateQueueInDB(job);
+                    console.log(`[Queue] Job ${job.id} cancelled: AI grading is disabled for its batch`);
+                    return;
+                }
                 if (!eq.answer) {
                     await query(`UPDATE exam_questions SET ai_score = 0.0, ai_feedback = 'No answer provided'
             WHERE id = ? AND EXISTS (
@@ -450,6 +470,7 @@ Provide a JSON response with "score" (0-10) and "feedback" (detailed feedback):
             processing: 0,
             completed: 0,
             failed: 0,
+            cancelled: 0,
             total: this.queue.size
         };
         for (const job of this.queue.values()) {

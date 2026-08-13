@@ -170,8 +170,11 @@ export const studentApi = {
   saveAnswer: (questionOrder: number, answer: string) =>
     api.post('/student/exam/answer', { question_order: questionOrder, answer }),
 
-  submit: () =>
-    api.post('/student/exam/submit', {}),
+  saveAnswers: (answers: Array<{ question_order: number; answer: string }>) =>
+    api.post('/student/exam/answers', { answers }),
+
+  submit: (answers: Array<{ question_order: number; answer: string }>) =>
+    api.post('/student/exam/submit', { answers }),
 
   reportViolation: (
     type: string,

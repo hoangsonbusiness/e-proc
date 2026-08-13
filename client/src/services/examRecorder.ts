@@ -45,6 +45,7 @@ let localPassword: string | null = null; // password mã hóa zip (chỉ mode 'l
 let sessionStamp = '';
 
 let uploadChain: Promise<void> = Promise.resolve();
+let finalizationPromise: Promise<void> | null = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -142,8 +143,7 @@ async function uploadPart(part: PendingPart): Promise<boolean> {
  */
 async function saveLocalPart(partIdx: number, blob: Blob): Promise<void> {
   if (!dirHandle || !localPassword) {
-    console.error('[examRecorder] saveLocalPart: thiếu dirHandle/password');
-    return;
+    throw new Error('Recording folder or encryption password is unavailable');
   }
   const part = String(partIdx).padStart(3, '0');
   const webmName = `exam_${sessionStamp}_part${part}.webm`;
@@ -165,8 +165,8 @@ async function saveLocalPart(partIdx: number, blob: Blob): Promise<void> {
     await writable.write(zipBlob);
     await writable.close();
   } catch (err) {
-    // Không để lỗi ghi/nén làm hỏng bài thi — chỉ log.
     console.error('[examRecorder] saveLocalPart failed:', err);
+    throw err;
   }
 }
 
@@ -260,6 +260,7 @@ export function start(opts?: { mode?: RecordMode; password?: string | null }): v
   chunkBuffer = [];
   partIndex = 0;
   uploadChain = Promise.resolve();
+  finalizationPromise = null;
   sessionStamp = makeStamp();
 
   let mimeType = 'video/webm;codecs=vp9';
@@ -290,10 +291,10 @@ export function start(opts?: { mode?: RecordMode; password?: string | null }): v
 }
 
 /**
- * Dừng ghi và xử lý nốt phần cuối. Gọi ở đầu handleSubmit (mọi đường: thủ công /
- * cheating / timeout). Idempotent. Chờ recorder flush dữ liệu còn đệm trước khi xử lý.
+ * Dừng ghi và xử lý nốt phần cuối sau khi answers đã được server commit (mọi đường: thủ công /
+ * cheating / timeout). Idempotent. Trang /submit tiếp tục chờ promise này ở background.
  */
-export async function stopAndSave(): Promise<void> {
+async function performStopAndSave(): Promise<void> {
   if (partTimer) {
     clearInterval(partTimer);
     partTimer = null;
@@ -330,4 +331,13 @@ export async function stopAndSave(): Promise<void> {
   }
   recorder = null;
   active = false;
+}
+
+export function stopAndSave(): Promise<void> {
+  if (!finalizationPromise) finalizationPromise = performStopAndSave();
+  return finalizationPromise;
+}
+
+export function getFinalizationPromise(): Promise<void> | null {
+  return finalizationPromise;
 }
