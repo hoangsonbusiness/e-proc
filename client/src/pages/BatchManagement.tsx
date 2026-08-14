@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   BarChart3,
   ChevronDown,
+  Copy,
   FolderKanban,
   ListChecks,
   Pencil,
@@ -83,8 +84,50 @@ interface ModuleTypeStats {
   hard: number;
 }
 
+interface NormalizedBatchBlueprint {
+  mode: BlueprintMode;
+  moduleItems: BlueprintItem[];
+  typeItems: BlueprintItemByType[];
+}
+
+/** Normalize both legacy arrays and the current { blueprintMode, items } format. */
+const normalizeBatchBlueprint = (blueprint: unknown): NormalizedBatchBlueprint => {
+  const rawBlueprint = typeof blueprint === 'string'
+    ? JSON.parse(blueprint)
+    : (blueprint || []);
+
+  if (Array.isArray(rawBlueprint)) {
+    return {
+      mode: 'module',
+      moduleItems: rawBlueprint.map(item => ({ ...item })) as BlueprintItem[],
+      typeItems: [],
+    };
+  }
+
+  if (rawBlueprint && typeof rawBlueprint === 'object') {
+    const blueprintObject = rawBlueprint as { blueprintMode?: unknown; items?: unknown };
+    const mode: BlueprintMode = blueprintObject.blueprintMode === 'type' ? 'type' : 'module';
+    const items = Array.isArray(blueprintObject.items) ? blueprintObject.items : [];
+
+    return mode === 'type'
+      ? {
+          mode,
+          moduleItems: [],
+          typeItems: items.map(item => ({ ...item })) as BlueprintItemByType[],
+        }
+      : {
+          mode,
+          moduleItems: items.map(item => ({ ...item })) as BlueprintItem[],
+          typeItems: [],
+        };
+  }
+
+  return { mode: 'module', moduleItems: [], typeItems: [] };
+};
+
 function BatchManagement() {
   const { isAdmin, userId } = useAuth();
+  const createFormRef = useRef<HTMLDivElement>(null);
   const [batches, setBatches] = useState<any[]>([]);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
@@ -304,26 +347,9 @@ function BatchManagement() {
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
   const handleEditBatch = (batch: any) => {
-    const rawBlueprint = typeof batch.blueprint === 'string' ? JSON.parse(batch.blueprint) : (batch.blueprint || []);
-    // Detect blueprint mode from saved data
-    let detectedMode: BlueprintMode = 'module';
-    let moduleItems: BlueprintItem[] = [];
-    let typeItems: BlueprintItemByType[] = [];
+    const { mode, moduleItems, typeItems } = normalizeBatchBlueprint(batch.blueprint);
 
-    if (Array.isArray(rawBlueprint)) {
-      // Legacy format: plain array → by module
-      detectedMode = 'module';
-      moduleItems = rawBlueprint;
-    } else if (rawBlueprint && rawBlueprint.blueprintMode) {
-      detectedMode = rawBlueprint.blueprintMode;
-      if (detectedMode === 'type') {
-        typeItems = rawBlueprint.items || [];
-      } else {
-        moduleItems = rawBlueprint.items || [];
-      }
-    }
-
-    setEditBlueprintMode(detectedMode);
+    setEditBlueprintMode(mode);
     setIsEditBlueprintExpanded(false);
     setEditingBatch({
       ...batch,
@@ -331,6 +357,40 @@ function BatchManagement() {
       end_time: utcToLocalInput(batch.end_time),
       blueprint: moduleItems,
       blueprintByType: typeItems,
+    });
+  };
+
+  const handleCloneBatch = (batch: any) => {
+    const { mode, moduleItems, typeItems } = normalizeBatchBlueprint(batch.blueprint);
+    const sourceRecordMode = batch.record_mode;
+    const recordMode = isAdmin && ['none', 'local', 's3'].includes(sourceRecordMode)
+      ? sourceRecordMode as 'none' | 'local' | 's3'
+      : 'none';
+
+    setBlueprintMode(mode);
+    setFormData({
+      name: `${batch.name} CLONE`,
+      start_time: utcToLocalInput(batch.start_time),
+      end_time: utcToLocalInput(batch.end_time),
+      duration: Number(batch.duration),
+      blueprint: moduleItems,
+      blueprintByType: typeItems,
+      record_mode: recordMode,
+      exam_type: batch.exam_type === 'quiz' ? 'quiz' : 'essay',
+      ai_grading_enabled: Boolean(batch.ai_grading_enabled),
+    });
+    setFeasibilityErrors([]);
+    setIsCreateBlueprintExpanded(false);
+    setEditingBatch(null);
+    setIsEditBlueprintExpanded(false);
+    setShowInviteForm(false);
+    setSelectedBatchId(null);
+    setEmails('');
+    setInviteResult(null);
+    setShowForm(true);
+
+    window.requestAnimationFrame(() => {
+      createFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   };
 
@@ -754,7 +814,7 @@ function BatchManagement() {
 
       {/* ── Create Batch Form ──────────────────────────────────────────── */}
       {showForm && (
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+        <div ref={createFormRef} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
           <div className="p-6 border-b border-slate-100 bg-slate-50/50">
             <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
               <svg className="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1236,6 +1296,14 @@ function BatchManagement() {
                     <td className="px-6 py-4 font-medium">{batch.duration} min</td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex flex-wrap items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleCloneBatch(batch)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-cyan-700 border border-cyan-200 rounded-lg text-sm font-medium hover:bg-cyan-50 hover:border-cyan-300 transition-colors"
+                        >
+                          <Copy size={14} />
+                          Clone
+                        </button>
                         {editable && (
                           <button
                             onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
