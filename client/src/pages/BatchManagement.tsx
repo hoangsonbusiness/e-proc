@@ -13,7 +13,6 @@ import {
   Pencil,
   Plus,
   Trash2,
-  UserPlus,
   Users,
 } from 'lucide-react';
 
@@ -1304,15 +1303,6 @@ function BatchManagement() {
                           <Copy size={14} />
                           Clone
                         </button>
-                        {editable && (
-                          <button
-                            onClick={() => { setSelectedBatchId(batch.id); setShowInviteForm(true); setInviteResult(null); }}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors"
-                          >
-                            <UserPlus size={14} />
-                            Invite
-                          </button>
-                        )}
                         <Link to={`/admin/batches/${batch.id}/students`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-50 hover:border-blue-300 transition-colors">
                           <Users size={14} />
                           Students
