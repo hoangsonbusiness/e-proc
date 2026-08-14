@@ -1,10 +1,13 @@
 // These signals are useful for adjudication but are heuristic and must never
 // contribute to automatic submission. suspicious_paste is based on insertion
-// size and cannot prove that the text came from a clipboard.
+// size and cannot prove that the text came from a clipboard. concurrent_session
+// is enforced directly from trusted server-side overlap evidence; excluding it
+// here ensures legacy/client-created counters can never contribute to a lock.
 export const FORENSIC_ONLY_VIOLATION_TYPES = new Set([
     'suspicious_paste',
     'rapid_text_insertion',
     'multiple_display_detected',
+    'concurrent_session',
 ]);
 export function isForensicOnlyViolation(type) {
     return FORENSIC_ONLY_VIOLATION_TYPES.has(type);

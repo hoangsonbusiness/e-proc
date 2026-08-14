@@ -29,7 +29,6 @@ const VIOLATION_COOLDOWN_MS = 3000;
 // Các type KHÔNG BAO GIỜ bị cooldown bỏ qua — mất một sự kiện là mất bằng chứng gian lận nghiêm trọng.
 const COOLDOWN_EXEMPT_TYPES = new Set<string>([
   'recording_stopped',
-  'concurrent_session',
   // The side-panel state machine already caps this at two sustained reports.
   // A generic time cooldown must not swallow the second lockable report.
   'extension_panel',
@@ -322,7 +321,7 @@ function StudentExam() {
   ): Promise<boolean> => {
     const now = Date.now();
     // [#3] Cooldown TÁCH THEO TYPE (không còn global). Các type critical được miễn
-    // hoàn toàn để một sự kiện thường không thể "nuốt" mất recording_stopped/concurrent_session.
+    // hoàn toàn để một sự kiện thường không thể "nuốt" mất recording_stopped.
     if (!COOLDOWN_EXEMPT_TYPES.has(type)) {
       const last = violationCooldownByTypeRef.current[type] || 0;
       if (now - last < VIOLATION_COOLDOWN_MS) {

@@ -191,3 +191,30 @@ test('legacy suspicious_paste counters are excluded from the lockable total', as
   assert.equal(r.total, 1);
   assert.equal(r.locked, false);
 });
+
+test('concurrent_session is forensic-only in counter logic', async () => {
+  const forensicOnly = isForensicOnlyViolation('concurrent_session');
+  assert.equal(forensicOnly, true);
+
+  const result = await report(raw, {
+    type: 'concurrent_session',
+    eventId: 'server-evidence-1',
+    forensicOnly,
+  });
+
+  assert.equal(result.currentCount, 0);
+  assert.equal(result.total, 0);
+  assert.equal(result.locked, false);
+  assert.equal(raw.prepare("SELECT COUNT(*) c FROM violations WHERE type = 'concurrent_session'").get().c, 0);
+  assert.equal(raw.prepare("SELECT COUNT(*) c FROM violation_events WHERE type = 'concurrent_session'").get().c, 1);
+});
+
+test('legacy concurrent_session counters are excluded from the lockable total', async () => {
+  raw.prepare("INSERT INTO violations (student_id, type, count) VALUES (1, 'concurrent_session', 9)").run();
+
+  const result = await report(raw, { type: 'tab_switch', eventId: 'tab-after-concurrent-legacy' });
+
+  assert.equal(result.currentCount, 1);
+  assert.equal(result.total, 1);
+  assert.equal(result.locked, false);
+});

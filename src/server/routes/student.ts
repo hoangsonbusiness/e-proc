@@ -14,6 +14,8 @@ import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError
 import { parseBlueprintCompat } from '../services/blueprint.js';
 import { persistViolation, computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
 import { enqueueStudentQueueJobs } from '../services/queueStore.js';
+import { isClientReportableViolation, isServerOwnedViolation } from '../services/violationPolicy.js';
+import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEnforcer.js';
 
 dotenv.config();
 
@@ -22,18 +24,6 @@ dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 
 const router = Router();
-
-// [P2-4] Throttle ghi forensic 'concurrent_session': tránh append một row mỗi lần
-// autosave answer khi student ở trạng thái suspicious kéo dài (vd 2 jti cùng IP, hoặc
-// đổi mạng tuần tự — suspicious nhưng không lock). Chỉ ghi khi FINGERPRINT bằng chứng
-// đổi, hoặc đã quá FORENSIC_DEDUP_MS kể từ lần ghi cuối cho cùng fingerprint.
-// In-memory: mỗi serverless instance giữ riêng — xấu nhất là vài row trùng khi scale,
-// vẫn tốt hơn nhiều so với ghi mỗi answer. Không phải cache bền vững, chỉ để giảm nhiễu.
-const FORENSIC_DEDUP_MS = 60_000;
-const lastConcurrentForensic = new Map<string, number>(); // key: `${studentId}:${fingerprint}` → ts
-// [P2-3] Các key đang có INSERT forensic chạy dở (in-flight) — chặn hai request cùng instance
-// cùng vượt gate rồi cùng ghi. Thêm key TRƯỚC await, xóa trong finally.
-const inflightConcurrentForensic = new Set<string>();
 
 // [SEC] Rate-limit riêng cho /verify — chống brute-force access code.
 // 10 lần / phút / IP đủ cho retry hợp lệ nhưng chặn dò mã hàng loạt.
@@ -306,79 +296,14 @@ async function startExamAtomically(studentId: number): Promise<{ success: true; 
   });
 }
 
-/**
- * Anti-Cheat: đánh giá phiên đồng thời và cưỡng chế xử lý.
- * - suspicious (đổi IP/UA/nhiều jti) → chỉ ghi forensic 'concurrent_session'.
- * - lockable (chồng lấn thời gian) → ghi forensic + auto-submit ngay ở backend.
- * Bọc try/catch toàn bộ: lỗi detect KHÔNG được làm hỏng request thi.
- * Trả về true nếu đã auto-lock (để caller biết mà dừng phục vụ nội dung).
- */
-async function enforceConcurrentSession(studentId: number, batchId: number): Promise<boolean> {
-  try {
-    // [P2-4] Short-circuit nếu đã nộp — sau lần overlap đầu tiên auto-submit, client vẫn có
-    // thể spam /answer|/questions|/violation; sessionTracker vẫn upsert và overlap còn trong
-    // cửa sổ 60s, không được để mỗi request đó tạo thêm row.
-    const statusRow0 = await db.query('SELECT status FROM students WHERE id = ?', [studentId]);
-    if (statusRow0.rows[0]?.status !== 'in_progress') return false;
-
-    const ev = await detectConcurrentSession(studentId);
-    if (!ev.suspicious) return false;
-
-    // [P2-3][P2-4] Dedupe theo fingerprint bằng chứng — áp dụng cho CẢ overlap (không còn ghi
-    // trên mọi request khi overlap). "Lần overlap đầu tiên luôn ghi" được bảo đảm bằng cách
-    // đưa overlap vào chính fingerprint: fingerprint có overlap:true là mới ⇒ chưa có trong map
-    // ⇒ ghi ngay; các request overlap tiếp theo cùng fingerprint bị throttle 60s.
-    const fingerprint = JSON.stringify({
-      ips: [...ev.ips].sort(),
-      userAgents: [...ev.userAgents].sort(),
-      jtis: [...ev.jtis].sort(),
-      overlap: ev.overlap,
-    });
-    const dedupKey = `${studentId}:${fingerprint}`;
-    const nowMs = Date.now();
-    const lastMs = lastConcurrentForensic.get(dedupKey) || 0;
-    // [P2-3] Chặn race nội-instance: nếu key đang có INSERT chạy dở thì bỏ qua — không thì hai
-    // request đồng thời cùng đọc lastMs=0, cùng vượt gate, cùng ghi. `shouldLog` gồm cả điều
-    // kiện in-flight để không đợi INSERT xong mới biết trùng.
-    const shouldLog =
-      !inflightConcurrentForensic.has(dedupKey) &&
-      (nowMs - lastMs >= FORENSIC_DEDUP_MS || lastMs === 0);
-
-    if (shouldLog) {
-      inflightConcurrentForensic.add(dedupKey); // đánh dấu TRƯỚC await
-      try {
-        const metadataJson = JSON.stringify({
-          ips: ev.ips,
-          userAgents: ev.userAgents,
-          jtis: ev.jtis,
-          overlap: ev.overlap,
-        }).slice(0, 2000);
-        await db.query(
-          'INSERT INTO violation_events (student_id, batch_id, type, text_length, content_preview, question_id, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [studentId, batchId, 'concurrent_session', ev.ips.length, `IPs: ${ev.ips.join(', ')}`.slice(0, 500), null, metadataJson]
-        );
-        // [P2-3] CHỈ set timestamp SAU khi insert thành công — insert lỗi tạm thời không được
-        // suppress 60s và làm mất cơ hội ghi lại evidence ở request kế.
-        lastConcurrentForensic.set(dedupKey, nowMs);
-      } catch (logErr: any) {
-        console.error('[concurrent_session] forensic log failed (non-fatal):', logErr?.message);
-      } finally {
-        inflightConcurrentForensic.delete(dedupKey); // dọn dù thành công hay lỗi
-      }
-    }
-
-    if (ev.lockable) {
-      // status đã xác nhận in_progress ở đầu hàm.
-      await submitExamAtomically(studentId, 'concurrent_session');
-      console.log('[concurrent_session] Auto-submitted (overlap) student:', studentId, 'ips:', ev.ips);
-      return true;
-    }
-    return false;
-  } catch (err: any) {
-    console.error('[enforceConcurrentSession] failed:', err?.message);
-    throw err;
-  }
-}
+// This is the only path allowed to conclude that a concurrent session exists.
+// It consumes server-tracked evidence and submits directly, independently of
+// the client-reportable violation counter thresholds.
+const enforceConcurrentSession = createConcurrentSessionEnforcer({
+  db,
+  detect: detectConcurrentSession,
+  submit: submitExamAtomically,
+});
 
 /**
  * [P1-2] Đường cưỡng chế lock DUY NHẤT, dùng chung cho cả event mới lẫn replay.
@@ -966,30 +891,15 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req: Req
 
     const { type, content_preview, text_length, question_id, metadata } = req.body;
 
-    // Validate violation type — chỉ chấp nhận các loại hợp lệ.
+    // Validate violation type — chỉ chấp nhận các loại mà frontend được phép report.
     // suspicious_paste is accepted as forensic evidence but never auto-locks:
     // insertion size alone cannot prove clipboard use. focus_lost remains
     // lockable because it is measured through blur/focus with a grace period.
-    const validTypes = [
-      'tab_switch',
-      'fullscreen_exit',
-      'copy_attempt',
-      'cut_attempt',
-      'paste_attempt',
-      'devtools_open',
-      'view_source',
-      'extension_panel',
-      'screenshot_attempt',  // phím PrintScreen / PrtSc
-      'print_attempt',       // Ctrl+P hoặc browser print dialog
-      'suspicious_paste',    // Thâm nhập text lớn bất thường qua Maccy/Win+V Accessibility API
-      'focus_lost',          // Mất focus cửa sổ (Split View / mở app khác trên macOS)
-      'recording_stopped',   // Thí sinh tự dừng chia sẻ màn hình giữa bài (getDisplayMedia track ended)
-      'rapid_text_insertion',
-      'multiple_display_detected',
-      'concurrent_session',  // dùng đồng thời nhiều client/IP — server tự phát hiện & ghi
-    ];
-    if (!type || !validTypes.includes(type)) {
-      return res.status(400).json({ error: 'Invalid violation type' });
+    if (!isClientReportableViolation(type)) {
+      const error = isServerOwnedViolation(type)
+        ? 'Violation type is server-owned'
+        : 'Invalid violation type';
+      return res.status(400).json({ error });
     }
 
     const forensicOnly = isForensicOnlyViolation(type);
