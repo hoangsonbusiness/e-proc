@@ -1,3 +1,107 @@
+export const QUESTION_TYPES = [
+    'Coding',
+    'Conceptual',
+    'Fill-in',
+    'Debug',
+    'SingleChoice',
+    'MultipleChoice',
+];
+export const QUESTION_LEVELS = ['Easy', 'Medium', 'Hard'];
+export class QuestionValidationError extends Error {
+}
+const QUIZ_TYPES = new Set(['SingleChoice', 'MultipleChoice']);
+const OPTION_KEYS = new Set(['A', 'B', 'C', 'D', 'E', 'F']);
+/**
+ * Validate admin input without HTML-encoding it. Question/rubric text is stored
+ * verbatim; React escapes controlled form values and the exam renderer sanitizes
+ * HTML at the rendering boundary. Encoding here would corrupt round trips.
+ */
+export function validateQuestionUpdate(input) {
+    if (!input || typeof input !== 'object') {
+        throw new QuestionValidationError('Question data is required');
+    }
+    const body = input;
+    const type = typeof body.type === 'string' ? body.type : '';
+    const level = typeof body.level === 'string' ? body.level : '';
+    if (!QUESTION_TYPES.includes(type)) {
+        throw new QuestionValidationError('Invalid question type');
+    }
+    if (!QUESTION_LEVELS.includes(level)) {
+        throw new QuestionValidationError('Invalid question level');
+    }
+    const moduleName = typeof body.module === 'string' ? body.module.trim() : '';
+    const question = typeof body.question_sample === 'string' ? body.question_sample : '';
+    if (!moduleName)
+        throw new QuestionValidationError('Module is required');
+    if (!question.trim())
+        throw new QuestionValidationError('Question is required');
+    const rubric = (field) => typeof body[field] === 'string' ? body[field] : '';
+    const normalizedType = type;
+    const normalizedLevel = level;
+    if (!QUIZ_TYPES.has(normalizedType)) {
+        return {
+            type: normalizedType,
+            level: normalizedLevel,
+            module: moduleName,
+            question_sample: question,
+            rubric_must_have: rubric('rubric_must_have'),
+            rubric_nice_to_have: rubric('rubric_nice_to_have'),
+            rubric_optional: rubric('rubric_optional'),
+            options: null,
+            correct_answers: null,
+            score: 1,
+        };
+    }
+    if (!Array.isArray(body.options)) {
+        throw new QuestionValidationError('Quiz options are required');
+    }
+    const seenKeys = new Set();
+    const options = body.options.map((rawOption) => {
+        if (!rawOption || typeof rawOption !== 'object') {
+            throw new QuestionValidationError('Invalid quiz option');
+        }
+        const option = rawOption;
+        const key = typeof option.key === 'string' ? option.key.trim().toUpperCase() : '';
+        const text = typeof option.text === 'string' ? option.text : '';
+        if (!OPTION_KEYS.has(key) || seenKeys.has(key)) {
+            throw new QuestionValidationError('Quiz option keys must be unique values from A to F');
+        }
+        if (!text.trim())
+            throw new QuestionValidationError(`Option ${key} cannot be empty`);
+        seenKeys.add(key);
+        return { key, text };
+    });
+    if (options.length < 2)
+        throw new QuestionValidationError('Quiz questions need at least 2 options');
+    if (!Array.isArray(body.correct_answers)) {
+        throw new QuestionValidationError('Correct answer is required');
+    }
+    const correctAnswers = [...new Set(body.correct_answers.map((answer) => typeof answer === 'string' ? answer.trim().toUpperCase() : ''))].filter(Boolean);
+    if (correctAnswers.length === 0)
+        throw new QuestionValidationError('Correct answer is required');
+    if (correctAnswers.some((answer) => !seenKeys.has(answer))) {
+        throw new QuestionValidationError('Correct answers must match an available option');
+    }
+    if (normalizedType === 'SingleChoice' && correctAnswers.length !== 1) {
+        throw new QuestionValidationError('SingleChoice questions must have exactly one correct answer');
+    }
+    const score = Number(body.score);
+    if (!Number.isFinite(score) || score <= 0) {
+        throw new QuestionValidationError('Score must be greater than 0');
+    }
+    return {
+        type: normalizedType,
+        level: normalizedLevel,
+        module: moduleName,
+        question_sample: question,
+        rubric_must_have: rubric('rubric_must_have'),
+        rubric_nice_to_have: rubric('rubric_nice_to_have'),
+        rubric_optional: rubric('rubric_optional'),
+        options,
+        correct_answers: correctAnswers,
+        score,
+    };
+}
 export async function loadPagedQuestions(db, options) {
     const conditions = [];
     const params = [];

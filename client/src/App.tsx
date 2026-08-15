@@ -5,6 +5,7 @@ import AdminLogin from './pages/AdminLogin';
 import AdminSetup from './pages/AdminSetup';
 import AdminDashboard from './pages/AdminDashboard';
 import QuestionBank from './pages/QuestionBank';
+import QuestionEdit from './pages/QuestionEdit';
 import BatchManagement from './pages/BatchManagement';
 import StudentManagement from './pages/StudentManagement';
 import Results from './pages/Results';
@@ -32,6 +33,7 @@ function App() {
         {/* Admin protected routes */}
         <Route path="/admin/dashboard" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
         <Route path="/admin/questions" element={<PrivateRoute><QuestionBank /></PrivateRoute>} />
+        <Route path="/admin/questions/:id/edit" element={<PrivateRoute><QuestionEdit /></PrivateRoute>} />
         <Route path="/admin/batches" element={<PrivateRoute><BatchManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/results" element={<PrivateRoute><Results /></PrivateRoute>} />

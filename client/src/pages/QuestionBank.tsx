@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
-import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight, Pencil } from 'lucide-react';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
@@ -123,6 +123,9 @@ function QuestionBank() {
 
   /** Mod chỉ được xóa question mình upload; admin xóa tất cả */
   const canDeleteQuestion = (q: any) => isAdmin || q.uploaded_by === userId;
+
+  /** Quyền sửa đối xứng với quyền xóa: mod chỉ sửa question mình upload. */
+  const canEditQuestion = (q: any) => isAdmin || q.uploaded_by === userId;
 
   /** Với mod: chỉ cho chọn checkbox những question của mình */
   const isSelectable = (q: any) => isAdmin || q.uploaded_by === userId;
@@ -365,6 +368,7 @@ function QuestionBank() {
             <tbody className="divide-y divide-slate-100">
               {questions.map((q: any) => {
                 const deletable = canDeleteQuestion(q);
+                const editable = canEditQuestion(q);
                 const selectable = isSelectable(q);
                 const isSelected = selectedIds.has(q.id);
                 
@@ -404,7 +408,27 @@ function QuestionBank() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {deletable ? (
+                      <div className="inline-flex items-center justify-end gap-2">
+                        {editable ? (
+                          <Link
+                            to={`/admin/questions/${encodeURIComponent(q.id)}/edit`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-blue-600 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                            title="Edit question"
+                          >
+                            <Pencil size={14} />
+                            <span>Edit</span>
+                          </Link>
+                        ) : (
+                          <button
+                            disabled
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 text-slate-300 border border-slate-200 rounded-lg text-sm font-medium cursor-not-allowed"
+                            title="You can only edit questions you uploaded"
+                          >
+                            <Pencil size={14} />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                        {deletable ? (
                         <button
                           onClick={() => handleDelete(q.id)}
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-600 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
@@ -413,9 +437,8 @@ function QuestionBank() {
                           <Trash2 size={14} />
                           <span>Delete</span>
                         </button>
-                      ) : (
-                        <span className="inline-block px-2 text-slate-300">—</span>
-                      )}
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 );

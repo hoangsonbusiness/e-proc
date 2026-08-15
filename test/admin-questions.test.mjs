@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { loadPagedQuestions, loadQuestionCatalogSummary } from '../dist/server/services/adminQuestions.js';
+import {
+  loadPagedQuestions,
+  loadQuestionCatalogSummary,
+  validateQuestionUpdate,
+} from '../dist/server/services/adminQuestions.js';
 
 function fixture() {
   const database = new Database(':memory:');
@@ -52,3 +56,31 @@ test('catalog summary replaces four aggregate requests with one query', async ()
   });
 });
 
+test('question update validation preserves HTML-like content verbatim', () => {
+  const question = '<p>Compare <code>List&lt;T&gt;</code></p>\n<pre>if (a < b) return;</pre>';
+  const rubric = '<strong>Must explain O(n)</strong>';
+  const result = validateQuestionUpdate({
+    type: 'Coding',
+    level: 'Hard',
+    module: ' Java ',
+    question_sample: question,
+    rubric_must_have: rubric,
+    rubric_nice_to_have: '',
+    rubric_optional: '',
+  });
+  assert.equal(result.question_sample, question);
+  assert.equal(result.rubric_must_have, rubric);
+  assert.equal(result.module, 'Java');
+});
+
+test('quiz update validation requires correct answers to match non-empty options', () => {
+  assert.throws(() => validateQuestionUpdate({
+    type: 'SingleChoice',
+    level: 'Easy',
+    module: 'Java',
+    question_sample: '<p>Pick one</p>',
+    options: [{ key: 'A', text: 'One' }, { key: 'B', text: 'Two' }],
+    correct_answers: ['C'],
+    score: 1,
+  }), /Correct answers must match an available option/);
+});

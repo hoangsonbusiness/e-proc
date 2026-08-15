@@ -79,6 +79,12 @@ export const adminApi = {
   getQuestions: () =>
     api.get('/admin/questions'),
 
+  getQuestion: (id: string) =>
+    api.get(`/admin/questions/${encodeURIComponent(id)}`),
+
+  updateQuestion: (id: string, data: any) =>
+    api.put(`/admin/questions/${encodeURIComponent(id)}`, data),
+
   getPagedQuestions: (params: { page: number; pageSize: number; module?: string; category?: 'all' | 'essay' | 'quiz' }) =>
     api.get('/admin/questions/paged', { params }),
 

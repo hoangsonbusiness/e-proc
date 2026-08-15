@@ -14,7 +14,7 @@ import cache from '../cache.js';
 import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
 import { runWithDbMetrics } from '../observability/dbMetrics.js';
 import { loadBatchExportData, loadBatchResultsLegacy, loadBatchResultsSummary, loadStudentResultDetail, } from '../services/adminResults.js';
-import { loadPagedQuestions, loadQuestionCatalogSummary } from '../services/adminQuestions.js';
+import { loadPagedQuestions, loadQuestionCatalogSummary, QuestionValidationError, validateQuestionUpdate, } from '../services/adminQuestions.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
@@ -590,6 +590,44 @@ router.get('/questions', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.put('/questions/:id', async (req, res) => {
+    try {
+        const existing = await db.query('SELECT id, uploaded_by FROM question_bank WHERE id = ?', [req.params.id]);
+        const question = existing.rows[0];
+        if (!question)
+            return res.status(404).json({ error: 'Question not found' });
+        if (req.adminUser?.role !== 'admin' && question.uploaded_by !== req.adminUser?.id) {
+            return res.status(403).json({ error: 'Forbidden: You can only edit questions you uploaded' });
+        }
+        const update = validateQuestionUpdate(req.body);
+        await db.query(`
+      UPDATE question_bank
+      SET type = ?, level = ?, module = ?, question_sample = ?,
+          rubric_must_have = ?, rubric_nice_to_have = ?, rubric_optional = ?,
+          options = ?, correct_answers = ?, score = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `, [
+            update.type,
+            update.level,
+            normalizeUnicode(update.module),
+            update.question_sample,
+            update.rubric_must_have,
+            update.rubric_nice_to_have,
+            update.rubric_optional,
+            update.options ? JSON.stringify(update.options) : null,
+            update.correct_answers ? JSON.stringify(update.correct_answers) : null,
+            update.score,
+            req.params.id,
+        ]);
+        return res.json({ success: true, id: req.params.id });
+    }
+    catch (error) {
+        if (error instanceof QuestionValidationError) {
+            return res.status(400).json({ error: error.message });
+        }
+        return res.status(500).json({ error: error.message });
+    }
+});
 router.get('/questions/modules', async (req, res) => {
     try {
         const result = await db.query('SELECT DISTINCT module FROM question_bank ORDER BY module');
@@ -671,6 +709,41 @@ router.get('/questions/module-type-stats', async (req, res) => {
     }
     catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+// Keep the dynamic GET route after every /questions/* static GET route so IDs
+// such as "modules" cannot shadow the catalog/statistics endpoints.
+router.get('/questions/:id', async (req, res) => {
+    try {
+        const result = await db.query('SELECT * FROM question_bank WHERE id = ?', [req.params.id]);
+        const question = result.rows[0];
+        if (!question)
+            return res.status(404).json({ error: 'Question not found' });
+        if (req.adminUser?.role !== 'admin' && question.uploaded_by !== req.adminUser?.id) {
+            return res.status(403).json({ error: 'Forbidden: You can only edit questions you uploaded' });
+        }
+        const parseJsonArray = (value) => {
+            if (Array.isArray(value))
+                return value;
+            if (typeof value !== 'string' || !value)
+                return [];
+            try {
+                const parsed = JSON.parse(value);
+                return Array.isArray(parsed) ? parsed : [];
+            }
+            catch (_) {
+                return [];
+            }
+        };
+        return res.json({
+            ...question,
+            options: parseJsonArray(question.options),
+            correct_answers: parseJsonArray(question.correct_answers),
+            score: Number(question.score ?? 1),
+        });
+    }
+    catch (error) {
+        return res.status(500).json({ error: error.message });
     }
 });
 router.post('/questions/bulk-delete', async (req, res) => {
