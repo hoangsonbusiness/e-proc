@@ -21,7 +21,7 @@ const { Pool } = pg;
 async function initPostgres() {
   console.log('[DB] Attempting PostgreSQL connection...');
   
-  const poolMax = parseInt(process.env.DB_POOL_MAX || '2');
+  const poolMax = parseInt(process.env.DB_POOL_MAX || '4');
   const poolMin = parseInt(process.env.DB_POOL_MIN || '0');
   const connectionTimeoutMs = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '15000') || 15000);
   const connectionAttempts = Math.max(1, Math.min(5, parseInt(process.env.DB_CONNECT_ATTEMPTS || '2') || 2));

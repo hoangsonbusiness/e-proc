@@ -207,7 +207,7 @@ Có thể tạo secret trong PowerShell, chạy riêng từng lần và lưu nga
 
 Biến khuyến nghị:
 
-- `DB_POOL_MAX=2`
+- `DB_POOL_MAX=4`
 - `DB_POOL_MIN=0`
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
@@ -306,7 +306,7 @@ Tài liệu chính thức:
 
 - [ ] Bốn migration đã chạy và verification query đúng.
 - [ ] `/api/health` trả HTTP 200.
-- [ ] `DATABASE_URL` là Transaction Pooler; `DB_POOL_MAX=2`, `DB_POOL_MIN=0`.
+- [ ] `DATABASE_URL` là Transaction Pooler; `DB_POOL_MAX=4`, `DB_POOL_MIN=0`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
 - [ ] Import Excel lớn hơn 5 MiB bị từ chối; SheetJS vẫn được pin ở official tarball `0.20.3`, không hạ về npm `0.18.5`.
 - [ ] `CRON_SECRET` đã cấu hình và queue endpoint không trả 401.

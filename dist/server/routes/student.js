@@ -20,10 +20,10 @@ dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const router = Router();
 // [SEC] Rate-limit riêng cho /verify — chống brute-force access code.
-// 10 lần / phút / IP đủ cho retry hợp lệ nhưng chặn dò mã hàng loạt.
+// Cho phép 25-50 thí sinh chung một public IP đăng nhập gần như đồng thời.
 const verifyRateLimit = rateLimit({
     windowMs: 60_000,
-    max: 10,
+    max: 60,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many attempts. Please wait a minute and try again.' },

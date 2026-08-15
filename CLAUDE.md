@@ -314,7 +314,7 @@ Batches support two blueprint formats for question assignment:
 | `ANSWER_FLUSH_INTERVAL` | Legacy | `5000` | The exam answer endpoint now persists directly; retained only for the unused legacy buffer code. |
 | `QUEUE_PROCESS_INTERVAL` | Self-host/local only | `10000` | Milliseconds between process-local AI queue ticks; ignored on Vercel. |
 | `AI_QUEUE_STALE_MS` | No | `900000` | Requeues a DB job left in `processing` after a crashed/timed-out worker. Keep this above the maximum grading duration. |
-| `DB_POOL_MAX` | No | `2` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
+| `DB_POOL_MAX` | No | `4` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
 | `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
 | `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |

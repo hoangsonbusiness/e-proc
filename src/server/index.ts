@@ -82,7 +82,9 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use(rateLimit({ windowMs: 60000, max: 200 }));
+// Một phòng thi có thể có 25-50 thí sinh chung public IP. Autosave và các
+// request start/submit của họ phải dùng chung được bucket mà không nhận 429.
+app.use(rateLimit({ windowMs: 60_000, max: 1200 }));
 
 app.use(session({
   secret: process.env.SESSION_SECRET || 'secret',
