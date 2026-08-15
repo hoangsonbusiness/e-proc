@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Database, Save } from 'lucide-react';
+import DOMPurify from 'dompurify';
+import { ArrowLeft, Database, Eye, Save } from 'lucide-react';
 import AdminNav from '../components/AdminNav';
 import { adminApi } from '../services/api';
 
@@ -41,6 +42,20 @@ const EMPTY_FORM: QuestionForm = {
 };
 
 const isQuizType = (type: QuestionType) => type === 'SingleChoice' || type === 'MultipleChoice';
+
+// Keep this policy aligned with the student exam renderer so the admin preview
+// is representative while untrusted scripts/event handlers cannot execute.
+const sanitizeQuestionPreview = (html: string): string => DOMPurify.sanitize(html, {
+  ALLOWED_TAGS: [
+    'br', 'p', 'strong', 'em', 'b', 'i', 'u',
+    'pre', 'code', 'ul', 'ol', 'li',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'span', 'div', 'blockquote',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  ],
+  ALLOWED_ATTR: ['class', 'style'],
+  FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onfocus', 'onblur'],
+});
 
 function QuestionEdit() {
   const { id = '' } = useParams();
@@ -220,6 +235,33 @@ function QuestionEdit() {
               <div>
                 <label className={labelClass} htmlFor="rubric-optional">Rubric Optional</label>
                 <textarea id="rubric-optional" value={form.rubric_optional} onChange={(event) => setField('rubric_optional', event.target.value)} rows={7} className={inputClass} />
+              </div>
+            </div>
+
+            <div className="border-t border-slate-200 pt-6">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 p-2 bg-blue-50 text-blue-600 rounded-lg">
+                  <Eye size={18} />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900 m-0">Question Preview</h2>
+                  <p className="text-sm text-slate-500 mt-1 mb-0">
+                    Preview of the sanitized HTML shown to candidates.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 min-h-40 rounded-xl border border-slate-200 bg-slate-50/50 p-5 sm:p-6">
+                {form.question_sample.trim() ? (
+                  <div
+                    className="question-content mb-0"
+                    dangerouslySetInnerHTML={{ __html: sanitizeQuestionPreview(form.question_sample) }}
+                  />
+                ) : (
+                  <p className="m-0 text-sm italic text-slate-400">
+                    Enter question content above to see its preview.
+                  </p>
+                )}
               </div>
             </div>
 
