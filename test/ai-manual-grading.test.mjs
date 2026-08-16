@@ -233,16 +233,21 @@ test('a later AI Grade run grades a newly submitted student without regrading co
   process.env.AI_SETTINGS_ENCRYPTION_KEY = encryptionKey.toString('hex');
 
   let providerCalls = 0;
+  let activeProviderCalls = 0;
+  let maxActiveProviderCalls = 0;
   let providerShouldFail = false;
   const providerInputs = [];
   const provider = http.createServer(async (request, response) => {
     providerCalls += 1;
+    activeProviderCalls += 1;
+    maxActiveProviderCalls = Math.max(maxActiveProviderCalls, activeProviderCalls);
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const envelope = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (providerShouldFail) {
       response.writeHead(500, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: 'simulated provider failure' }));
+      activeProviderCalls -= 1;
       return;
     }
     const prompt = envelope.messages.at(-1).content;
@@ -259,8 +264,12 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       })),
       summary_feedback: `Summary only: ${input.map((question) => question.student_answer).join('|')}`,
     });
+    // Keep the request open long enough for a Promise.all implementation to
+    // overlap multiple students and make this regression test fail.
+    await new Promise((resolve) => setTimeout(resolve, 20));
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+    activeProviderCalls -= 1;
   });
   await new Promise((resolve) => provider.listen(0, '127.0.0.1', resolve));
 
@@ -275,11 +284,13 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       { id: 102, batch_id: 77, status: 'in_progress', ai_grading_status: 'pending' },
       { id: 103, batch_id: 77, status: 'in_progress', ai_grading_status: 'pending' },
       { id: 104, batch_id: 77, status: 'in_progress', ai_grading_status: 'pending' },
+      { id: 105, batch_id: 77, status: 'submitted', ai_grading_status: 'pending' },
     ];
     const questionRows = [
       { id: 1001, student_id: 101, question_order: 1, answer: 'First answer', question_sample: 'Question', rubric_must_have: 'A' },
       { id: 1002, student_id: 102, question_order: 1, answer: 'Second answer', question_sample: 'Question', rubric_must_have: 'A' },
       { id: 1004, student_id: 104, question_order: 1, answer: 'Fourth answer', question_sample: 'Question', rubric_must_have: 'A' },
+      { id: 1005, student_id: 105, question_order: 1, answer: 'Fifth answer', question_sample: 'Different question', rubric_must_have: 'Different rubric' },
     ];
     const db = incrementalGradingDb({
       batch,
@@ -289,8 +300,9 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     });
 
     const first = await gradeBatchManually(db, 77, 9);
-    assert.deepEqual({ completed: first.completed, failed: first.failed, remaining: first.remaining }, { completed: 1, failed: 0, remaining: 0 });
+    assert.deepEqual({ completed: first.completed, failed: first.failed, remaining: first.remaining }, { completed: 2, failed: 0, remaining: 0 });
     assert.equal(students[0].ai_grading_status, 'completed');
+    assert.equal(students[4].ai_grading_status, 'completed');
     assert.equal(students[1].ai_grading_status, 'pending');
     const firstStudentGradedAt = students[0].ai_graded_at;
 
@@ -303,11 +315,13 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     assert.equal(students[1].ai_final_score, 2.5);
     assert.deepEqual(providerInputs.map((input) => input.map((item) => item.student_answer)), [
       ['First answer'],
+      ['Fifth answer'],
       ['Second answer'],
     ]);
     assert.equal(questionRows[0].ai_feedback, 'Graded only: First answer');
     assert.equal(questionRows[1].ai_feedback, 'Graded only: Second answer');
-    assert.equal(providerCalls, 2);
+    assert.equal(providerCalls, 3);
+    assert.equal(maxActiveProviderCalls, 1);
 
     questionRows[0].answer = 'First answer revised';
     const regraded = await gradeStudentManually(db, 77, 101, 9);
@@ -317,7 +331,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     );
     assert.equal(questionRows[0].ai_feedback, 'Graded only: First answer revised');
     assert.equal(students[0].ai_summary_feedback, 'Summary only: First answer revised');
-    assert.equal(providerCalls, 3);
+    assert.equal(providerCalls, 4);
 
     const preserved = {
       score: students[0].ai_final_score,
@@ -352,7 +366,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     );
     assert.equal(questionRows[2].ai_feedback, 'Graded only: Fourth answer');
     assert.equal(students[3].ai_grading_status, 'completed');
-    assert.equal(providerCalls, 5);
+    assert.equal(providerCalls, 6);
 
     students[2].status = 'submitted';
     const third = await gradeBatchManually(db, 77, 9);
@@ -361,7 +375,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       { completed: 0, failed: 1, remaining: 0, failures: [{ studentId: 103, error: 'Student has no assigned questions' }] },
     );
     assert.equal(students[2].ai_grading_status, 'failed');
-    assert.equal(providerCalls, 5);
+    assert.equal(providerCalls, 6);
   } finally {
     await new Promise((resolve, reject) => provider.close((error) => error ? reject(error) : resolve()));
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;

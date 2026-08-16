@@ -239,17 +239,6 @@ async function publishCandidate(tx, candidate) {
         throw new Error('Refused to publish AI result: submitted student ownership check failed');
     }
 }
-async function saveWave(tx, successes, failures) {
-    for (const candidate of successes) {
-        await publishCandidate(tx, candidate);
-    }
-    for (const failure of failures) {
-        await tx.query(`
-      UPDATE students SET ai_grading_status = 'failed', ai_grading_error = ?
-      WHERE id = ? AND ai_grading_status = 'processing'
-    `, [failure.error.slice(0, 1_000), failure.studentId]);
-    }
-}
 export async function gradeStudentManually(db, batchId, studentId, userId) {
     const targetResult = await db.query(`
     SELECT s.id, s.status, COALESCE(s.ai_grading_status, 'pending') AS ai_grading_status,
@@ -332,7 +321,6 @@ export async function gradeBatchManually(db, batchId, userId) {
         await db.query(`UPDATE batches SET ai_grading_status = 'completed', ai_graded_at = ? WHERE id = ?`, [new Date().toISOString(), batchId]);
         return { success: true, total: 0, completed: 0, failed: 0, remaining: 0, failures: [], message: 'No submitted students require grading' };
     }
-    const concurrency = Math.max(1, Math.min(Number(process.env.AI_GRADING_CONCURRENCY || 5), 10));
     const safeBudgetMs = Math.max(30_000, Math.min(Number(process.env.AI_GRADE_SAFE_BUDGET_MS || 270_000), 290_000));
     const deadline = Date.now() + safeBudgetMs;
     const llmTimeoutMs = Math.max(1_000, Math.min(Number(process.env.AI_GRADING_LLM_TIMEOUT_MS || 60_000), 120_000));
@@ -341,36 +329,38 @@ export async function gradeBatchManually(db, batchId, userId) {
     let processed = 0;
     const failureDetails = [];
     try {
-        for (let offset = 0; offset < studentIds.length; offset += concurrency) {
+        // Grade strictly one student at a time. Besides reducing provider pressure,
+        // this prevents custom OpenAI-compatible gateways from crossing responses
+        // between concurrent requests made with the same API key/model.
+        for (const studentId of studentIds) {
             if (Date.now() + llmTimeoutMs + 10_000 >= deadline)
                 break;
-            const wave = studentIds.slice(offset, offset + concurrency);
-            const claimedWave = [];
-            for (const studentId of wave) {
-                const claimedStudent = await db.query(`
-          UPDATE students SET ai_grading_status = 'processing', ai_grading_error = NULL
-          WHERE id = ? AND batch_id = ? AND status = 'submitted'
-            AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
-        `, [studentId, batchId]);
-                if (claimedStudent.rowCount === 1)
-                    claimedWave.push(studentId);
+            const claimedStudent = await db.query(`
+        UPDATE students SET ai_grading_status = 'processing', ai_grading_error = NULL
+        WHERE id = ? AND batch_id = ? AND status = 'submitted'
+          AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
+      `, [studentId, batchId]);
+            if (claimedStudent.rowCount !== 1)
+                continue;
+            processed += 1;
+            try {
+                const questions = await loadStudentQuestions(db, batchId, studentId);
+                const candidate = await gradeStudent(config, studentId, questions, deadline);
+                await db.withTransaction((tx) => publishCandidate(tx, candidate));
+                completed += 1;
             }
-            const outcomes = await Promise.all(claimedWave.map(async (studentId) => {
-                try {
-                    const questions = await loadStudentQuestions(db, batchId, studentId);
-                    return { success: await gradeStudent(config, studentId, questions, deadline) };
-                }
-                catch (error) {
-                    return { failure: { studentId, error: error?.message || 'AI grading failed' } };
-                }
-            }));
-            const successes = outcomes.flatMap((outcome) => outcome.success ? [outcome.success] : []);
-            const failures = outcomes.flatMap((outcome) => outcome.failure ? [outcome.failure] : []);
-            await db.withTransaction((tx) => saveWave(tx, successes, failures));
-            completed += successes.length;
-            failed += failures.length;
-            processed += claimedWave.length;
-            failureDetails.push(...failures);
+            catch (error) {
+                const failure = {
+                    studentId,
+                    error: String(error?.message || 'AI grading failed').slice(0, 1_000),
+                };
+                await db.query(`
+          UPDATE students SET ai_grading_status = 'failed', ai_grading_error = ?
+          WHERE id = ? AND batch_id = ? AND ai_grading_status = 'processing'
+        `, [failure.error, studentId, batchId]);
+                failed += 1;
+                failureDetails.push(failure);
+            }
         }
     }
     catch (error) {
