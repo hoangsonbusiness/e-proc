@@ -82,6 +82,12 @@ export const adminApi = {
   getQuestion: (id: string) =>
     api.get(`/admin/questions/${encodeURIComponent(id)}`),
 
+  checkQuestionId: (id: string) =>
+    api.get('/admin/questions/check-id', { params: { id } }),
+
+  createQuestion: (data: any) =>
+    api.post('/admin/questions', data),
+
   updateQuestion: (id: string, data: any) =>
     api.put(`/admin/questions/${encodeURIComponent(id)}`, data),
 

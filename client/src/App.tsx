@@ -33,6 +33,7 @@ function App() {
         {/* Admin protected routes */}
         <Route path="/admin/dashboard" element={<PrivateRoute><AdminDashboard /></PrivateRoute>} />
         <Route path="/admin/questions" element={<PrivateRoute><QuestionBank /></PrivateRoute>} />
+        <Route path="/admin/questions/new" element={<PrivateRoute><QuestionEdit /></PrivateRoute>} />
         <Route path="/admin/questions/:id/edit" element={<PrivateRoute><QuestionEdit /></PrivateRoute>} />
         <Route path="/admin/batches" element={<PrivateRoute><BatchManagement /></PrivateRoute>} />
         <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />

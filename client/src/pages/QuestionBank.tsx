@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
-import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight, Pencil } from 'lucide-react';
+import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight, Pencil, Plus } from 'lucide-react';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 type PageSize = typeof PAGE_SIZE_OPTIONS[number];
@@ -283,16 +283,25 @@ function QuestionBank() {
             </span>
           </h3>
           
-          {selectedIds.size > 0 && (
-            <button
-              onClick={handleBulkDelete}
-              disabled={bulkDeleting}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-100 transition-colors"
+          <div className="flex flex-wrap items-center gap-2">
+            {selectedIds.size > 0 && (
+              <button
+                onClick={handleBulkDelete}
+                disabled={bulkDeleting}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-100 transition-colors"
+              >
+                <Trash2 size={16} />
+                {bulkDeleting ? 'Deleting...' : `Delete (${selectedIds.size}) Selected`}
+              </button>
+            )}
+            <Link
+              to="/admin/questions/new"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white border border-blue-600 rounded-lg text-sm font-medium hover:bg-blue-700 hover:border-blue-700 transition-colors shadow-sm"
             >
-              <Trash2 size={16} />
-              {bulkDeleting ? 'Deleting...' : `Delete (${selectedIds.size}) Selected`}
-            </button>
-          )}
+              <Plus size={16} />
+              Add Question
+            </Link>
+          </div>
         </div>
 
         {/* Filter & page size row */}
@@ -448,7 +457,7 @@ function QuestionBank() {
                   <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <Search size={32} className="text-slate-300" />
-                      <p>{modules.length === 0 ? 'No questions yet. Import from Excel to get started.' : 'No questions match the selected filters.'}</p>
+                      <p>{modules.length === 0 ? 'No questions yet. Add one manually or import from Excel to get started.' : 'No questions match the selected filters.'}</p>
                     </div>
                   </td>
                 </tr>

@@ -1,4 +1,5 @@
 import type { DbExecutor } from '../db/postgres.js';
+import { normalizeUnicode } from '../../utils/string.js';
 
 export type QuestionCategory = 'all' | 'essay' | 'quiz';
 
@@ -28,10 +29,21 @@ export interface EditableQuestion {
   score: number;
 }
 
+export interface CreatableQuestion extends EditableQuestion {
+  id: string;
+}
+
 export class QuestionValidationError extends Error {}
 
 const QUIZ_TYPES = new Set<QuestionType>(['SingleChoice', 'MultipleChoice']);
 const OPTION_KEYS = new Set(['A', 'B', 'C', 'D', 'E', 'F']);
+
+export function validateQuestionId(input: unknown): string {
+  const id = typeof input === 'string' ? input.trim() : '';
+  if (!id) throw new QuestionValidationError('Question ID is required');
+  if (id.length > 50) throw new QuestionValidationError('Question ID must be 50 characters or fewer');
+  return id;
+}
 
 /**
  * Validate admin input without HTML-encoding it. Question/rubric text is stored
@@ -128,6 +140,59 @@ export function validateQuestionUpdate(input: unknown): EditableQuestion {
     correct_answers: correctAnswers,
     score,
   };
+}
+
+export function validateQuestionCreate(input: unknown): CreatableQuestion {
+  if (!input || typeof input !== 'object') {
+    throw new QuestionValidationError('Question data is required');
+  }
+  const body = input as Record<string, unknown>;
+  return {
+    id: validateQuestionId(body.id),
+    ...validateQuestionUpdate(body),
+  };
+}
+
+export async function isQuestionIdAvailable(db: DbExecutor, input: unknown): Promise<{ id: string; available: boolean }> {
+  const id = validateQuestionId(input);
+  const existing = await db.query('SELECT id FROM question_bank WHERE id = ?', [id]);
+  return { id, available: existing.rows.length === 0 };
+}
+
+export async function insertQuestion(
+  db: DbExecutor,
+  question: CreatableQuestion,
+  uploadedBy: number,
+): Promise<void> {
+  await db.query(`
+    INSERT INTO question_bank (
+      id, type, level, module, question_sample,
+      rubric_must_have, rubric_nice_to_have, rubric_optional,
+      options, correct_answers, score, uploaded_by
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    question.id,
+    question.type,
+    question.level,
+    normalizeUnicode(question.module),
+    question.question_sample,
+    question.rubric_must_have,
+    question.rubric_nice_to_have,
+    question.rubric_optional,
+    question.options ? JSON.stringify(question.options) : null,
+    question.correct_answers ? JSON.stringify(question.correct_answers) : null,
+    question.score,
+    uploadedBy,
+  ]);
+}
+
+export function isDuplicateQuestionIdError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; constraint?: unknown; message?: unknown };
+  if (candidate.code === '23505') return true;
+  const code = String(candidate.code || '');
+  const message = String(candidate.message || '');
+  return code.startsWith('SQLITE_CONSTRAINT') && /unique|primary key/i.test(message);
 }
 
 export async function loadPagedQuestions(

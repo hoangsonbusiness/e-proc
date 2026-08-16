@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import DOMPurify from 'dompurify';
-import { ArrowLeft, Database, Eye, Save } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Database, Eye, LoaderCircle, Plus, Save, XCircle } from 'lucide-react';
 import AdminNav from '../components/AdminNav';
 import { adminApi } from '../services/api';
 
@@ -12,6 +12,7 @@ const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'] as const;
 type QuestionType = typeof QUESTION_TYPES[number];
 type Level = typeof LEVELS[number];
 type QuizOption = { key: string; text: string };
+type IdStatus = 'idle' | 'checking' | 'available' | 'taken' | 'error';
 
 interface QuestionForm {
   id: string;
@@ -58,14 +59,17 @@ const sanitizeQuestionPreview = (html: string): string => DOMPurify.sanitize(htm
 });
 
 function QuestionEdit() {
-  const { id = '' } = useParams();
+  const { id } = useParams();
+  const isCreate = !id;
   const navigate = useNavigate();
   const [form, setForm] = useState<QuestionForm>(EMPTY_FORM);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isCreate);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [idStatus, setIdStatus] = useState<IdStatus>('idle');
 
   useEffect(() => {
+    if (!id) return;
     let active = true;
     const loadQuestion = async () => {
       try {
@@ -104,6 +108,31 @@ function QuestionEdit() {
     return () => { active = false; };
   }, [id]);
 
+  useEffect(() => {
+    if (!isCreate) return;
+    const normalizedId = form.id.trim();
+    if (!normalizedId || normalizedId.length > 50) {
+      setIdStatus('idle');
+      return;
+    }
+
+    let active = true;
+    setIdStatus('checking');
+    const timeout = window.setTimeout(async () => {
+      try {
+        const response = await adminApi.checkQuestionId(normalizedId);
+        if (active) setIdStatus(response.data.available ? 'available' : 'taken');
+      } catch (_) {
+        if (active) setIdStatus('error');
+      }
+    }, 400);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [form.id, isCreate]);
+
   const setField = <K extends keyof QuestionForm>(field: K, value: QuestionForm[K]) => {
     setForm((current) => ({ ...current, [field]: value }));
   };
@@ -136,12 +165,26 @@ function QuestionEdit() {
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
+    const normalizedId = form.id.trim();
+    if (isCreate && !normalizedId) {
+      setError('Question ID is required');
+      return;
+    }
+    if (isCreate && normalizedId.length > 50) {
+      setError('Question ID must be 50 characters or fewer');
+      return;
+    }
+    if (isCreate && idStatus === 'taken') {
+      setError(`Question ID "${normalizedId}" already exists`);
+      return;
+    }
+
     setSaving(true);
     setError('');
     try {
       const activeOptions = form.options.filter((option) => option.text.trim());
       const activeKeys = new Set(activeOptions.map((option) => option.key));
-      await adminApi.updateQuestion(id, {
+      const payload = {
         type: form.type,
         level: form.level,
         module: form.module,
@@ -156,7 +199,12 @@ function QuestionEdit() {
           ? form.correct_answers.filter((answer) => activeKeys.has(answer))
           : null,
         score: form.score,
-      });
+      };
+      if (isCreate) {
+        await adminApi.createQuestion({ id: normalizedId, ...payload });
+      } else {
+        await adminApi.updateQuestion(id, payload);
+      }
       navigate('/admin/questions', { replace: true });
     } catch (requestError: any) {
       setError(requestError.response?.data?.error || requestError.message);
@@ -174,8 +222,14 @@ function QuestionEdit() {
         <div className="flex items-center gap-3">
           <div className="p-2 bg-amber-100 text-amber-600 rounded-lg"><Database size={24} /></div>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0 border-none pb-0">Edit Question</h1>
-            <p className="text-sm text-slate-500 mt-1 mb-0">Update question content while keeping its ID unchanged.</p>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight m-0 border-none pb-0">
+              {isCreate ? 'Add Question' : 'Edit Question'}
+            </h1>
+            <p className="text-sm text-slate-500 mt-1 mb-0">
+              {isCreate
+                ? 'Create a question manually. Question IDs are case-sensitive.'
+                : 'Update question content while keeping its ID unchanged.'}
+            </p>
           </div>
         </div>
         <Link to="/admin/questions" className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-50 transition-colors shadow-sm">
@@ -187,7 +241,7 @@ function QuestionEdit() {
 
       {loading ? (
         <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-500">Loading question...</div>
-      ) : error && !form.id ? (
+      ) : !isCreate && error && !form.id ? (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-5">{error}</div>
       ) : (
         <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -197,7 +251,31 @@ function QuestionEdit() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
               <div>
                 <label className={labelClass} htmlFor="question-id">ID</label>
-                <input id="question-id" value={form.id} readOnly className={`${inputClass} bg-slate-100 text-slate-500 cursor-not-allowed font-mono`} />
+                <div className="relative">
+                  <input
+                    id="question-id"
+                    value={form.id}
+                    onChange={(event) => setField('id', event.target.value)}
+                    readOnly={!isCreate}
+                    required
+                    maxLength={50}
+                    autoComplete="off"
+                    aria-describedby={isCreate ? 'question-id-status' : undefined}
+                    className={`${inputClass} pr-10 font-mono ${!isCreate ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`}
+                  />
+                  {isCreate && idStatus === 'checking' && <LoaderCircle size={18} className="absolute right-3 top-3 text-slate-400 animate-spin" />}
+                  {isCreate && idStatus === 'available' && <CheckCircle2 size={18} className="absolute right-3 top-3 text-emerald-500" />}
+                  {isCreate && idStatus === 'taken' && <XCircle size={18} className="absolute right-3 top-3 text-red-500" />}
+                </div>
+                {isCreate && (
+                  <p id="question-id-status" className={`mt-1.5 mb-0 text-xs ${idStatus === 'taken' ? 'text-red-600' : idStatus === 'available' ? 'text-emerald-600' : 'text-slate-500'}`}>
+                    {idStatus === 'checking' && 'Checking ID...'}
+                    {idStatus === 'available' && `ID "${form.id.trim()}" is available.`}
+                    {idStatus === 'taken' && `ID "${form.id.trim()}" already exists.`}
+                    {idStatus === 'error' && 'Could not check the ID now; it will be validated when saved.'}
+                    {idStatus === 'idle' && 'Maximum 50 characters. Uppercase and lowercase IDs are different.'}
+                  </p>
+                )}
               </div>
               <div>
                 <label className={labelClass} htmlFor="question-type">Type</label>
@@ -301,7 +379,8 @@ function QuestionEdit() {
           <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
             <Link to="/admin/questions" className="px-4 py-2.5 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-100">Cancel</Link>
             <button type="submit" disabled={saving} className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-lg font-medium text-sm hover:bg-blue-700 disabled:opacity-50">
-              <Save size={16} /> {saving ? 'Saving...' : 'Save changes'}
+              {isCreate ? <Plus size={16} /> : <Save size={16} />}
+              {saving ? 'Saving...' : isCreate ? 'Add Question' : 'Save changes'}
             </button>
           </div>
         </form>

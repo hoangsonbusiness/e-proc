@@ -20,9 +20,14 @@ import {
   loadStudentResultDetail,
 } from '../services/adminResults.js';
 import {
+  insertQuestion,
+  isDuplicateQuestionIdError,
+  isQuestionIdAvailable,
   loadPagedQuestions,
   loadQuestionCatalogSummary,
   QuestionValidationError,
+  validateQuestionCreate,
+  validateQuestionId,
   validateQuestionUpdate,
   type QuestionCategory,
 } from '../services/adminQuestions.js';
@@ -677,12 +682,47 @@ router.get('/questions/catalog-summary', async (_req: Request, res: Response) =>
   }
 });
 
+router.get('/questions/check-id', async (req: Request, res: Response) => {
+  try {
+    return res.json(await isQuestionIdAvailable(db, req.query.id));
+  } catch (error: any) {
+    if (error instanceof QuestionValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/questions', async (req: Request, res: Response) => {
   try {
     const result = await db.query('SELECT * FROM question_bank ORDER BY module, level');
     res.json(result.rows);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/questions', async (req: Request, res: Response) => {
+  try {
+    const uploadedBy = req.adminUser?.id;
+    if (!Number.isInteger(uploadedBy)) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const question = validateQuestionCreate(req.body);
+    await insertQuestion(db, question, uploadedBy as number);
+    return res.status(201).json({ success: true, id: question.id });
+  } catch (error: any) {
+    if (error instanceof QuestionValidationError) {
+      return res.status(400).json({ error: error.message });
+    }
+    if (isDuplicateQuestionIdError(error)) {
+      const id = (() => {
+        try { return validateQuestionId(req.body?.id); } catch (_) { return ''; }
+      })();
+      return res.status(409).json({ error: `Question ID "${id}" already exists` });
+    }
+    return res.status(500).json({ error: error.message });
   }
 });
 

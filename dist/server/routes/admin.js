@@ -14,7 +14,7 @@ import cache from '../cache.js';
 import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
 import { runWithDbMetrics } from '../observability/dbMetrics.js';
 import { loadBatchExportData, loadBatchResultsLegacy, loadBatchResultsSummary, loadStudentResultDetail, } from '../services/adminResults.js';
-import { loadPagedQuestions, loadQuestionCatalogSummary, QuestionValidationError, validateQuestionUpdate, } from '../services/adminQuestions.js';
+import { insertQuestion, isDuplicateQuestionIdError, isQuestionIdAvailable, loadPagedQuestions, loadQuestionCatalogSummary, QuestionValidationError, validateQuestionCreate, validateQuestionId, validateQuestionUpdate, } from '../services/adminQuestions.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
@@ -581,6 +581,17 @@ router.get('/questions/catalog-summary', async (_req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.get('/questions/check-id', async (req, res) => {
+    try {
+        return res.json(await isQuestionIdAvailable(db, req.query.id));
+    }
+    catch (error) {
+        if (error instanceof QuestionValidationError) {
+            return res.status(400).json({ error: error.message });
+        }
+        return res.status(500).json({ error: error.message });
+    }
+});
 router.get('/questions', async (req, res) => {
     try {
         const result = await db.query('SELECT * FROM question_bank ORDER BY module, level');
@@ -588,6 +599,34 @@ router.get('/questions', async (req, res) => {
     }
     catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+router.post('/questions', async (req, res) => {
+    try {
+        const uploadedBy = req.adminUser?.id;
+        if (!Number.isInteger(uploadedBy)) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        const question = validateQuestionCreate(req.body);
+        await insertQuestion(db, question, uploadedBy);
+        return res.status(201).json({ success: true, id: question.id });
+    }
+    catch (error) {
+        if (error instanceof QuestionValidationError) {
+            return res.status(400).json({ error: error.message });
+        }
+        if (isDuplicateQuestionIdError(error)) {
+            const id = (() => {
+                try {
+                    return validateQuestionId(req.body?.id);
+                }
+                catch (_) {
+                    return '';
+                }
+            })();
+            return res.status(409).json({ error: `Question ID "${id}" already exists` });
+        }
+        return res.status(500).json({ error: error.message });
     }
 });
 router.put('/questions/:id', async (req, res) => {
