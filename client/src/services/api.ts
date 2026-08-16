@@ -177,7 +177,10 @@ export const adminApi = {
     api.post('/admin/settings/ai/test', settings),
 
   gradeBatchWithAI: (batchId: number) =>
-    api.post(`/admin/batches/${batchId}/ai-grade`)
+    api.post(`/admin/batches/${batchId}/ai-grade`),
+
+  gradeStudentWithAI: (batchId: number, studentId: number) =>
+    api.post(`/admin/batches/${batchId}/students/${studentId}/ai-grade`)
 };
 
 export const studentApi = {

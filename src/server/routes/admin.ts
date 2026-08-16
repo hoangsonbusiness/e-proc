@@ -32,7 +32,7 @@ import {
   type QuestionCategory,
 } from '../services/adminQuestions.js';
 import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
-import { AiGradingError, gradeBatchManually } from '../services/batchAiGrading.js';
+import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
 
 dotenv.config();
 
@@ -1437,6 +1437,22 @@ router.post('/batches/:id/ai-grade', async (req: Request, res: Response) => {
         WHERE id = ? AND created_by = ? AND ai_grading_status = 'processing'
       `, [batchId, req.adminUser.id]).catch(() => {});
     }
+    return res.status(500).json({ error: error?.message || 'AI grading failed' });
+  }
+});
+
+router.post('/batches/:batchId/students/:studentId/ai-grade', async (req: Request, res: Response) => {
+  try {
+    const batchId = Number(req.params.batchId);
+    const studentId = Number(req.params.studentId);
+    const userId = req.adminUser?.id;
+    if (!Number.isInteger(batchId) || batchId < 1) return res.status(400).json({ error: 'Invalid batch id' });
+    if (!Number.isInteger(studentId) || studentId < 1) return res.status(400).json({ error: 'Invalid student id' });
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    return res.json(await gradeStudentManually(db, batchId, studentId, userId));
+  } catch (error: any) {
+    if (error instanceof AiGradingError) return res.status(error.statusCode).json({ error: error.message });
+    console.error('[AI Grade] Student grading failed:', error?.message || error);
     return res.status(500).json({ error: error?.message || 'AI grading failed' });
   }
 });

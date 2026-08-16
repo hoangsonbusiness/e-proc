@@ -1,12 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
-import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import DOMPurify from 'dompurify';
 
 function Results() {
   const { id } = useParams<{ id: string }>();
+  const { userId } = useAuth();
   const [results, setResults] = useState<any[]>([]);
   const [batch, setBatch] = useState<any>(null);
   const [selectedStudent, setSelectedStudent] = useState<any>(null);
@@ -15,6 +17,8 @@ function Results() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [resettingStudentId, setResettingStudentId] = useState<number | null>(null);
+  const [gradingStudentId, setGradingStudentId] = useState<number | null>(null);
+  const [aiSettingsVerified, setAiSettingsVerified] = useState(false);
   const [detailLoadingStudentId, setDetailLoadingStudentId] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
@@ -36,6 +40,12 @@ function Results() {
   useEffect(() => {
     loadResults();
   }, [id, currentPage, pageSize]);
+
+  useEffect(() => {
+    adminApi.getAISettings()
+      .then((response) => setAiSettingsVerified(response.data?.testStatus === 'verified'))
+      .catch(() => setAiSettingsVerified(false));
+  }, [id]);
 
   const loadBatch = async () => {
     try {
@@ -161,6 +171,32 @@ function Results() {
     }
   };
 
+  const handleStudentAiGrade = async (result: any) => {
+    const student = result.student;
+    const isRegrade = student.ai_grading_status === 'completed';
+    const action = isRegrade ? 'regrade' : student.ai_grading_status === 'failed' ? 'retry AI grading for' : 'AI grade';
+    const warning = isRegrade
+      ? 'The current AI score and feedback will only be replaced if the new result is valid.'
+      : 'This will grade only this student.';
+    if (!window.confirm(`${action} ${student.email}?\n\n${warning}`)) return;
+
+    setGradingStudentId(Number(student.id));
+    try {
+      const response = await adminApi.gradeStudentWithAI(Number(id), Number(student.id));
+      const modeLabel = response.data.mode === 'regrade' ? 'Regrade' : 'AI Grade';
+      window.alert(`${modeLabel} completed. Final score: ${Number(response.data.finalScore).toFixed(2)}/10`);
+      detailCacheRef.current.delete(Number(student.id));
+      if (selectedStudent?.student?.id === student.id) setSelectedStudent(null);
+      await loadResults();
+    } catch (error: any) {
+      window.alert(error.response?.data?.error || error.message || 'AI grading failed.');
+      detailCacheRef.current.delete(Number(student.id));
+      await loadResults();
+    } finally {
+      setGradingStudentId(null);
+    }
+  };
+
   const getAverageScore = (student: any) => {
     const score = student.student?.avg_score;
     return score == null ? '-' : Number(score).toFixed(2);
@@ -179,6 +215,10 @@ function Results() {
       FORBID_ATTR: ['onerror', 'onclick', 'onload', 'onmouseover', 'onfocus', 'onblur'],
     });
   };
+
+  const canManageAiGrading = batch?.exam_type === 'essay'
+    && Number(batch?.created_by) === userId
+    && aiSettingsVerified;
 
   return (
     <div className="container">
@@ -272,6 +312,21 @@ function Results() {
                           {r.student.status === 'submitted' && <CheckCircle2 size={12} />}
                           {r.student.status}
                         </span>
+                        {batch?.exam_type === 'essay' && r.student.status === 'submitted' && (
+                          <div
+                            className={`mt-2 text-[11px] font-semibold ${r.student.ai_grading_status === 'completed'
+                                ? 'text-emerald-700'
+                                : r.student.ai_grading_status === 'failed'
+                                  ? 'text-red-700'
+                                  : r.student.ai_grading_status === 'processing'
+                                    ? 'text-indigo-700'
+                                    : 'text-slate-500'
+                              }`}
+                            title={r.student.ai_grading_error || undefined}
+                          >
+                            AI: {r.student.ai_grading_status || 'pending'}
+                          </div>
+                        )}
                       </td>
                       <td className="px-6 py-4">
                         {r.violations > 0 || r.violation_event_count > 0 ? (
@@ -331,6 +386,23 @@ function Results() {
                       </td>
                       <td className="px-6 py-4 text-right">
                         <div className="inline-flex items-center justify-end gap-2">
+                          {canManageAiGrading && r.student.status === 'submitted' && r.student.questions_count > 0 && (
+                            <button
+                              onClick={() => handleStudentAiGrade(r)}
+                              disabled={gradingStudentId !== null || r.student.ai_grading_status === 'processing'}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                              title={r.student.ai_grading_error || undefined}
+                            >
+                              <Sparkles size={14} />
+                              {gradingStudentId === r.student.id || r.student.ai_grading_status === 'processing'
+                                ? 'Grading...'
+                                : r.student.ai_grading_status === 'completed'
+                                  ? 'Regrade AI'
+                                  : r.student.ai_grading_status === 'failed'
+                                    ? 'Retry AI Grade'
+                                    : 'AI Grade'}
+                            </button>
+                          )}
                           {r.student.status === 'submitted' && r.student.questions_count > 0 && (
                             <button
                               onClick={() => handleResetExam(r.student)}

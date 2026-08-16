@@ -182,39 +182,114 @@ async function gradeStudent(config, studentId, questions, deadline) {
         finalScore: calculateFinalScore(grades, questions.length),
     };
 }
+async function loadStudentQuestions(db, batchId, studentId) {
+    const questionRows = await db.query(`
+    SELECT eq.id, eq.student_id, eq.question_order, eq.answer,
+           q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
+    FROM exam_questions eq
+    JOIN students s ON s.id = eq.student_id
+    JOIN question_bank q ON q.id = eq.question_id
+    WHERE eq.student_id = ? AND s.batch_id = ? AND s.status = 'submitted'
+    ORDER BY eq.question_order
+  `, [studentId, batchId]);
+    return questionRows.rows.map((row) => ({
+        id: Number(row.id),
+        studentId: Number(row.student_id),
+        questionOrder: Number(row.question_order),
+        question: String(row.question_sample || ''),
+        answer: String(row.answer || ''),
+        rubricMustHave: String(row.rubric_must_have || ''),
+        rubricNiceToHave: String(row.rubric_nice_to_have || ''),
+        rubricOptional: String(row.rubric_optional || ''),
+    }));
+}
+async function publishCandidate(tx, candidate) {
+    const scoreCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
+    const feedbackCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
+    const ids = candidate.grades.map((grade) => grade.examQuestionId);
+    const savedQuestions = await tx.query(`
+    UPDATE exam_questions
+    SET ai_score = CASE id ${scoreCases} ELSE ai_score END,
+        ai_feedback = CASE id ${feedbackCases} ELSE ai_feedback END
+    WHERE student_id = ? AND id IN (${ids.map(() => '?').join(', ')})
+  `, [
+        ...candidate.grades.flatMap((grade) => [grade.examQuestionId, grade.score]),
+        ...candidate.grades.flatMap((grade) => [grade.examQuestionId, grade.feedback]),
+        candidate.studentId,
+        ...ids,
+    ]);
+    if (savedQuestions.rowCount !== candidate.grades.length) {
+        throw new Error(`Refused to publish AI result: expected ${candidate.grades.length} owned questions, updated ${savedQuestions.rowCount}`);
+    }
+    const savedStudent = await tx.query(`
+    UPDATE students
+    SET ai_final_score = ?, ai_summary_feedback = ?, ai_grading_status = 'completed',
+        ai_grading_error = NULL, ai_graded_at = ?
+    WHERE id = ? AND status = 'submitted' AND ai_grading_status = 'processing'
+  `, [candidate.finalScore, candidate.summaryFeedback, new Date().toISOString(), candidate.studentId]);
+    if (savedStudent.rowCount !== 1) {
+        throw new Error('Refused to publish AI result: submitted student ownership check failed');
+    }
+}
 async function saveWave(tx, successes, failures) {
     for (const candidate of successes) {
-        const scoreCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
-        const feedbackCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
-        const ids = candidate.grades.map((grade) => grade.examQuestionId);
-        const savedQuestions = await tx.query(`
-      UPDATE exam_questions
-      SET ai_score = CASE id ${scoreCases} ELSE ai_score END,
-          ai_feedback = CASE id ${feedbackCases} ELSE ai_feedback END
-      WHERE student_id = ? AND id IN (${ids.map(() => '?').join(', ')})
-    `, [
-            ...candidate.grades.flatMap((grade) => [grade.examQuestionId, grade.score]),
-            ...candidate.grades.flatMap((grade) => [grade.examQuestionId, grade.feedback]),
-            candidate.studentId,
-            ...ids,
-        ]);
-        if (savedQuestions.rowCount !== candidate.grades.length) {
-            throw new Error(`Refused to publish AI result: expected ${candidate.grades.length} owned questions, updated ${savedQuestions.rowCount}`);
-        }
-        const savedStudent = await tx.query(`
-      UPDATE students
-      SET ai_final_score = ?, ai_summary_feedback = ?, ai_grading_status = 'completed',
-          ai_grading_error = NULL, ai_graded_at = ?
-      WHERE id = ? AND status = 'submitted'
-    `, [candidate.finalScore, candidate.summaryFeedback, new Date().toISOString(), candidate.studentId]);
-        if (savedStudent.rowCount !== 1) {
-            throw new Error('Refused to publish AI result: submitted student ownership check failed');
-        }
+        await publishCandidate(tx, candidate);
     }
     for (const failure of failures) {
         await tx.query(`
-      UPDATE students SET ai_grading_status = 'failed', ai_grading_error = ? WHERE id = ?
+      UPDATE students SET ai_grading_status = 'failed', ai_grading_error = ?
+      WHERE id = ? AND ai_grading_status = 'processing'
     `, [failure.error.slice(0, 1_000), failure.studentId]);
+    }
+}
+export async function gradeStudentManually(db, batchId, studentId, userId) {
+    const targetResult = await db.query(`
+    SELECT s.id, s.status, COALESCE(s.ai_grading_status, 'pending') AS ai_grading_status,
+           b.id AS batch_id, b.created_by, b.exam_type
+    FROM students s
+    JOIN batches b ON b.id = s.batch_id
+    WHERE s.id = ? AND b.id = ?
+  `, [studentId, batchId]);
+    const target = targetResult.rows[0];
+    if (!target)
+        throw new AiGradingError('Student not found in this batch', 404);
+    if (Number(target.created_by) !== userId)
+        throw new AiGradingError('Only the batch creator can run AI Grade', 403);
+    if (target.exam_type === 'quiz')
+        throw new AiGradingError('Quiz batches are scored without AI');
+    if (target.status !== 'submitted')
+        throw new AiGradingError('Only submitted students can be graded', 409);
+    if (target.ai_grading_status === 'processing')
+        throw new AiGradingError('AI grading is already running for this student', 409);
+    const previousStatus = String(target.ai_grading_status || 'pending');
+    const mode = previousStatus === 'completed' ? 'regrade' : 'initial';
+    if (!['pending', 'failed', 'completed'].includes(previousStatus)) {
+        throw new AiGradingError('Student AI grading state is not eligible', 409);
+    }
+    const config = await loadVerifiedConnection(db, userId);
+    const claimed = await db.query(`
+    UPDATE students
+    SET ai_grading_status = 'processing', ai_grading_error = NULL
+    WHERE id = ? AND batch_id = ? AND status = 'submitted'
+      AND COALESCE(ai_grading_status, 'pending') = ?
+  `, [studentId, batchId, previousStatus]);
+    if (claimed.rowCount !== 1)
+        throw new AiGradingError('AI grading state changed; please refresh and try again', 409);
+    try {
+        const safeBudgetMs = Math.max(30_000, Math.min(Number(process.env.AI_GRADE_SAFE_BUDGET_MS || 270_000), 290_000));
+        const questions = await loadStudentQuestions(db, batchId, studentId);
+        const candidate = await gradeStudent(config, studentId, questions, Date.now() + safeBudgetMs);
+        await db.withTransaction((tx) => publishCandidate(tx, candidate));
+        return { success: true, studentId, mode, status: 'completed', finalScore: candidate.finalScore };
+    }
+    catch (error) {
+        const message = String(error?.message || 'AI grading failed').slice(0, 1_000);
+        const restoredStatus = mode === 'regrade' ? 'completed' : 'failed';
+        await db.query(`
+      UPDATE students SET ai_grading_status = ?, ai_grading_error = ?
+      WHERE id = ? AND batch_id = ? AND ai_grading_status = 'processing'
+    `, [restoredStatus, message, studentId, batchId]);
+        throw new AiGradingError(message, 502);
     }
 }
 export async function gradeBatchManually(db, batchId, userId) {
@@ -240,7 +315,8 @@ export async function gradeBatchManually(db, batchId, userId) {
         throw new AiGradingError('AI grading is already running for this batch', 409);
     const studentsResult = await db.query(`
     SELECT id FROM students
-    WHERE batch_id = ? AND status = 'submitted' AND COALESCE(ai_grading_status, 'pending') <> 'completed'
+    WHERE batch_id = ? AND status = 'submitted'
+      AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
     ORDER BY id
   `, [batchId]);
     const studentIds = studentsResult.rows.map((row) => Number(row.id));
@@ -261,31 +337,19 @@ export async function gradeBatchManually(db, batchId, userId) {
             if (Date.now() + llmTimeoutMs + 10_000 >= deadline)
                 break;
             const wave = studentIds.slice(offset, offset + concurrency);
-            await db.query(`UPDATE students SET ai_grading_status = 'processing', ai_grading_error = NULL WHERE id IN (${wave.map(() => '?').join(', ')})`, wave);
-            const outcomes = await Promise.all(wave.map(async (studentId) => {
+            const claimedWave = [];
+            for (const studentId of wave) {
+                const claimedStudent = await db.query(`
+          UPDATE students SET ai_grading_status = 'processing', ai_grading_error = NULL
+          WHERE id = ? AND batch_id = ? AND status = 'submitted'
+            AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
+        `, [studentId, batchId]);
+                if (claimedStudent.rowCount === 1)
+                    claimedWave.push(studentId);
+            }
+            const outcomes = await Promise.all(claimedWave.map(async (studentId) => {
                 try {
-                    // Load one student's immutable input with explicit student + batch guards.
-                    // Do not preload a shared multi-student map: isolation matters more than
-                    // saving a handful of SELECTs for batches of roughly 25 students.
-                    const questionRows = await db.query(`
-            SELECT eq.id, eq.student_id, eq.question_order, eq.answer,
-                   q.question_sample, q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
-            FROM exam_questions eq
-            JOIN students s ON s.id = eq.student_id
-            JOIN question_bank q ON q.id = eq.question_id
-            WHERE eq.student_id = ? AND s.batch_id = ? AND s.status = 'submitted'
-            ORDER BY eq.question_order
-          `, [studentId, batchId]);
-                    const questions = questionRows.rows.map((row) => ({
-                        id: Number(row.id),
-                        studentId: Number(row.student_id),
-                        questionOrder: Number(row.question_order),
-                        question: String(row.question_sample || ''),
-                        answer: String(row.answer || ''),
-                        rubricMustHave: String(row.rubric_must_have || ''),
-                        rubricNiceToHave: String(row.rubric_nice_to_have || ''),
-                        rubricOptional: String(row.rubric_optional || ''),
-                    }));
+                    const questions = await loadStudentQuestions(db, batchId, studentId);
                     return { success: await gradeStudent(config, studentId, questions, deadline) };
                 }
                 catch (error) {
@@ -297,7 +361,7 @@ export async function gradeBatchManually(db, batchId, userId) {
             await db.withTransaction((tx) => saveWave(tx, successes, failures));
             completed += successes.length;
             failed += failures.length;
-            processed += wave.length;
+            processed += claimedWave.length;
             failureDetails.push(...failures);
         }
     }
