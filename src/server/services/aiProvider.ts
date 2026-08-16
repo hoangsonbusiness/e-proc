@@ -130,7 +130,11 @@ export async function callLlm(config: LlmConnectionConfig, request: LlmRequest):
   const timeoutMs = Math.max(1_000, Math.min(request.timeoutMs || 60_000, 120_000));
   const maxOutputTokens = Math.max(32, Math.min(request.maxOutputTokens || 8_000, 32_000));
   const temperature = Math.max(0, Math.min(request.temperature ?? 0.1, 2));
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    Pragma: 'no-cache',
+  };
   let url = config.baseUrl;
   let body: Record<string, unknown>;
 

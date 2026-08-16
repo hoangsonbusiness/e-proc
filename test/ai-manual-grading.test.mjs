@@ -417,15 +417,33 @@ test('manual grading falls back to result order when grading keys are unknown or
   ]);
 });
 
-test('manual grading rejects a stale response from a previous student request', () => {
-  assert.throws(() => validateGradingResponse(JSON.stringify({
+test('manual grading accepts plain q1/q2 keys even when the model rewrites the request token', () => {
+  const result = validateGradingResponse(JSON.stringify({
     request_token: 'student-1-request',
     results: [
-      { grading_key: 'q1', score: 1, feedback: 'Old result' },
-      { grading_key: 'q2', score: 1, feedback: 'Old result' },
+      { grading_key: 'q2', score: 1, feedback: 'Second result' },
+      { grading_key: 'q1', score: 0.5, feedback: 'First result' },
     ],
-    summary_feedback: 'Old summary',
-  }), questions, 'student-2-request'), /does not belong to the current grading request/);
+    summary_feedback: 'Summary',
+  }), questions, 'student-2-request');
+  assert.deepEqual(result.grades.map(({ examQuestionId, score }) => ({ examQuestionId, score })), [
+    { examQuestionId: 102, score: 0 },
+    { examQuestionId: 101, score: 0.5 },
+  ]);
+});
+
+test('manual grading falls back to response order when the model omits correlation fields', () => {
+  const result = validateGradingResponse(JSON.stringify({
+    results: [
+      { score: 0.4, feedback: 'First result' },
+      { score: 0.9, feedback: 'Second result' },
+    ],
+    summary_feedback: 'Summary',
+  }), questions, 'current-request-token');
+  assert.deepEqual(result.grades.map(({ examQuestionId, score }) => ({ examQuestionId, score })), [
+    { examQuestionId: 101, score: 0.4 },
+    { examQuestionId: 102, score: 0 },
+  ]);
 });
 
 test('manual grading accepts a response without request_token when all request-scoped grading keys match', () => {

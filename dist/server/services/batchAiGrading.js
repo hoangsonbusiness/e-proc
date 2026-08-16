@@ -47,10 +47,8 @@ function promptFor(questions, requestToken) {
 {"request_token":"${requestToken}","results":[{"grading_key":"${gradingKey(0, requestToken)}","score":0.75,"feedback":"..."}],"summary_feedback":"..."}
 
 Requirements:
-- request_token must exactly equal "${requestToken}".
-- results must contain every grading_key exactly once and no unknown keys.
-- copy grading_key verbatim from INPUT; do not replace it with question_order or another identifier.
-- if request_token is omitted by the model, every request-scoped grading_key is still mandatory.
+- when request_token is returned, it should exactly equal "${requestToken}".
+- copy grading_key verbatim from INPUT whenever possible.
 - keep results in exactly the same order as INPUT.
 - score must be a finite number from 0.00 to 1.00.
 - feedback must explain the score against the rubric.
@@ -65,7 +63,13 @@ export function validateGradingResponse(text, questions, expectedRequestToken) {
         throw new Error('LLM results must be an array');
     if (parsed.results.length !== questions.length)
         throw new Error('LLM returned a different number of results than questions');
-    const questionsByKey = new Map(questions.map((question, index) => [gradingKey(index, expectedRequestToken), question]));
+    const questionsByKey = new Map();
+    questions.forEach((question, index) => {
+        // Accept both the request-scoped key requested by the prompt and the short
+        // q1/q2 form commonly returned by models that simplify opaque identifiers.
+        questionsByKey.set(gradingKey(index, expectedRequestToken), question);
+        questionsByKey.set(gradingKey(index), question);
+    });
     const expectedIds = new Set(questions.map((question) => question.id));
     const questionsFromIdentifiers = parsed.results.map((item) => {
         const gradingKey = typeof item?.grading_key === 'string' ? item.grading_key.trim() : '';
@@ -78,13 +82,10 @@ export function validateGradingResponse(text, questions, expectedRequestToken) {
     });
     const identifierIds = questionsFromIdentifiers.map((question) => question?.id).filter((id) => id !== undefined);
     const identifiersAreCompleteAndUnique = identifierIds.length === questions.length && new Set(identifierIds).size === questions.length;
-    const requestTokenMatches = !!expectedRequestToken && parsed?.request_token === expectedRequestToken;
-    // Some custom models/gateways do not preserve per-question identifiers reliably.
-    // A response belongs to this request when either its token matches or every
-    // request-scoped grading key (or exact backend question ID) maps uniquely.
-    if (expectedRequestToken && !requestTokenMatches && !identifiersAreCompleteAndUnique) {
-        throw new Error('LLM response does not belong to the current grading request');
-    }
+    // The HTTP response is already paired with this student's awaited provider
+    // call. Some compatible/custom models omit or rewrite request_token and
+    // grading_key, so do not make correctness depend on an echoed nonce. Prefer
+    // complete unique identifiers; otherwise use the required INPUT order.
     if (!expectedRequestToken && !identifiersAreCompleteAndUnique) {
         throw new Error('LLM returned an unknown or duplicate grading key/question ID');
     }
