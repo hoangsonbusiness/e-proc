@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
+import { getStudentSession } from '../services/studentSession';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
@@ -105,11 +106,11 @@ function StudentExam() {
   // [Anti-Cheat v2] Dynamic watermark: cập nhật mỗi 30 giây để timestamp không bị freeze
   const [watermarkTime, setWatermarkTime] = useState(() => new Date());
 
-  const studentId = localStorage.getItem('studentId');
+  const studentId = getStudentSession('studentId');
   // [C-4] studentToken dùng để xác thực với backend (thay thế x-student-id header)
-  const studentToken = localStorage.getItem('studentToken');
-  const studentEmail = localStorage.getItem('studentEmail');
-  const recordMode = (localStorage.getItem('recordMode') || 'none') as 'none' | 'local' | 's3';
+  const studentToken = getStudentSession('studentToken');
+  const studentEmail = getStudentSession('studentEmail');
+  const recordMode = (getStudentSession('recordMode') || 'none') as 'none' | 'local' | 's3';
   const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
 
   useEffect(() => {
@@ -737,13 +738,13 @@ function StudentExam() {
         setTimerReady(true);
         // Nếu đây là resume (đã có timeLeft trước đó khác với giá trị mặc định)
         // và thời gian còn lại khác với duration đầy đủ → hiện thông báo resume
-        const fullDuration = parseInt(localStorage.getItem('duration') || '30') * 60;
+        const fullDuration = parseInt(getStudentSession('duration') || '30') * 60;
         if (wasAlreadyStarted || serverTimeRemaining < fullDuration - 5) {
           setResumeInfo({ timeLeft: serverTimeRemaining });
         }
       } else if (serverTimeRemaining === null) {
         // Fallback: server chưa có deadline (DB cũ chưa migrate)
-        const duration = parseInt(localStorage.getItem('duration') || '30');
+        const duration = parseInt(getStudentSession('duration') || '30');
         setTimeLeft(duration * 60);
         setTimerReady(true);
       }
@@ -835,7 +836,7 @@ function StudentExam() {
     // Password lấy lại từ localStorage (server đã cấp lúc verify, tái dùng đúng pass cũ).
     const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
     if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
-    const password = localStorage.getItem('recordingPassword');
+    const password = getStudentSession('recordingPassword');
     examRecorder.start({ mode: recordMode === 'none' ? 's3' : recordMode, password });
     examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
     setRecordingLost(false);

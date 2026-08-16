@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { studentApi } from '../services/api';
+import { clearStudentSession } from '../services/studentSession';
 import { ShieldCheck } from 'lucide-react';
 
 function StudentLogin() {
@@ -16,8 +17,9 @@ function StudentLogin() {
       return;
     }
 
-    // Clear localStorage trước khi verify để tránh dùng lại student_id cũ
-    localStorage.clear();
+    // Student state is tab-scoped so parallel test/candidate tabs cannot replace
+    // one another's JWT. Admin credentials remain untouched in localStorage.
+    clearStudentSession();
 
     setLoading(true);
     setError('');
@@ -25,8 +27,7 @@ function StudentLogin() {
     try {
       const res = await studentApi.verify(accessCode.trim());
       if (res.data.valid) {
-        // Clear localStorage first
-        localStorage.clear();
+        clearStudentSession();
         // Navigate to confirm page with state (not localStorage)
         navigate('/confirm', {
           state: {
