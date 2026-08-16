@@ -279,14 +279,18 @@ test('manual grading maps short grading keys back to database question IDs', () 
   ]);
 });
 
-test('manual grading rejects duplicate grading keys', () => {
-  assert.throws(() => validateGradingResponse(JSON.stringify({
+test('manual grading falls back to result order when grading keys are unknown or duplicated', () => {
+  const result = validateGradingResponse(JSON.stringify({
     results: [
-      { grading_key: 'q1', score: 1, feedback: 'First' },
-      { grading_key: 'q1', score: 0.5, feedback: 'Duplicate' },
+      { grading_key: 'unknown', score: 1, feedback: 'First' },
+      { grading_key: 'unknown', score: 0.5, feedback: 'Duplicate' },
     ],
     summary_feedback: 'Summary',
-  }), questions), /unknown or duplicate grading key/);
+  }), questions);
+  assert.deepEqual(result.grades.map(({ examQuestionId, score }) => ({ examQuestionId, score })), [
+    { examQuestionId: 101, score: 1 },
+    { examQuestionId: 102, score: 0 },
+  ]);
 });
 
 test('final score is normalized to ten and rounded to two decimals', () => {
@@ -298,7 +302,7 @@ test('manual grading rejects missing question results', () => {
   assert.throws(() => validateGradingResponse(JSON.stringify({
     results: [{ exam_question_id: 101, score: 1, feedback: 'Good' }],
     summary_feedback: 'Summary',
-  }), questions), /omitted/);
+  }), questions), /different number of results/);
 });
 
 test('custom connection fingerprint changes when any secret/config field changes', () => {

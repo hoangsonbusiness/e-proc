@@ -78,6 +78,7 @@ function promptFor(questions: GradingQuestion[]): string {
 Requirements:
 - results must contain every grading_key exactly once and no unknown keys.
 - copy grading_key verbatim from INPUT; do not replace it with question_order or another identifier.
+- keep results in exactly the same order as INPUT.
 - score must be a finite number from 0.00 to 1.00.
 - feedback must explain the score against the rubric.
 - summary_feedback must summarize this student's performance for the supplied questions.
@@ -89,20 +90,30 @@ ${JSON.stringify(payload)}`;
 export function validateGradingResponse(text: string, questions: GradingQuestion[]): { grades: QuestionGrade[]; summary: string } {
   const parsed = parseJsonObject(text);
   if (!Array.isArray(parsed?.results)) throw new Error('LLM results must be an array');
+  if (parsed.results.length !== questions.length) throw new Error('LLM returned a different number of results than questions');
   const questionsByKey = new Map(questions.map((question, index) => [`q${index + 1}`, question]));
   const expectedIds = new Set(questions.map((question) => question.id));
-  const seen = new Set<number>();
-  const grades: QuestionGrade[] = [];
-  for (const item of parsed.results) {
+  const questionsFromIdentifiers = parsed.results.map((item: any) => {
     const gradingKey = typeof item?.grading_key === 'string' ? item.grading_key.trim() : '';
     const legacyId = Number(item?.exam_question_id);
-    const question = gradingKey
-      ? questionsByKey.get(gradingKey)
-      : (Number.isInteger(legacyId) && expectedIds.has(legacyId)
-        ? questions.find((entry) => entry.id === legacyId)
-        : undefined);
+    if (gradingKey && questionsByKey.has(gradingKey)) return questionsByKey.get(gradingKey);
+    if (Number.isInteger(legacyId) && expectedIds.has(legacyId)) return questions.find((entry) => entry.id === legacyId);
+    return undefined;
+  });
+  const identifierIds = questionsFromIdentifiers.map((question) => question?.id).filter((id): id is number => id !== undefined);
+  const identifiersAreCompleteAndUnique = identifierIds.length === questions.length && new Set(identifierIds).size === questions.length;
+  // Some custom models/gateways do not preserve identifiers reliably. When that
+  // happens, the exact result count plus the prompt's order contract is the safe
+  // fallback; database IDs are assigned only by the backend.
+  const resolvedQuestions = identifiersAreCompleteAndUnique
+    ? questionsFromIdentifiers as GradingQuestion[]
+    : questions;
+  const seen = new Set<number>();
+  const grades: QuestionGrade[] = [];
+  for (const [index, item] of parsed.results.entries()) {
+    const question = resolvedQuestions[index];
     const rawScore = Number(item?.score);
-    if (!question || seen.has(question.id)) throw new Error('LLM returned an unknown or duplicate grading key/question ID');
+    if (!question || seen.has(question.id)) throw new Error('LLM result mapping is invalid');
     if (!Number.isFinite(rawScore) || rawScore < 0 || rawScore > 1) throw new Error('LLM returned a score outside 0..1');
     const score = question.answer.trim() ? Math.round(rawScore * 100) / 100 : 0;
     const feedback = String(item?.feedback || '').trim().slice(0, 5_000);
@@ -158,7 +169,7 @@ async function gradeChunkWithFallback(
     return { grades: validated.grades, summaries: [validated.summary] };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const canFallback = /context|token limit|too large|invalid json|json object|results must|unknown or duplicate|omitted|empty feedback|empty summary/i.test(message);
+    const canFallback = /context|token limit|too large|invalid json|json object|results must|different number|mapping is invalid|omitted|empty feedback|empty summary/i.test(message);
     if (questions.length <= 1 || !canFallback) throw error;
     const middle = Math.ceil(questions.length / 2);
     const left = await gradeChunkWithFallback(config, questions.slice(0, middle), deadline);
