@@ -121,6 +121,9 @@ export const adminApi = {
   
   getBatches: () =>
     api.get('/admin/batches'),
+
+  getPagedBatches: (params: { page: number; pageSize: number; includeBlueprint?: boolean }) =>
+    api.get('/admin/batches/paged', { params }),
   
   getBatch: (id: number) =>
     api.get(`/admin/batches/${id}`),
@@ -140,6 +143,9 @@ export const adminApi = {
   
   getStudents: (batchId: number) =>
     api.get(`/admin/batches/${batchId}/students`),
+
+  getPagedStudents: (batchId: number, params: { page: number; pageSize: number; search?: string }) =>
+    api.get(`/admin/batches/${batchId}/students/paged`, { params }),
   
   deleteStudent: (studentId: number) =>
     api.delete(`/admin/students/${studentId}`),

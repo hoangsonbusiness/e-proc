@@ -37,13 +37,5 @@ export default defineConfig({
     // Khóa tường minh: không phát sinh sourcemap (.map) → không khôi phục được source gốc.
     sourcemap: false,
     minify: 'esbuild',
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          // Tách Monaco Editor thành chunk riêng để lazy-load
-          'monaco-editor': ['@monaco-editor/react']
-        }
-      }
-    }
   }
 });

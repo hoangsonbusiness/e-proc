@@ -45,6 +45,7 @@ services:
       DB_POOL_MAX: "4"
       DB_CONNECT_TIMEOUT_MS: "15000"
       DB_CONNECT_ATTEMPTS: "5"
+      ALLOW_RUNTIME_SCHEMA_BOOTSTRAP: "true"
       JWT_SECRET: local-app-jwt-secret-at-least-thirty-two-characters
       SESSION_SECRET: local-session-secret-at-least-thirty-two-characters
       CRON_SECRET: local-cron-secret

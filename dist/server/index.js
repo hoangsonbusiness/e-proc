@@ -94,16 +94,29 @@ const startupReady = dbReady
 let startupResolved = false;
 let startupError = null;
 startupReady.then(() => { startupResolved = true; }, (err) => { startupError = err instanceof Error ? err : new Error(String(err)); console.error('[startup] FAILED:', startupError.message); });
-async function requireDbReady(_req, res, next) {
+function trackAdminRequestStart(_req, res, next) {
+    res.locals.adminRequestStartedAt = performance.now();
+    res.locals.instanceUptimeAtStart = Math.round(process.uptime() * 1000);
+    res.locals.startupWaitMs = 0;
+    next();
+}
+async function requireDbReady(req, res, next) {
     if (startupResolved)
         return next();
     if (startupError)
         return res.status(503).json({ error: 'Service not ready: startup failed' });
+    const waitStartedAt = performance.now();
     try {
         await startupReady;
+        if (req.originalUrl.startsWith('/api/admin')) {
+            res.locals.startupWaitMs = performance.now() - waitStartedAt;
+        }
         next();
     }
     catch {
+        if (req.originalUrl.startsWith('/api/admin')) {
+            res.locals.startupWaitMs = performance.now() - waitStartedAt;
+        }
         res.status(503).json({ error: 'Service not ready: startup failed' });
     }
 }
@@ -114,7 +127,7 @@ function cronOrAdminAuth(req, res, next) {
         return next();
     return authMiddleware(req, res, next);
 }
-app.use('/api/admin', requireDbReady, adminRoutes);
+app.use('/api/admin', trackAdminRequestStart, requireDbReady, adminRoutes);
 app.use('/api/student', requireDbReady, studentRoutes);
 app.get('/api/health', (_req, res) => {
     // [P2-review] Readiness probe: CHỈ trả 200 khi startup thực sự xong. Pending → 503 not_ready,

@@ -114,13 +114,27 @@ startupReady.then(
   (err) => { startupError = err instanceof Error ? err : new Error(String(err)); console.error('[startup] FAILED:', startupError.message); }
 );
 
-async function requireDbReady(_req: express.Request, res: express.Response, next: express.NextFunction) {
+function trackAdminRequestStart(_req: express.Request, res: express.Response, next: express.NextFunction) {
+  res.locals.adminRequestStartedAt = performance.now();
+  res.locals.instanceUptimeAtStart = Math.round(process.uptime() * 1000);
+  res.locals.startupWaitMs = 0;
+  next();
+}
+
+async function requireDbReady(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (startupResolved) return next();
   if (startupError) return res.status(503).json({ error: 'Service not ready: startup failed' });
+  const waitStartedAt = performance.now();
   try {
     await startupReady;
+    if (req.originalUrl.startsWith('/api/admin')) {
+      res.locals.startupWaitMs = performance.now() - waitStartedAt;
+    }
     next();
   } catch {
+    if (req.originalUrl.startsWith('/api/admin')) {
+      res.locals.startupWaitMs = performance.now() - waitStartedAt;
+    }
     res.status(503).json({ error: 'Service not ready: startup failed' });
   }
 }
@@ -132,7 +146,7 @@ function cronOrAdminAuth(req: express.Request, res: express.Response, next: expr
   return authMiddleware(req, res, next);
 }
 
-app.use('/api/admin', requireDbReady, adminRoutes);
+app.use('/api/admin', trackAdminRequestStart, requireDbReady, adminRoutes);
 app.use('/api/student', requireDbReady, studentRoutes);
 
 app.get('/api/health', (_req, res) => {

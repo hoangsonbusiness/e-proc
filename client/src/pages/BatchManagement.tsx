@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import { getQuestionCatalogSummaryCached } from '../services/adminCatalogCache';
 import {
   ArrowLeft,
   BarChart3,
@@ -128,11 +129,16 @@ const normalizeBatchBlueprint = (blueprint: unknown): NormalizedBatchBlueprint =
 function BatchManagement() {
   const { isAdmin, userId } = useAuth();
   const createFormRef = useRef<HTMLDivElement>(null);
+  const catalogRequestRef = useRef<Promise<void> | null>(null);
   const [batches, setBatches] = useState<any[]>([]);
+  const [batchTotal, setBatchTotal] = useState(0);
+  const [batchTotalPages, setBatchTotalPages] = useState(1);
   const [modules, setModules] = useState<string[]>([]);
   const [moduleStats, setModuleStats] = useState<ModuleStats[]>([]);
   const [typeStats, setTypeStats] = useState<TypeStats[]>([]);
   const [moduleTypeStats, setModuleTypeStats] = useState<ModuleTypeStats[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   // Pagination
   const [batchPageSize, setBatchPageSize] = useState<BatchPageSize>(10);
   const [batchCurrentPage, setBatchCurrentPage] = useState(1);
@@ -217,12 +223,7 @@ function BatchManagement() {
 
   useEffect(() => {
     loadBatches();
-    loadCatalogSummary();
-    adminApi.getAISettings()
-      .then((response) => setAiSettingsVerified(response.data?.testStatus === 'verified'))
-      .catch(() => setAiSettingsVerified(false));
-  }, []);
-
+  }, [batchCurrentPage, batchPageSize]);
 
   useEffect(() => {
     if (modules.length > 0 && formData.blueprint.length === 0) {
@@ -237,23 +238,45 @@ function BatchManagement() {
 
   const loadBatches = async () => {
     try {
-      const res = await adminApi.getBatches();
-      setBatches(res.data);
+      const res = await adminApi.getPagedBatches({
+        page: batchCurrentPage,
+        pageSize: batchPageSize,
+        includeBlueprint: true,
+      });
+      setBatches(res.data.items);
+      setBatchTotal(Number(res.data.total) || 0);
+      setBatchTotalPages(Number(res.data.totalPages) || 1);
+      setAiSettingsVerified(Boolean(res.data.aiSettingsVerified));
+      if (res.data.page !== batchCurrentPage) setBatchCurrentPage(res.data.page);
     } catch (error) {
       console.error(error);
     }
   };
 
   const loadCatalogSummary = async () => {
+    setCatalogLoading(true);
     try {
-      const res = await adminApi.getQuestionCatalogSummary();
-      setModules(res.data.modules);
-      setModuleStats(res.data.moduleStats);
-      setTypeStats(res.data.typeStats);
-      setModuleTypeStats(res.data.moduleTypeStats);
+      const data = await getQuestionCatalogSummaryCached();
+      setModules(data.modules);
+      setModuleStats(data.moduleStats);
+      setTypeStats(data.typeStats);
+      setModuleTypeStats(data.moduleTypeStats);
+      setCatalogLoaded(true);
     } catch (error) {
       console.error('[BatchManagement] loadCatalogSummary error:', error);
+    } finally {
+      setCatalogLoading(false);
     }
+  };
+
+  const ensureCatalogSummary = () => {
+    if (catalogLoaded) return Promise.resolve();
+    if (!catalogRequestRef.current) {
+      catalogRequestRef.current = loadCatalogSummary().finally(() => {
+        catalogRequestRef.current = null;
+      });
+    }
+    return catalogRequestRef.current;
   };
 
   // ─── Blueprint helpers (Create form) ────────────────────────────────────────
@@ -350,7 +373,8 @@ function BatchManagement() {
 
   // ─── Handlers ───────────────────────────────────────────────────────────────
 
-  const handleEditBatch = (batch: any) => {
+  const handleEditBatch = async (batch: any) => {
+    await ensureCatalogSummary();
     const { mode, moduleItems, typeItems } = normalizeBatchBlueprint(batch.blueprint);
 
     setEditBlueprintMode(mode);
@@ -364,7 +388,8 @@ function BatchManagement() {
     });
   };
 
-  const handleCloneBatch = (batch: any) => {
+  const handleCloneBatch = async (batch: any) => {
+    await ensureCatalogSummary();
     const { mode, moduleItems, typeItems } = normalizeBatchBlueprint(batch.blueprint);
     const sourceRecordMode = batch.record_mode;
     const recordMode = isAdmin && ['none', 'local', 's3'].includes(sourceRecordMode)
@@ -583,13 +608,6 @@ function BatchManagement() {
     : validateBlueprintAgainstStats(editingBatch?.blueprint || []);
 
   // ─── Batch pagination derived state ──────────────────────────────────────────
-
-  const batchTotalPages = Math.max(1, Math.ceil(batches.length / batchPageSize));
-
-  const paginatedBatches = useMemo(() =>
-    batches.slice((batchCurrentPage - 1) * batchPageSize, batchCurrentPage * batchPageSize),
-    [batches, batchCurrentPage, batchPageSize]
-  );
 
   const handleBatchPageSizeChange = (size: BatchPageSize) => {
     setBatchPageSize(size);
@@ -820,7 +838,10 @@ function BatchManagement() {
             onClick={() => {
               const nextShowForm = !showForm;
               setShowForm(nextShowForm);
-              if (nextShowForm) setIsCreateBlueprintExpanded(false);
+              if (nextShowForm) {
+                setIsCreateBlueprintExpanded(false);
+                void ensureCatalogSummary();
+              }
             }}
             className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm ${showForm ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
           >
@@ -959,7 +980,7 @@ function BatchManagement() {
                   </div>
 
                   {modules.length === 0 && blueprintMode === 'module' ? (
-              <p className="error">Please import questions first to configure the blueprint.</p>
+              <p className={catalogLoading ? 'text-slate-500' : 'error'}>{catalogLoading ? 'Loading question catalog...' : 'Please import questions first to configure the blueprint.'}</p>
             ) : typeStats.length === 0 && blueprintMode === 'type' ? (
               <p className="error">Please import questions first to configure the blueprint.</p>
             ) : blueprintMode === 'module' ? (
@@ -1250,7 +1271,7 @@ function BatchManagement() {
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="p-6 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
           <h3 className="text-lg font-bold text-slate-900 m-0 border-none pb-0">
-            Batches List <span className="text-slate-400 font-normal ml-1">({batches.length} total)</span>
+            Batches List <span className="text-slate-400 font-normal ml-1">({batchTotal} total)</span>
           </h3>
           <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">
             <span className="text-sm font-medium text-slate-600">Show:</span>
@@ -1279,7 +1300,7 @@ function BatchManagement() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedBatches.map(batch => {
+              {batches.map(batch => {
                 const editable = canEditBatch(batch);
                 return (
                   <tr key={batch.id} className="hover:bg-slate-50/50 transition-colors">
@@ -1338,9 +1359,7 @@ function BatchManagement() {
                             <button
                               onClick={() => {
                                 if (confirm('Delete this batch? All students and exam data will be lost.')) {
-                                  adminApi.deleteBatch(batch.id).then(() => {
-                                    setBatches(prev => prev.filter(b => b.id !== batch.id));
-                                  });
+                                  adminApi.deleteBatch(batch.id).then(() => loadBatches());
                                 }
                               }}
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-700 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
@@ -1376,7 +1395,7 @@ function BatchManagement() {
           <div className="p-4 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 bg-slate-50/50">
             <span className="text-sm text-slate-500 font-medium">
               Page {batchCurrentPage} of {batchTotalPages} <span className="mx-2 text-slate-300">|</span> 
-              Showing {(batchCurrentPage - 1) * batchPageSize + 1} to {Math.min(batchCurrentPage * batchPageSize, batches.length)} of {batches.length}
+              Showing {(batchCurrentPage - 1) * batchPageSize + 1} to {Math.min(batchCurrentPage * batchPageSize, batchTotal)} of {batchTotal}
             </span>
             <div className="flex gap-1">
               <button
@@ -1562,7 +1581,7 @@ function BatchManagement() {
 
                     {editBlueprintMode === 'module' ? (
                 modules.length === 0 ? (
-                  <div className="p-4 bg-red-50 text-red-700 rounded-xl border border-red-200">No modules available</div>
+                  <div className={`p-4 rounded-xl border ${catalogLoading ? 'bg-slate-50 text-slate-600 border-slate-200' : 'bg-red-50 text-red-700 border-red-200'}`}>{catalogLoading ? 'Loading question catalog...' : 'No modules available'}</div>
                 ) : (
                   <>
                     <div className="overflow-x-auto bg-white rounded-xl border border-blue-100 shadow-sm">

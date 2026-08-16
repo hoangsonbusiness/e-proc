@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
-import { Users, ArrowLeft, Upload, FileDown, Trash2, Mail, Hash, Activity } from 'lucide-react';
+import { Users, ArrowLeft, Upload, FileDown, Trash2, Mail, Hash, Activity, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 
 function StudentManagement() {
   const { id } = useParams<{ id: string }>();
@@ -12,25 +12,34 @@ function StudentManagement() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [isError, setIsError] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const [total, setTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
 
   useEffect(() => {
-    loadBatch();
-    loadStudents();
-  }, [id]);
+    const timeout = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
 
-  const loadBatch = async () => {
-    try {
-      const res = await adminApi.getBatch(parseInt(id!));
-      setBatch(res.data);
-    } catch (error) {
-      console.error(error);
-    }
-  };
+  useEffect(() => {
+    loadStudents();
+  }, [id, currentPage, pageSize, debouncedSearch]);
 
   const loadStudents = async () => {
     try {
-      const res = await adminApi.getStudents(parseInt(id!));
-      setStudents(res.data);
+      const res = await adminApi.getPagedStudents(parseInt(id!), {
+        page: currentPage,
+        pageSize,
+        search: debouncedSearch || undefined,
+      });
+      setBatch(res.data.batch);
+      setStudents(res.data.items);
+      setTotal(Number(res.data.total) || 0);
+      setTotalPages(Number(res.data.totalPages) || 1);
+      if (res.data.page !== currentPage) setCurrentPage(res.data.page);
     } catch (error) {
       console.error(error);
     }
@@ -46,7 +55,7 @@ function StudentManagement() {
       await adminApi.importStudents(parseInt(id!), emailList);
       setMessage(`Successfully imported ${emailList.length} students`);
       setEmails('');
-      loadStudents();
+      await loadStudents();
     } catch (error: any) {
       setIsError(true);
       setMessage('Error: ' + (error.response?.data?.error || error.message));
@@ -73,7 +82,7 @@ function StudentManagement() {
     if (!confirm(`Are you sure you want to delete ${email}? This will also delete all exam data associated with this student.`)) return;
     try {
       await adminApi.deleteStudent(studentId);
-      loadStudents();
+      await loadStudents();
     } catch (error: any) {
       alert('Error: ' + (error.response?.data?.error || error.message));
     }
@@ -153,18 +162,38 @@ function StudentManagement() {
                 <Users size={18} className="text-slate-500" />
                 Students List
                 <span className="bg-slate-200 text-slate-700 py-0.5 px-2 rounded-full text-xs font-medium ml-2">
-                  {students.length}
+                  {total}
                 </span>
               </h3>
-              
-              <button 
-                onClick={handleExport} 
-                disabled={students.length === 0} 
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50"
-              >
-                <FileDown size={14} />
-                Export Codes
-              </button>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    value={search}
+                    onChange={(event) => { setSearch(event.target.value); setCurrentPage(1); }}
+                    placeholder="Search email"
+                    className="pl-9 pr-3 py-1.5 w-52 bg-white border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <select
+                  value={pageSize}
+                  onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}
+                  className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-700"
+                >
+                  <option value={10}>10 / page</option>
+                  <option value={25}>25 / page</option>
+                  <option value={50}>50 / page</option>
+                </select>
+                <button
+                  onClick={handleExport}
+                  disabled={total === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50"
+                >
+                  <FileDown size={14} />
+                  Export Codes
+                </button>
+              </div>
             </div>
             
             <div className="overflow-x-auto">
@@ -239,6 +268,31 @@ function StudentManagement() {
                 </tbody>
               </table>
             </div>
+            {totalPages > 1 && (
+              <div className="px-5 py-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between gap-4">
+                <span className="text-sm text-slate-500">
+                  Page {currentPage} of {totalPages} · {total} students
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={currentPage === 1}
+                    className="p-2 bg-white border border-slate-200 rounded-lg text-slate-600 disabled:opacity-40"
+                    aria-label="Previous page"
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <button
+                    onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))}
+                    disabled={currentPage === totalPages}
+                    className="p-2 bg-white border border-slate-200 rounded-lg text-slate-600 disabled:opacity-40"
+                    aria-label="Next page"
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

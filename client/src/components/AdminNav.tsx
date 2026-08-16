@@ -1,6 +1,7 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { LayoutDashboard, Database, FolderKanban, Settings, Users } from 'lucide-react';
+import { prefetchAdminRoute } from '../services/adminRouteLoaders';
 
 function AdminNav() {
   const { isAdmin } = useAuth();
@@ -27,6 +28,8 @@ function AdminNav() {
           <Link
             key={item.path}
             to={item.path}
+            onMouseEnter={() => prefetchAdminRoute(item.path)}
+            onFocus={() => prefetchAdminRoute(item.path)}
             className={`
               flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg transition-all
               ${isActive 

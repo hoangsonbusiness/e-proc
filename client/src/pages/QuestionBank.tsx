@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import { getQuestionCatalogSummaryCached, invalidateQuestionCatalogSummary } from '../services/adminCatalogCache';
 import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight, Pencil, Plus } from 'lucide-react';
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
@@ -62,8 +63,8 @@ function QuestionBank() {
 
   const loadModules = async () => {
     try {
-      const res = await adminApi.getQuestionCatalogSummary();
-      setModules(res.data.modules);
+      const data = await getQuestionCatalogSummaryCached();
+      setModules(data.modules);
     } catch (error) {
       console.error(error);
     }
@@ -87,6 +88,7 @@ function QuestionBank() {
         setIsError(true);
       }
       setMessage(msg);
+      invalidateQuestionCatalogSummary();
       await Promise.all([loadQuestions(), loadModules()]);
       setFile(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -101,6 +103,7 @@ function QuestionBank() {
     if (!confirm('Delete this question?')) return;
     try {
       await adminApi.deleteQuestion(id);
+      invalidateQuestionCatalogSummary();
       await Promise.all([loadQuestions(), loadModules()]);
     } catch (error) {
       console.error(error);
@@ -113,6 +116,7 @@ function QuestionBank() {
     setBulkDeleting(true);
     try {
       await adminApi.deleteQuestions(Array.from(selectedIds));
+      invalidateQuestionCatalogSummary();
       await Promise.all([loadQuestions(), loadModules()]);
       setSelectedIds(new Set());
     } catch (error: any) {

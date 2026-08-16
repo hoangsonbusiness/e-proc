@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -11,6 +11,7 @@ type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
+  const [totalPages, setTotalPages] = useState(1);
   const { logout } = useAuth();
 
   // Phân trang
@@ -55,27 +56,21 @@ function AdminDashboard() {
 
   useEffect(() => {
     loadBatches();
-  }, []);
+  }, [currentPage, pageSize]);
 
   const loadBatches = async () => {
     try {
-      const res = await adminApi.getBatches();
-      setBatches(res.data);
-      const students = res.data.reduce((sum: number, b: any) => sum + Number(b.students_count || 0), 0);
-      setStats({ totalBatches: res.data.length, totalStudents: students });
+      const res = await adminApi.getPagedBatches({ page: currentPage, pageSize });
+      setBatches(res.data.items);
+      setStats({ totalBatches: Number(res.data.total) || 0, totalStudents: Number(res.data.totalStudents) || 0 });
+      setTotalPages(Number(res.data.totalPages) || 1);
+      if (res.data.page !== currentPage) setCurrentPage(res.data.page);
     } catch (error) {
       console.error(error);
     }
   };
 
   // ── Pagination ──────────────────────────────────────────────────────────
-  const totalPages = Math.max(1, Math.ceil(batches.length / pageSize));
-
-  const paginatedBatches = useMemo(() =>
-    batches.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [batches, currentPage, pageSize]
-  );
-
   const handlePageSizeChange = (size: PageSize) => {
     setPageSize(size);
     setCurrentPage(1);
@@ -196,7 +191,7 @@ function AdminDashboard() {
           <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2 m-0 border-none pb-0">
             Recent Assessment Batches
             <span className="bg-slate-100 text-slate-600 py-0.5 px-2.5 rounded-full text-xs font-medium">
-              {batches.length} total
+              {stats.totalBatches} total
             </span>
           </h3>
           <div className="flex items-center gap-2">
@@ -223,7 +218,7 @@ function AdminDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedBatches.map(batch => (
+              {batches.map(batch => (
                 <tr key={batch.id} className="hover:bg-slate-50/50 transition-colors">
                   <td className="py-4 px-4 text-slate-800 font-medium">{batch.name}</td>
                   <td className="py-4 px-4 text-slate-600">
@@ -267,7 +262,7 @@ function AdminDashboard() {
         {totalPages > 1 && (
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6 pt-4 border-t border-slate-100">
             <span className="text-sm text-slate-500">
-              Showing <span className="font-medium text-slate-900">{(currentPage - 1) * pageSize + 1}</span> to <span className="font-medium text-slate-900">{Math.min(currentPage * pageSize, batches.length)}</span> of <span className="font-medium text-slate-900">{batches.length}</span> results
+              Showing <span className="font-medium text-slate-900">{(currentPage - 1) * pageSize + 1}</span> to <span className="font-medium text-slate-900">{Math.min(currentPage * pageSize, stats.totalBatches)}</span> of <span className="font-medium text-slate-900">{stats.totalBatches}</span> results
             </span>
             <div className="flex gap-1.5 items-center">
               <button

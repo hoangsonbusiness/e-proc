@@ -5,7 +5,6 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { studentAuthMiddleware } from '../middleware/studentAuth.js';
-import { createRecordingUploadUrl, inspectRecordingObject, isS3Configured } from '../services/s3.js';
 import rateLimit from 'express-rate-limit';
 import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTracker.js';
 import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError, ExamGuardError } from '../services/examGuard.js';
@@ -13,6 +12,11 @@ import { parseBlueprintCompat } from '../services/blueprint.js';
 import { persistViolation, computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
 import { isClientReportableViolation, isServerOwnedViolation } from '../services/violationPolicy.js';
 import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEnforcer.js';
+let s3ServicePromise = null;
+function loadS3Service() {
+    s3ServicePromise ||= import('../services/s3.js');
+    return s3ServicePromise;
+}
 dotenv.config();
 // Phải khớp chính xác với DB layer: có DATABASE_URL => PostgreSQL, không có => SQLite.
 // Dựa vào NODE_ENV làm local PostgreSQL bỏ qua FOR UPDATE và tái tạo race violation.
@@ -854,6 +858,7 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req, res
 // batchId/studentId lấy từ JWT — client KHÔNG thể chỉ định để ghi đè video người khác.
 router.post('/exam/recording-url', studentAuthMiddleware, async (req, res) => {
     try {
+        const { createRecordingUploadUrl, isS3Configured } = await loadS3Service();
         if (!isS3Configured()) {
             return res.status(503).json({ error: 'S3 not configured' });
         }
@@ -904,6 +909,7 @@ router.post('/exam/recording-url', studentAuthMiddleware, async (req, res) => {
 });
 router.post('/exam/recording-complete', studentAuthMiddleware, async (req, res) => {
     try {
+        const { inspectRecordingObject } = await loadS3Service();
         const studentId = req.studentPayload.studentId;
         const batchId = req.studentPayload.batchId;
         const partIndex = Number(req.body?.partIndex);

@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import multer from 'multer';
-import * as XLSX from 'xlsx';
 import db from '../db/postgres.js';
 import { normalizeUnicode } from '../../utils/string.js';
 import dotenv from 'dotenv';
@@ -17,9 +16,15 @@ import { loadBatchExportData, loadBatchResultsLegacy, loadBatchResultsSummary, l
 import { insertQuestion, isDuplicateQuestionIdError, isQuestionIdAvailable, loadPagedQuestions, loadQuestionCatalogSummary, QuestionValidationError, validateQuestionCreate, validateQuestionId, validateQuestionUpdate, } from '../services/adminQuestions.js';
 import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
 import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
+import { loadPagedBatches, loadPagedStudents } from '../services/adminLists.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+let xlsxModulePromise = null;
+function loadXlsx() {
+    xlsxModulePromise ||= import('xlsx');
+    return xlsxModulePromise;
+}
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
 const router = Router();
 const upload = multer({
@@ -30,10 +35,21 @@ const upload = multer({
 // than ADMIN_SLOW_REQUEST_MS (default 1000 ms) are logged to keep production noise bounded.
 router.use((req, res, next) => {
     const requestId = String(req.headers['x-request-id'] || crypto.randomUUID());
-    const startedAt = performance.now();
-    const instanceUptimeAtStart = Math.round(process.uptime() * 1000);
+    const startedAt = Number(res.locals.adminRequestStartedAt) || performance.now();
+    const startupWaitMs = Number(res.locals.startupWaitMs) || 0;
+    const instanceUptimeAtStart = Number(res.locals.instanceUptimeAtStart)
+        || Math.round(process.uptime() * 1000);
     res.setHeader('x-request-id', requestId);
     runWithDbMetrics((metrics) => {
+        const originalWriteHead = res.writeHead;
+        res.writeHead = function (...args) {
+            if (!res.headersSent) {
+                const totalMs = performance.now() - startedAt;
+                const appMs = Math.max(0, totalMs - startupWaitMs);
+                res.setHeader('Server-Timing', `startup;dur=${startupWaitMs.toFixed(1)}, db;dur=${metrics.dbMs.toFixed(1)}, app;dur=${appMs.toFixed(1)}`);
+            }
+            return originalWriteHead.apply(res, args);
+        };
         res.once('finish', () => {
             const totalMs = performance.now() - startedAt;
             const slowThreshold = Math.max(0, Number(process.env.ADMIN_SLOW_REQUEST_MS || 1000));
@@ -45,6 +61,8 @@ router.use((req, res, next) => {
                 path: req.originalUrl.split('?')[0],
                 status: res.statusCode,
                 totalMs: Math.round(totalMs * 10) / 10,
+                startupWaitMs: Math.round(startupWaitMs * 10) / 10,
+                handlerMs: Math.round(Math.max(0, totalMs - startupWaitMs) * 10) / 10,
                 dbMs: Math.round(metrics.dbMs * 10) / 10,
                 queryCount: metrics.queryCount,
                 responseBytes: Number(res.getHeader('content-length') || 0),
@@ -315,6 +333,7 @@ function extractRubric(rubricStr) {
 }
 router.post('/questions/import', upload.single('file'), async (req, res) => {
     try {
+        const XLSX = await loadXlsx();
         if (!req.file) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
@@ -423,6 +442,7 @@ router.post('/questions/import', upload.single('file'), async (req, res) => {
 // Score: điểm câu (mặc định 1). Option để trống → câu ít lựa chọn hơn.
 router.post('/questions/quiz/import', upload.single('file'), async (req, res) => {
     try {
+        const XLSX = await loadXlsx();
         if (!req.file) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
@@ -914,6 +934,31 @@ router.get('/batches', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.get('/batches/paged', async (req, res) => {
+    try {
+        const page = Number(req.query.page || 1);
+        const pageSize = Number(req.query.pageSize || 10);
+        const includeBlueprint = req.query.includeBlueprint === 'true';
+        const allowedPageSizes = new Set([10, 25, 50]);
+        if (!Number.isInteger(page) || page < 1)
+            return res.status(400).json({ error: 'Invalid page' });
+        if (!allowedPageSizes.has(pageSize))
+            return res.status(400).json({ error: 'Invalid page size' });
+        const [result, aiSetting] = await Promise.all([
+            loadPagedBatches(db, { page, pageSize, includeBlueprint }),
+            includeBlueprint && req.adminUser?.id
+                ? getOwnedAiSetting(db, req.adminUser.id)
+                : Promise.resolve({ testStatus: 'not_requested' }),
+        ]);
+        return res.json({
+            ...result,
+            aiSettingsVerified: aiSetting.testStatus === 'verified',
+        });
+    }
+    catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+});
 router.get('/batches/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -1194,6 +1239,28 @@ router.get('/batches/:id/students', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+router.get('/batches/:id/students/paged', async (req, res) => {
+    try {
+        const batchId = Number(req.params.id);
+        const page = Number(req.query.page || 1);
+        const pageSize = Number(req.query.pageSize || 25);
+        const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 200) : '';
+        const allowedPageSizes = new Set([10, 25, 50]);
+        if (!Number.isInteger(batchId) || batchId < 1)
+            return res.status(400).json({ error: 'Invalid batch id' });
+        if (!Number.isInteger(page) || page < 1)
+            return res.status(400).json({ error: 'Invalid page' });
+        if (!allowedPageSizes.has(pageSize))
+            return res.status(400).json({ error: 'Invalid page size' });
+        const result = await loadPagedStudents(db, batchId, { page, pageSize, search });
+        if (!result)
+            return res.status(404).json({ error: 'Batch not found' });
+        return res.json(result);
+    }
+    catch (error) {
+        return res.status(500).json({ error: error.message });
+    }
+});
 router.delete('/students/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -1208,6 +1275,7 @@ router.delete('/students/:id', async (req, res) => {
 });
 router.get('/batches/:id/students/export', async (req, res) => {
     try {
+        const XLSX = await loadXlsx();
         const { id } = req.params;
         const result = await db.query('SELECT email, access_code FROM students WHERE batch_id = ?', [parseInt(id)]);
         const students = result.rows;
@@ -1257,11 +1325,28 @@ router.get('/batches/:id/results/summary', async (req, res) => {
             return res.status(400).json({ error: 'Invalid page' });
         if (!allowedPageSizes.has(requestedPageSize))
             return res.status(400).json({ error: 'Invalid page size' });
-        const result = await loadBatchResultsSummary(db, batchId, {
-            page: requestedPage,
-            pageSize: requestedPageSize,
+        const userId = req.adminUser?.id;
+        const [result, batchResult, aiSetting] = await Promise.all([
+            loadBatchResultsSummary(db, batchId, {
+                page: requestedPage,
+                pageSize: requestedPageSize,
+            }),
+            db.query(`
+        SELECT id, name, duration, record_mode, exam_type, created_by
+        FROM batches WHERE id = ?
+      `, [batchId]),
+            userId ? getOwnedAiSetting(db, userId) : Promise.resolve({ testStatus: 'not_configured' }),
+        ]);
+        const batch = batchResult.rows[0];
+        if (!batch)
+            return res.status(404).json({ error: 'Batch not found' });
+        res.json({
+            ...result,
+            batch,
+            canAiGrade: batch.exam_type === 'essay'
+                && Number(batch.created_by) === Number(userId)
+                && aiSetting.testStatus === 'verified',
         });
-        res.json(result);
     }
     catch (error) {
         res.status(500).json({ error: error.message });
@@ -1361,6 +1446,7 @@ router.put('/results/:studentId', async (req, res) => {
 });
 router.get('/batches/:id/results/export', async (req, res) => {
     try {
+        const XLSX = await loadXlsx();
         const { id } = req.params;
         const batchId = Number(id);
         if (!Number.isInteger(batchId) || batchId < 1)

@@ -39,6 +39,7 @@ try {
     "const r=await fetch('http://127.0.0.1:3001/');",
     "const body=await r.text();",
     "if(!r.ok||!body.includes('id=\"root\"'))throw new Error(`Unexpected frontend response: ${r.status}`);",
+    "if(body.includes('monaco-editor')||body.includes('StudentExam'))throw new Error('Admin/student entry eagerly preloads exam code');",
   ].join('')]);
 
   console.log('\n[4/6] Running the complete default regression suite inside the app image...');

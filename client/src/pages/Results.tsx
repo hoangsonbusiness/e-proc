@@ -34,27 +34,11 @@ function Results() {
     setSelectedStudent(null);
     setViolationDetail(null);
     setCurrentPage(1);
-    loadBatch();
   }, [id]);
 
   useEffect(() => {
     loadResults();
   }, [id, currentPage, pageSize]);
-
-  useEffect(() => {
-    adminApi.getAISettings()
-      .then((response) => setAiSettingsVerified(response.data?.testStatus === 'verified'))
-      .catch(() => setAiSettingsVerified(false));
-  }, [id]);
-
-  const loadBatch = async () => {
-    try {
-      const res = await adminApi.getBatch(parseInt(id!));
-      setBatch(res.data);
-    } catch (error) {
-      console.error(error);
-    }
-  };
 
   const loadResults = async () => {
     const requestId = ++summaryRequestRef.current;
@@ -63,6 +47,8 @@ function Results() {
       const res = await adminApi.getResultsSummary(parseInt(id!), currentPage, pageSize);
       if (requestId !== summaryRequestRef.current) return;
       setResults(res.data.items);
+      setBatch(res.data.batch);
+      setAiSettingsVerified(Boolean(res.data.canAiGrade));
       setTotal(Number(res.data.total) || 0);
       setTotalPages(Number(res.data.totalPages) || 1);
       if (res.data.page !== currentPage) setCurrentPage(res.data.page);
@@ -81,7 +67,11 @@ function Results() {
     setDetailLoadingStudentId(studentId);
     try {
       const response = await adminApi.getStudentResultDetail(studentId);
-      const detail = { ...result, ...response.data, student: result.student };
+      const detail = {
+        ...result,
+        ...response.data,
+        student: { ...result.student, ...response.data.student },
+      };
       detailCacheRef.current.set(studentId, detail);
       return detail;
     } finally {

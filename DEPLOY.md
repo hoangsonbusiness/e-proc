@@ -191,6 +191,10 @@ Chạy đúng thứ tự:
    - Thêm timestamp/token lease cho mỗi student grading attempt và index recovery.
    - Mong đợi verification trả 2 column và index `idx_students_ai_grading_lease`.
    - Chỉ chạy khi không có AI Grade request đang hoạt động.
+9. `migrations/20260818_admin_startup_fast_path.sql`
+   - Tạo `app_schema_state` và đánh dấu schema version `1` để Vercel cold start bỏ qua runtime DDL.
+   - Phải chạy sau toàn bộ migration phía trên và trước khi deploy source sử dụng startup fast path.
+   - Mong đợi verification trả đúng một row với `id = 1`, `version = 1`.
 
 Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
@@ -216,9 +220,9 @@ Không xóa row tự động. Đối chiếu email/batch/answer của các ID đ
 
 ### 3.4. Vì sao vẫn phải chạy migration production trước deploy?
 
-Source hiện vẫn chạy idempotent schema initialization (`CREATE/ALTER/INDEX IF NOT EXISTS`) trong `initializeDatabase()` khi instance khởi động, sau đó mới chạy `verifyRequiredSchema()`. Runtime không tự chạy tuần tự toàn bộ file `migrations/**`, không thực hiện đầy đủ các bước kiểm tra/dedupe và không tạo migration history.
+Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Nếu version thiếu/sai, production fail readiness và yêu cầu chạy migration. Runtime bootstrap đầy đủ chỉ còn dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
 
-Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema: nó có thể tăng lock/cold-start trên Supabase Free và làm lỗi dữ liệu khó kiểm soát. Phải chạy migration có chủ đích trước deploy; readiness chỉ là hàng rào cuối trả `503` nếu required schema/index vẫn chưa đúng. Việc chuyển hoàn toàn DDL ra khỏi runtime là technical debt còn tồn tại.
+Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema. Phải chạy migration có chủ đích trước deploy; readiness là hàng rào cuối trả `503` nếu schema version hoặc required schema/index chưa đúng. Baseline migration đầy đủ cho database mới vẫn là technical debt; local Docker tạm thời dùng bootstrap rõ ràng qua biến môi trường riêng.
 
 Supabase khuyến nghị dùng migration files/CLI cho workflow lâu dài; thao tác SQL Editor trên remote không tạo migration history. Đợt này vẫn hướng dẫn SQL Editor vì repository hiện lưu migration ngoài cấu trúc Supabase CLI. Nếu chuyển sang CLI sau này, cần import/repair migration history trước, không chạy lẫn hai workflow.
 
@@ -397,7 +401,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 
 ## 10. Checklist production trước mỗi kỳ thi
 
-- [ ] Tám migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery chỉ chạy khi không có AI Grade request hoạt động.
+- [ ] Chín migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery chỉ chạy khi không có AI Grade request hoạt động.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.

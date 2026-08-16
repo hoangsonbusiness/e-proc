@@ -35,7 +35,7 @@ export async function loadBatchResultsSummary(db, batchId, pagination) {
       s.id, s.batch_id, s.email, s.status, s.recording_password,
       s.exam_started_at, s.exam_deadline, s.submitted_at, s.submit_reason,
       s.recording_finalized_at, s.recording_final_part_index, s.recording_incomplete,
-      s.ai_final_score, s.ai_summary_feedback, s.ai_grading_status, s.ai_grading_error, s.ai_graded_at,
+      s.ai_final_score, s.ai_grading_status, s.ai_grading_error, s.ai_graded_at,
       s.created_at,
       COALESCE(AVG(CASE WHEN eq.trainer_score IS NOT NULL THEN eq.trainer_score END),
                s.ai_final_score,

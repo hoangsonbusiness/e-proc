@@ -64,17 +64,22 @@ class FileCache {
   async init(): Promise<void> {
     if (this.initialized) return;
 
-    if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
-      await this.loadQueueFromDB();
+    const legacyQueueEnabled = process.env.LEGACY_AI_QUEUE_ENABLED === 'true';
+    if (legacyQueueEnabled) {
+      if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+        await this.loadQueueFromDB();
+      } else {
+        this.ensureDataDir();
+        this.loadQueue();
+      }
     } else {
-      this.ensureDataDir();
-      this.loadQueue();
+      console.log('[Queue] Legacy queue disabled; skipping startup hydration');
     }
 
     // Vercel có thể freeze instance sau response; interval nền không phải scheduler tin cậy.
     if (!process.env.VERCEL) {
       this.startFlushInterval();
-      if (process.env.LEGACY_AI_QUEUE_ENABLED === 'true') this.startQueueProcessor();
+      if (legacyQueueEnabled) this.startQueueProcessor();
     }
     this.initialized = true;
   }

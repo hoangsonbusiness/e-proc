@@ -8,6 +8,7 @@ import { recordDbQuery } from '../observability/dbMetrics.js';
 dotenv.config();
 
 const USE_SQLITE = !process.env.DATABASE_URL;
+const CURRENT_SCHEMA_VERSION = 1;
 
 console.log('[DB] Module loading...');
 console.log('[DB] Mode:', USE_SQLITE ? 'SQLite (local dev)' : 'PostgreSQL (production)');
@@ -15,6 +16,7 @@ console.log('[DB] DATABASE_URL:', process.env.DATABASE_URL ? 'present' : 'MISSIN
 
 let pgPool: pg.Pool | null = null;
 let sqliteDb: Database.Database | null = null;
+let schemaBootstrapPerformed = false;
 
 const { Pool } = pg;
 
@@ -66,6 +68,33 @@ async function initPostgres() {
     console.log('[DB] PostgreSQL connected!');
   
   await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
+
+  let installedSchemaVersion: number | null = null;
+  try {
+    const versionResult = await client.query(
+      'SELECT version FROM app_schema_state WHERE id = 1'
+    );
+    installedSchemaVersion = versionResult.rows[0]?.version == null
+      ? null
+      : Number(versionResult.rows[0].version);
+  } catch (error: any) {
+    if (error?.code !== '42P01') throw error;
+  }
+
+  if (installedSchemaVersion === CURRENT_SCHEMA_VERSION) {
+    console.log(`[DB] Schema version ${CURRENT_SCHEMA_VERSION} ready; skipping runtime DDL`);
+    return;
+  }
+
+  const allowRuntimeBootstrap = process.env.ALLOW_RUNTIME_SCHEMA_BOOTSTRAP === 'true'
+    || (!process.env.VERCEL && process.env.NODE_ENV !== 'production');
+  if (!allowRuntimeBootstrap) {
+    throw new Error(
+      `[schema] expected app_schema_state version ${CURRENT_SCHEMA_VERSION}, got ${installedSchemaVersion ?? '<missing>'}. Run migrations before serving.`
+    );
+  }
+  console.log('[DB] Schema fast path unavailable; running explicit local/fresh-database bootstrap');
+  schemaBootstrapPerformed = true;
 
   // Ownership foreign keys in question_bank and batches reference admin_users,
   // so a clean database must create this parent table before either child.
@@ -257,6 +286,7 @@ await client.query(`
   } catch (_) { /* already exists */ }
   await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_students_access_code ON students(access_code)');
   await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_questions_student_order ON exam_questions(student_id, question_order)');
+  await client.query('CREATE INDEX IF NOT EXISTS idx_students_batch_id ON students(batch_id)');
   console.log('[DB] exam_questions ready');
   
   await client.query(`
@@ -326,6 +356,7 @@ await client.query(`
   // để readiness fail, tránh server healthy nhưng /violation luôn 500. Các câu đều idempotent.
   await client.query('ALTER TABLE violation_events ADD COLUMN IF NOT EXISTS event_id VARCHAR(64)');
   await client.query('CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_events_student_event ON violation_events(student_id, event_id) WHERE event_id IS NOT NULL');
+  await client.query('CREATE INDEX IF NOT EXISTS idx_violation_events_student_created_at ON violation_events(student_id, created_at DESC)');
 
   await client.query(`
     CREATE TABLE IF NOT EXISTS recording_parts (
@@ -442,6 +473,13 @@ await client.query(`
   await client.query('CREATE INDEX IF NOT EXISTS idx_students_ai_grading_lease ON students(batch_id, ai_grading_status, ai_grading_started_at)');
   console.log('[DB] user-owned AI settings and manual grading columns ready');
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS app_schema_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      version INTEGER NOT NULL,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
     console.log('[DB] All PostgreSQL tables initialized');
   } finally {
     client.release();
@@ -843,28 +881,31 @@ export async function verifyRequiredSchema(): Promise<void> {
       }
     }
 
-    const checkPg = async (indexName: string, table: string, cols: string[], predicate: string | null) => {
-      const r = await pgPool!.query(
-        `SELECT i.indisunique, i.indisvalid, i.indisready,
-                c.relname AS index_name, t.relname AS table_name,
-                pg_get_indexdef(i.indexrelid) AS def,
-                pg_get_expr(i.indpred, i.indrelid) AS predicate,
-                ARRAY(
-                  SELECT a.attname::text
-                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-                  JOIN pg_attribute a
-                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-                  WHERE k.ord <= i.indnkeyatts
-                  ORDER BY k.ord
-                ) AS columns
-         FROM pg_index i
-         JOIN pg_class c ON c.oid = i.indexrelid
-         JOIN pg_class t ON t.oid = i.indrelid
-         JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.relname = $1 AND n.nspname = current_schema()`,
-        [indexName]
-      );
-      const row = r.rows[0];
+    const indexRows = await pgPool.query(
+      `SELECT i.indisunique, i.indisvalid, i.indisready,
+              c.relname AS index_name, t.relname AS table_name,
+              pg_get_expr(i.indpred, i.indrelid) AS predicate,
+              ARRAY(
+                SELECT a.attname::text
+                FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                JOIN pg_attribute a
+                  ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                WHERE k.ord <= i.indnkeyatts
+                ORDER BY k.ord
+              ) AS columns
+       FROM pg_index i
+       JOIN pg_class c ON c.oid = i.indexrelid
+       JOIN pg_class t ON t.oid = i.indrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = current_schema()
+         AND t.relname = ANY($1)`,
+      [['violations', 'violation_events', 'students', 'exam_questions', 'recording_parts', 'exam_sessions']]
+    );
+    const normalizePredicate = (value: unknown): string | null => value == null
+      ? null
+      : String(value).toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
+    const checkPg = (indexName: string, table: string, cols: string[], predicate: string | null) => {
+      const row = indexRows.rows.find((candidate: any) => candidate.index_name === indexName);
       if (!row) fail(`index ${indexName} missing`);
       if (!row.indisunique) fail(`index ${indexName} is not UNIQUE`);
       if (!row.indisvalid) fail(`index ${indexName} is INVALID`);
@@ -874,40 +915,30 @@ export async function verifyRequiredSchema(): Promise<void> {
       if (actualCols.join(',') !== cols.join(',')) {
         fail(`index ${indexName} columns ${actualCols.join(',')} != expected ${cols.join(',')}`);
       }
-      const actualPredicate = row.predicate == null
-        ? null
-        : String(row.predicate).toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
-      const expectedPredicate = predicate?.toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim() || null;
+      const actualPredicate = normalizePredicate(row.predicate);
+      const expectedPredicate = normalizePredicate(predicate);
       if (actualPredicate !== expectedPredicate) {
         fail(`index ${indexName} predicate ${actualPredicate || '<none>'} != expected ${expectedPredicate || '<none>'}`);
       }
     };
-    const checkPgUniqueColumns = async (table: string, cols: string[]) => {
-      const r = await pgPool!.query(
-        `SELECT ARRAY(
-                  SELECT a.attname::text
-                  FROM unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
-                  JOIN pg_attribute a
-                    ON a.attrelid = i.indrelid AND a.attnum = k.attnum
-                  WHERE k.ord <= i.indnkeyatts
-                  ORDER BY k.ord
-                ) AS columns
-         FROM pg_index i
-         JOIN pg_class t ON t.oid = i.indrelid
-         JOIN pg_namespace n ON n.oid = t.relnamespace
-         WHERE t.relname = $1 AND n.nspname = current_schema()
-           AND i.indisunique AND i.indisvalid AND i.indisready AND i.indpred IS NULL`,
-        [table]
-      );
-      const found = r.rows.some((row: any) => ((row.columns as string[] | null) || []).join(',') === cols.join(','));
+    const checkPgUniqueColumns = (table: string, cols: string[]) => {
+      const found = indexRows.rows.some((row: any) => row.table_name === table
+        && row.indisunique && row.indisvalid && row.indisready && row.predicate == null
+        && ((row.columns as string[] | null) || []).join(',') === cols.join(','));
       if (!found) fail(`required UNIQUE index on ${table}(${cols.join(', ')}) missing`);
     };
-    await checkPg('ux_violations_student_type', 'violations', ['student_id', 'type'], null);
-    await checkPg('ux_violation_events_student_event', 'violation_events', ['student_id', 'event_id'], 'event_id is not null');
-    await checkPgUniqueColumns('students', ['access_code']);
-    await checkPgUniqueColumns('exam_questions', ['student_id', 'question_order']);
-    await checkPgUniqueColumns('recording_parts', ['student_id', 'part_index']);
-    await checkPgUniqueColumns('exam_sessions', ['student_id', 'jti', 'ip']);
+    checkPg('ux_violations_student_type', 'violations', ['student_id', 'type'], null);
+    checkPg('ux_violation_events_student_event', 'violation_events', ['student_id', 'event_id'], 'event_id is not null');
+    checkPgUniqueColumns('students', ['access_code']);
+    checkPgUniqueColumns('exam_questions', ['student_id', 'question_order']);
+    checkPgUniqueColumns('recording_parts', ['student_id', 'part_index']);
+    checkPgUniqueColumns('exam_sessions', ['student_id', 'jti', 'ip']);
+
+    for (const performanceIndex of ['idx_students_batch_id', 'idx_violation_events_student_created_at']) {
+      if (!indexRows.rows.some((row: any) => row.index_name === performanceIndex && row.indisvalid && row.indisready)) {
+        console.warn(`[schema] Performance index ${performanceIndex} is missing; admin reads may be slow`);
+      }
+    }
   }
   console.log('[DB] Required schema verified (definition-checked)');
 }
@@ -917,7 +948,19 @@ export async function verifyRequiredSchema(): Promise<void> {
  * listen(); request middleware (serverless) await trước khi chạm DB. Reject ⇒ server không
  * phục vụ request thi thay vì trả 500 âm thầm.
  */
-export const dbReady: Promise<void> = initDatabase().then(verifyRequiredSchema);
+async function markBootstrappedSchemaReady(): Promise<void> {
+  if (!schemaBootstrapPerformed || !pgPool) return;
+  await pgPool.query(`
+    INSERT INTO app_schema_state (id, version, updated_at)
+    VALUES (1, $1, CURRENT_TIMESTAMP)
+    ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, updated_at = CURRENT_TIMESTAMP
+  `, [CURRENT_SCHEMA_VERSION]);
+  console.log(`[DB] Recorded verified schema version ${CURRENT_SCHEMA_VERSION}`);
+}
+
+export const dbReady: Promise<void> = initDatabase()
+  .then(verifyRequiredSchema)
+  .then(markBootstrappedSchemaReady);
 
 interface DbResult {
   rows: any[];
