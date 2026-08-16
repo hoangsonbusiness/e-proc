@@ -121,10 +121,11 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - Quiz chấm ngay bằng exact-set match, không partial credit; đúng nhận configured score, sai 0.
 - Essay chỉ chấm khi creator có verified setting bấm **AI Grade**. Backend dùng current verified setting của creator, không dùng setting/flag lưu trên batch.
 - Một lần bấm tạo một backend invocation cho batch. Mỗi student `submitted` được gọi LLM độc lập với toàn bộ câu hỏi, answer và rubric của student đó; khi vượt ngưỡng prompt/context hoặc response sai cấu trúc, hệ thống chia nhỏ câu hỏi của chính student đó để retry.
-- Student được xử lý theo wave, mặc định concurrency 5. Mỗi wave lưu transactionally score/feedback từng câu, `ai_final_score`, `ai_summary_feedback`, trạng thái và lỗi.
+- Student được xử lý tuần tự, mỗi lần chỉ một student, để tránh custom gateway trả chéo response giữa các request đồng thời. Mỗi student thành công được publish trong transaction riêng.
 - Mỗi câu nhận 0.00–1.00, cho phép điểm lẻ tối đa hai chữ số; câu không trả lời là 0. Điểm tổng kết: `ROUND(SUM(question_score) / total_questions * 10, 2)`, không dùng trọng số.
-- LLM output phải chứa đủ đúng `exam_question_id`, không ID lạ/trùng, score hữu hạn trong range, feedback từng câu và summary feedback không rỗng.
+- Mỗi LLM attempt có `request_token` mới và grading key gắn với request. Response thiếu/sai correlation bị từ chối trừ khi toàn bộ item có strong unique identifier hợp lệ; mặc định retry correlation tối đa hai lần với token mới. Output vẫn phải đủ item, không ID lạ/trùng, score hữu hạn trong range, feedback từng câu và summary feedback không rỗng.
 - Batch hết execution budget hoặc có student lỗi chuyển `partial`; creator bấm lại để chấm failed/remaining student, còn student `completed` được bỏ qua.
+- Results cho phép creator chấm lần đầu, retry student lỗi hoặc regrade một student đã completed. Regrade lỗi giữ nguyên score/feedback đã publish; chỉ thay thế sau khi kết quả mới đầy đủ và hợp lệ.
 - User nhập Provider, API protocol, Base URL, API Key và Model tại AI Settings. Hỗ trợ OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate Content và Ollama Generate.
 - Test Connection phải pass cho đúng cấu hình trước khi Save. API key được AES-256-GCM encrypt và không trả plaintext về frontend.
 - Production chặn URL HTTP, localhost/private address, credentials trong URL, redirect và response vượt giới hạn; lỗi provider không echo response body có thể chứa secret.
@@ -227,7 +228,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - Readiness 503 khi DB/schema/cache chưa sẵn sàng.
 - Direct DB answer writes, transactional/idempotent submit.
 - Paginated/lazy admin read paths và request/DB query metrics.
-- Manual AI Grade chạy trong chính request do creator kích hoạt, checkpoint theo wave và dừng nhận wave mới trước execution budget. `vercel.json` không có cron.
+- Manual AI Grade chạy trong chính request do creator kích hoạt, checkpoint theo từng student và dừng nhận student mới trước execution budget. `vercel.json` không có cron.
 
 ### Browser compatibility
 
@@ -243,7 +244,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 4. Verify mới revoke token cũ; missing/invalid/revoked token trả 401.
 5. Start tạo unique assignment, deadline không vượt batch end, resume không gia hạn.
 6. Answer sau deadline/submitted không ghi; manual submit gửi full answer map nên không phụ thuộc timer đang debounce.
-7. Quiz exact answer nhận configured score; essay submit không tự chấm; chỉ creator có verified setting thấy/chạy AI Grade. Điểm AI per-question 0..1 và final score theo công thức thang 10, lưu cùng feedback/summary.
+7. Quiz exact answer nhận configured score; essay submit không tự chấm; chỉ creator có verified setting thấy/chạy batch hoặc targeted AI Grade. Điểm AI per-question 0..1 và final score theo công thức thang 10, lưu cùng feedback/summary; correlation sai không được publish và regrade lỗi không ghi đè kết quả cũ.
 8. Retry cùng violation event id không tăng counter; đủ threshold auto-submit server-side.
 9. Client không report được `concurrent_session`; different-IP overlap auto-submit.
 10. Unsupported display API, extended display, non-monitor share hoặc fullscreen denial đều chặn Start.
@@ -260,13 +261,14 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - S3 chỉ verify object/key/size/manifest, chưa verify duration/frame/black screen.
 - AI output được validate cấu trúc/ID/range nhưng chất lượng chấm và prompt injection không thể được loại bỏ tuyệt đối; cần review khi kết quả bất thường.
 - Manual grading đọc question/rubric hiện tại từ `question_bank` tại lúc bấm AI Grade; quiz finalization cũng đọc correct answer/score hiện tại khi submit. Sửa question/rubric/quiz key sau khi đề đã được assign có thể thay đổi kết quả vì chưa có immutable question versioning.
-- Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Chunk fallback tăng độ bền context nhưng cũng tăng số outbound request và thời gian xử lý.
+- Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Xử lý tuần tự giảm nguy cơ response isolation nhưng tăng tổng latency; chunk/correlation retry tiếp tục tăng số outbound request và thời gian xử lý.
 - Server-side auto-submit chỉ dùng answer đã tới backend; dirty text còn trong browser tại thời điểm timeout/violation/concurrent-session lock có thể chưa được lưu. HTTP autosave không bảo đảm zero-loss trước khi request được giao.
 - Quiz scoring chạy sau transaction đổi trạng thái submitted. Nếu process chết đúng khoảng này, attempt có thể tạm submitted nhưng chưa đủ quiz score cho tới khi submit/finalization được gọi lại.
 - Repo chưa chứng minh SLA/load target; không dùng claim cũ “20–30 users/99.7% reduction”.
 
 ## 9. Deployment targets
 
+- Local Docker verification: `docker-compose.local.yml` chạy đúng hai service `app` và Supabase PostgreSQL `database`; `npm run test:local` build/health-check/serve frontend và chạy SQLite, PostgreSQL cùng AI Grade E2E.
 - Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3; manual AI Grade, không daily cron.
 - Ubuntu VPS: `deploy-vps.sh` sinh Docker/Caddy/Compose runtime ngoài checkout, dùng Supabase PostgreSQL.
 - `public/**`, root `server/**`, `index.js` và generated bundles không phải production source of truth theo Vercel config.

@@ -31,8 +31,9 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - PostgreSQL race/integration suite: copy `.env.test.example` to `.env.test.local`, set a **non-production** `TEST_DATABASE_URL`, then run `npm run test:postgres`
 - Required local Docker verification: `npm run test:local`
   - Builds and starts exactly two services from `docker-compose.local.yml`: `app` (built frontend + backend) and `database` (Supabase PostgreSQL).
-  - Verifies `/api/health`, verifies the built React app is actually served, runs the complete default suite inside the app image, then runs PostgreSQL integration tests against the local Supabase database.
+  - Verifies `/api/health`, verifies the built React app is actually served, runs the complete default suite inside the app image, runs PostgreSQL integration tests, and exercises manual AI Grade end to end through a mock LLM against the local Supabase database.
   - `npm run local:up`, `npm run local:logs`, and `npm run local:down` are available for manual investigation.
+- Optional real-provider AI Grade diagnostic: configure the ignored `.env.ai-grade.local` file, keep the local stack running, then run `npm run test:ai-grade:real`. This sends real provider traffic and may incur cost.
 - Production dependency audits: `npm audit --omit=dev` and `cd client && npm audit --omit=dev`
 
 ### Mandatory completion gate for AI coding tasks
@@ -295,9 +296,10 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Reset behavior:** resetting a student deletes `recording_parts` database metadata, but does **not** delete existing S3 objects. A new attempt can overwrite reused part keys; stale higher-numbered objects remain until the configured S3 Lifecycle rule expires them.
 
 ### Runtime and deployment paths
-- There are **four** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
+- There are **five** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
   - Vite dev mode from `client/src/**` (`npm run dev` in `client/`)
-  - static/public mode from `public/index.html` + `public/assets/**` (a separate, currently-stale build path — last known update predates the `extension_panel` feature; do not assume it's in sync with `client/dist`)
+  - static/public mode from `public/index.html` + `public/assets/**`; it is a separate build path and is currently out of sync with `client/dist` (`public` references `index-B0b8CXOg.js`, while `client/dist` references `index-DjJvykcg.js`)
+  - **Local Docker verification**, via `docker-compose.local.yml`: exactly `app` and `database`; the app serves the built `client/dist` because `SERVE_STATIC=true`, and connects to the Supabase PostgreSQL container with `DATABASE_SSL=false`
   - **Vercel production**, per `vercel.json`: builds/serves `dist/server/index.js` (compiled from `src/**` via `npm run build:server` → `tsc`, outDir `dist`) for `/api/*`, and `client/dist/**` (via `npm run build:client`) as static assets for everything else. This is the actual production path — `public/**` and the legacy root `server/**` directory are **not** what Vercel serves, despite both existing in the repo (see "Source of truth" note above).
   - **Ubuntu VPS**, via `deploy-vps.sh`: generates Docker/Caddy/Compose files under `/opt/e-proc/runtime`, rebuilds from a detached checkout under `/opt/e-proc/app`, uses a long-lived DB pool, and applies migrations automatically. Its process-local AI queue interval is legacy-only and requires `LEGACY_AI_QUEUE_ENABLED=true`.
 - A successful `client/dist` or `dist/server` build does not affect a different runtime path unless that path's artifacts are also rebuilt/synced. These paths can silently diverge from `src/**`/`client/src/**`.
@@ -308,9 +310,11 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - AI grading is manual: submitting an essay does not enqueue work. The batch creator clicks **AI Grade** in Batches List, producing one backend invocation for the batch.
 - Only `batches.created_by` may run AI grading for that batch; role `admin` is not an ownership bypass. Create/Edit has no AI flag.
 - Batches List shows **AI Grade** when `exam_type === 'essay'`, the current user is `created_by`, and that user's current AI setting is `verified`. This applies to old and new essay batches.
-- Each submitted student is sent in an independent LLM request containing all assigned questions, answers, and rubrics. Oversized/invalid-context payloads fall back to smaller chunks. Students are processed in waves (default concurrency 5).
+- Each submitted student is sent independently with all assigned questions, answers, and rubrics. Oversized/invalid-context payloads fall back to smaller chunks for that student only. Students are processed **strictly sequentially, one at a time**, to prevent custom gateways from crossing responses between concurrent requests.
+- Every LLM attempt uses a fresh `request_token` and request-scoped grading keys. Missing/mismatched correlation is rejected unless the complete response can be matched by strong unique identifiers; `AI_GRADING_CORRELATION_RETRIES` controls correlation-only retries.
 - Per-question scores are 0.00–1.00. Final score is `ROUND(SUM(question scores) / total questions * 10, 2)`; unanswered questions are included as zero.
-- Each successful wave transactionally saves per-question scores/feedback plus `students.ai_final_score` and `students.ai_summary_feedback`. Completed students are skipped on retry after a partial run.
+- Each successful student is published in its own transaction with per-question scores/feedback plus `students.ai_final_score` and `students.ai_summary_feedback`. Completed students are skipped on batch retry after a partial run.
+- Results supports creator-only initial grade/retry/regrade through `POST /admin/batches/:batchId/students/:studentId/ai-grade`. A failed regrade preserves the previously completed score and feedback; replacement occurs only after the new complete result passes correlation and validation.
 - `user_ai_settings` is user-owned. Manual grading resolves the creator's current verified row at click time rather than a batch-bound setting. API keys are AES-256-GCM encrypted and never returned to the frontend. Save requires a short-lived token proving the exact draft passed Test Connection.
 - Provider behavior is selected by `api_protocol`: OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate Content, or Ollama Generate. Provider name, base URL, key, and model are user-editable.
 - Quiz batches never enqueue AI jobs. `submitExamAtomically()` scores exact normalized option sets immediately using each question's configured `score` and writes `Correct`/`Incorrect` feedback.
@@ -343,10 +347,12 @@ Batches support two blueprint formats for question assignment:
 | `CRON_SECRET` | Legacy | none | Protects the disabled legacy `/api/queue/process` endpoint. |
 | `SKIP_TIME_CHECK` | No | — | Set to `'true'` to bypass exam time-window validation in any mode |
 | `AI_SETTINGS_ENCRYPTION_KEY` | **Yes for AI** | — | 32-byte base64 or 64-hex AES key used to encrypt/decrypt user LLM API keys. Keep stable across deployments. |
-| `AI_GRADING_CONCURRENCY` | No | `5` | Students graded concurrently inside one batch invocation; clamped to 1–10. |
+| `AI_GRADING_CORRELATION_RETRIES` | No | `2` | Extra retries for response-correlation mismatch; clamped to 0–3, with a fresh request token per attempt. |
 | `AI_GRADING_LLM_TIMEOUT_MS` | No | `60000` | Timeout for each LLM request; clamped to 1–120 seconds. |
 | `AI_GRADING_MAX_PROMPT_CHARS` | No | `80000` | Pre-emptive per-student chunk threshold. |
-| `AI_GRADE_SAFE_BUDGET_MS` | No | `270000` | Stops starting new waves before the intended 300-second host ceiling; does not configure Vercel duration. |
+| `AI_GRADE_SAFE_BUDGET_MS` | No | `270000` | Stops starting another student before the intended 300-second host ceiling; does not configure Vercel duration. |
+| `SERVE_STATIC` | Local/self-host | `false` | When `true`, Express serves `client/dist` and fails startup if its `index.html` is missing. |
+| `DATABASE_SSL` | Local PostgreSQL | TLS enabled | Set to `false` only for the trusted local Compose database; production PostgreSQL keeps TLS. |
 | `LEGACY_AI_QUEUE_ENABLED` | Legacy | `false` | Explicit opt-in for the retired per-question queue worker. |
 | `GEMINI_API_KEY` | Legacy | — | Used only by the retired global queue fallback. |
 | `ANSWER_FLUSH_INTERVAL` | Legacy | `5000` | The exam answer endpoint now persists directly; retained only for the unused legacy buffer code. |
@@ -371,7 +377,7 @@ Batches support two blueprint formats for question assignment:
 
 - There is drift between current TypeScript source and legacy/generated JS checked into the repo. Prefer `src/**` and `client/src/**` when reasoning about behavior.
 - The frontend build uses hashed filenames, so any manual static sync to `public/` must update `public/index.html` to the new hash.
-- `npm test` uses Node's default discovery under `test/`. SQLite/default tests require a working `better-sqlite3` binding; PostgreSQL integration cases skip without `TEST_DATABASE_URL`. `npm run test:postgres` runs the dedicated PostgreSQL file against a non-production database and currently covers six cases.
+- `npm test` uses Node's default discovery under `test/`. Verified on 2026-08-16: 72 total, 66 pass, 6 PostgreSQL-only skip without `TEST_DATABASE_URL`. `npm run test:postgres` runs the six dedicated cases against a non-production database. `npm run test:local` additionally validates the built app and manual AI Grade end to end against local PostgreSQL.
 - For frontend changes that affect actual exam behavior, verify against the runtime path being served, not just against source edits or `client/dist` output.
 - Active server DB mode is selected consistently by `DATABASE_URL`: absent means SQLite; present means PostgreSQL. `src/ai/queue.ts` is a legacy worker with stale `USE_SQLITE` logic and is not the active queue path.
 - The DB layer auto-converts `?` placeholders to `$1/$2/...` style when running in PostgreSQL mode (see `query()` in `postgres.ts`). Do not mix placeholder styles in a single query string.
@@ -430,7 +436,7 @@ Batches support two blueprint formats for question assignment:
 - Essay answers debounce for 5 seconds and quiz answers for 500ms, with a separate timer per question. Dirty answers are batch-saved, and the full current answer map is included in manual submit. Backend writes are guarded by `status='in_progress'` plus deadline checks and do not rely on the process-local buffer.
 - Server-owned timeout/violation/concurrent-session submission can only commit answers already received by the backend. Browser-only dirty text is not attached to those server-side triggers and can still be lost; HTTP autosave cannot guarantee zero-loss before delivery.
 - Assigned attempts reference mutable `question_bank` rows. Manual AI Grade reads current question/rubric values when the button is clicked, and quiz finalization reads current correct answers/score at submit; there is no immutable question version snapshot.
-- Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome. Essay grading is a separate creator-owned manual action; a partial rerun skips students already marked `completed`.
+- Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome. Essay grading is a separate creator-owned manual action; batch grading skips completed students, while targeted regrade preserves the old published result unless the replacement fully validates.
 - S3 recording remains direct browser-to-S3. Answer submission completes first; `stopAndSave()` then serializes outstanding uploads and calls `/exam/recording-finalize` while `/submit` waits. The backend requires a contiguous `0..finalPartIndex` manifest. Any submit path with an unfinished S3 manifest sets `recording_incomplete=true` and receives a 15-minute recording-only grace window; answers/questions remain blocked.
 - Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
 
@@ -447,4 +453,4 @@ Batches support two blueprint formats for question assignment:
 - Student API authentication uses JWT (`studentToken`), not the `x-student-id` header. Any code that still reads `x-student-id` from request headers on student endpoints is stale and should be replaced.
 - `POST /api/student/exam/start` requires `studentAuthMiddleware` and derives `studentId` from the verified JWT; the legacy `student_id` body field sent by the frontend is ignored for identity.
 - There is intentionally no pre-exam checkbox/acknowledgement API or DB gate. Controls must use automatically observed browser/server signals; candidate self-attestation was removed as non-enforcing.
-- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/stats`, `/api/cache/flush`, `/api/stats`) require admin JWT. The legacy `/api/queue/process` accepts either admin JWT or exact `CRON_SECRET`, but has no scheduled Vercel cron and processes nothing unless `LEGACY_AI_QUEUE_ENABLED=true`. `/api/init-tables` has been removed — DB init runs automatically on server startup.
+- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/stats`, `/api/cache/flush`, `/api/stats`) require admin JWT and await startup readiness. The legacy `/api/queue/process` accepts either admin JWT or exact `CRON_SECRET`, but has no scheduled Vercel cron and processes nothing unless `LEGACY_AI_QUEUE_ENABLED=true`. `/api/init-tables` has been removed because DB initialization runs automatically at startup.

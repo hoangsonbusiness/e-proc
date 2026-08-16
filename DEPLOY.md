@@ -16,8 +16,8 @@ Hai topology production đang được repository hỗ trợ:
 | Backend source | `src/server/**` | transaction violation, schema readiness, manual AI grading/provider layer, session enforcement |
 | Backend artifact | `dist/server/**` | JavaScript Vercel thực sự chạy; được sinh bởi TypeScript build |
 | Database | `migrations/**` | column/table/index bắt buộc trên Supabase |
-| Regression test | `test/**`, `scripts/run-postgres-tests.mjs` | SQLite test và race test PostgreSQL thật |
-| Dependency/config | hai `package*.json`, `vercel.json` | dependency đã vá và lệnh test/build; `vercel.json` hiện không có cron |
+| Regression test | `test/**`, `scripts/run-postgres-tests.mjs`, `scripts/run-local-compose-tests.mjs`, `scripts/verify-ai-grade-*.mjs` | SQLite, PostgreSQL race, local Docker và AI Grade E2E |
+| Dependency/config | hai `package*.json`, `vercel.json`, `Dockerfile.local`, `docker-compose.local.yml` | dependency, lệnh test/build và local stack; `vercel.json` hiện không có cron |
 
 Không phải mọi file trong diff đều là logic độc lập: phần lớn `dist/**`, asset hash và lockfile là artifact/dependency được sinh lại. Source of truth vẫn là `src/**`, `client/src/**`, migration và config.
 
@@ -25,8 +25,8 @@ Không phải mọi file trong diff đều là logic độc lập: phần lớn 
 
 Không deploy code trước rồi mới sửa database. Thứ tự an toàn cho đợt cập nhật này:
 
-1. Cài dependency và chạy SQLite regression test.
-2. Chạy PostgreSQL integration test trên **database test riêng**.
+1. Cài dependency và chạy full local gate `npm run test:local`.
+2. Nếu cần xác minh provider production, giữ local stack đang chạy và chạy thêm `npm run test:ai-grade:real` với secret local; bước này có thể phát sinh traffic/chi phí thật.
 3. Dừng tạo kỳ thi mới/chọn thời gian không có học viên đang thi.
 4. Chạy các migration trên Supabase production theo đúng thứ tự.
 5. Cấu hình/kiểm tra environment variables trên Vercel.
@@ -51,7 +51,7 @@ npm audit --omit=dev
 cd client && npm audit --omit=dev
 ```
 
-Kết quả đã xác minh ngày 2026-08-16: `npm test` có **66 test, 60 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
+Kết quả đã xác minh ngày 2026-08-16: `npm test` có **72 test, 66 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
 
 ### 2.1. `TEST_DATABASE_URL` dùng để làm gì?
 
@@ -116,6 +116,36 @@ Không ghi `TEST_DATABASE_URL` vào Vercel. Đây chỉ là secret dùng trên m
 ### 2.3. Vì sao không hard-code URL vào script?
 
 Connection string chứa database password. Hard-code nó trong `package.json`, source hoặc commit sẽ làm lộ quyền truy cập database. Vì vậy repository chỉ cung cấp lệnh `npm run test:postgres` và file mẫu `.env.test.example`; secret thật nằm trong `.env.test.local`, đã được `.gitignore` loại trừ.
+
+### 2.4. Full local Docker gate
+
+Lệnh bắt buộc sau mọi thay đổi source/test/build/dependency/Docker/runtime config:
+
+```powershell
+npm run test:local
+```
+
+`docker-compose.local.yml` chạy đúng hai service:
+
+- `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:54322`, dùng named volume và healthcheck.
+- `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
+
+Gate chạy tuần tự sáu bước: build/start stack, đợi PostgreSQL-backed health, xác minh built React app được phục vụ thật, chạy toàn bộ default tests trong app image, chạy sáu PostgreSQL integration tests, rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-16 đã pass: default suite 72 total/66 pass/6 skip; PostgreSQL 6 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, không lẫn prompt/persistence giữa student, một request cho student bình thường, chunk fallback, targeted regrade, giữ kết quả khi regrade lỗi và từ chối response `q1/q2` không có correlation.
+
+Stack được giữ lại sau test để điều tra. Dùng:
+
+```powershell
+npm run local:logs
+npm run local:down
+```
+
+Để probe provider thật, tạo `.env.ai-grade.local` đã được ignore với `AI_GRADE_REAL_PROVIDER`, `AI_GRADE_REAL_PROTOCOL`, `AI_GRADE_REAL_BASE_URL`, `AI_GRADE_REAL_API_KEY`, `AI_GRADE_REAL_MODEL`, giữ local stack đang chạy rồi thực hiện:
+
+```powershell
+npm run test:ai-grade:real
+```
+
+Không commit file secret này. Diagnostic gửi request thật tới provider và không thay thế mock E2E bắt buộc trong `test:local`.
 
 ## 3. Migration Supabase production
 
@@ -228,10 +258,10 @@ Biến khuyến nghị:
 - `DB_POOL_MIN=0`
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
-- `AI_GRADING_CONCURRENCY=5` — số học viên được gọi LLM song song trong một wave, code clamp 1–10.
+- `AI_GRADING_CORRELATION_RETRIES=2` — số lần retry riêng cho lỗi response correlation, code clamp 0–3; mỗi attempt dùng request token mới.
 - `AI_GRADING_LLM_TIMEOUT_MS=60000` — timeout mỗi LLM request, code clamp 1–120 giây.
 - `AI_GRADING_MAX_PROMPT_CHARS=80000` — ngưỡng chủ động chia câu hỏi của một học viên thành chunk.
-- `AI_GRADE_SAFE_BUDGET_MS=270000` — ngừng bắt đầu wave mới trước giới hạn 300 giây của function; code clamp tối đa 290 giây.
+- `AI_GRADE_SAFE_BUDGET_MS=270000` — ngừng bắt đầu student mới trước giới hạn 300 giây của function; code clamp tối đa 290 giây.
 - `ADMIN_PERF_LOGS=true` — tùy chọn, log timing cho mọi API admin trong giai đoạn lấy baseline; tắt sau khi đo xong.
 - `ADMIN_SLOW_REQUEST_MS=1000` — khi không bật full perf logs, chỉ log API admin chậm hơn ngưỡng này.
 
@@ -293,13 +323,15 @@ Trong invocation đó:
 - Chỉ `batches.created_by` được chạy; role `admin` không bypass ownership.
 - Chỉ creator được chấm batch essay của mình. Backend lấy verified LLM setting hiện tại của creator; không phụ thuộc legacy `ai_grading_enabled` hoặc `ai_setting_id`.
 - Mỗi học viên `submitted` có một LLM request độc lập chứa toàn bộ câu hỏi, answer và rubric; payload lớn hoặc response không hợp lệ có thể tách thành nhiều chunk cho riêng học viên đó.
-- Học viên chạy theo wave, mặc định tối đa 5 request LLM song song.
-- Mỗi wave thành công được commit vào Supabase: score/feedback từng câu, summary feedback và điểm tổng kết thang 10.
-- Khi gần hết safe budget, backend dừng tạo wave mới, trả batch status `partial`; creator bấm lại để tiếp tục. Student đã `completed` được bỏ qua.
+- Học viên được xử lý tuần tự, mỗi lần một người, để tránh custom gateway trả chéo response giữa các request dùng cùng key/model.
+- Mỗi attempt gửi `request_token` và grading key riêng; correlation sai được retry tối đa theo `AI_GRADING_CORRELATION_RETRIES`, luôn với token mới, và không được publish nếu vẫn không xác định được ownership của response.
+- Mỗi student thành công được commit riêng vào Supabase: score/feedback từng câu, summary feedback và điểm tổng kết thang 10.
+- Khi gần hết safe budget, backend dừng nhận student mới, trả batch status `partial`; creator bấm lại để tiếp tục. Student đã `completed` được bỏ qua.
+- Results có route targeted grade/retry/regrade. Regrade thất bại giữ nguyên score/feedback/status completed trước đó; chỉ kết quả mới đầy đủ, đúng correlation và qua validation mới thay thế dữ liệu đã publish.
 
 Điểm từng câu nằm trong `0.00..1.00`. Điểm tổng kết là `ROUND(SUM(score)/total_questions*10, 2)`; câu không trả lời tính 0. Một invocation có thể phát sinh 25 outbound LLM requests cho batch 25 học viên, nhưng vẫn chỉ là một inbound Vercel Function invocation.
 
-`AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; chunk fallback làm tăng số request và tổng thời gian. Nếu function timeout, wave đã commit vẫn còn, nhưng response có thể bị ngắt và batch có thể tạm ở `processing` cho đến khi stale-claim 6 phút cho phép chạy lại.
+`AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; xử lý tuần tự, chunk fallback và correlation retry làm tăng tổng thời gian. Nếu function timeout, student đã commit vẫn còn, nhưng response có thể bị ngắt và batch có thể tạm ở `processing` cho đến khi stale-claim 6 phút cho phép chạy lại.
 
 `ai_queue`, `ai_settings` và `/api/queue/process` chỉ còn compatibility. `vercel.json` không có cron; endpoint cũ xử lý 0 job theo mặc định vì `LEGACY_AI_QUEUE_ENABLED=false`.
 
@@ -367,7 +399,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
 - [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm test` có 60 pass/6 skip; `npm run test:postgres` có 6 pass/0 skip trên project test riêng.
+- [ ] `npm run test:local` pass toàn bộ sáu bước; default suite có 66 pass/6 skip, PostgreSQL có 6 pass/0 skip và AI Grade E2E pass các scenario isolation/correlation/regrade.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.

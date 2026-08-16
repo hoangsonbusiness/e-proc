@@ -1,6 +1,6 @@
 # E-Audit Platform — Technical Specification
 
-**Version:** 2.1
+**Version:** 2.2
 
 **Last Updated:** 2026-08-16
 **Basis:** current TypeScript/React source, migrations and runtime configuration
@@ -33,6 +33,7 @@ Runtime entry points:
 
 - Local backend: `src/server/server.ts`, port 3001.
 - Vite: port 5173, `/api` proxy to 3001.
+- Local Docker gate: `docker-compose.local.yml` runs exactly `app` and Supabase PostgreSQL `database`; `SERVE_STATIC=true` serves the built `client/dist`, and `DATABASE_SSL=false` is local-only.
 - Vercel: `dist/server/index.js` for `/api/*`; `client/dist/**` for SPA.
 - VPS: generated Docker multi-stage build, Caddy HTTPS and Compose from `deploy-vps.sh`.
 
@@ -234,6 +235,7 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | GET | `/admin/settings/ai` | return only the current user's non-secret setting fields/mask/test status |
 | POST | `/admin/settings/ai/test` | test draft provider/protocol/Base URL/key/model; returns short-lived config-bound test token |
 | PUT | `/admin/settings/ai` | save only after valid Test Connection token; encrypt API key |
+| POST | `/admin/batches/:batchId/students/:studentId/ai-grade` | creator-only initial grade, retry or safe regrade for one submitted student |
 
 ### 6.5 Student exam
 
@@ -362,18 +364,25 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 - Query only `students.status='submitted'` whose AI status is not `completed`; completed students are checkpoints and are skipped on rerun.
 - Each student is logically independent. The preferred call contains all assigned question IDs/orders/text, current rubrics and answers for that student.
 - Pre-split when prompt exceeds `AI_GRADING_MAX_PROMPT_CHARS`. On context/token-size or schema/JSON validation errors, recursively split the affected student's question set; unrelated students are never combined into one prompt.
-- Process students in waves of `AI_GRADING_CONCURRENCY` (default 5, clamp 1–10). Per-call timeout defaults to 60 seconds and clamps to 1–120 seconds.
-- Stop starting waves before `AI_GRADE_SAFE_BUDGET_MS` (default 270 seconds, clamp 30–290 seconds). Remaining/failed students produce batch status `partial`; clicking again continues them.
+- Process students strictly sequentially, one at a time, so OpenAI-compatible custom gateways cannot cross responses between concurrent requests that share one key/model. Per-call timeout defaults to 60 seconds and clamps to 1–120 seconds.
+- Stop starting another student when the remaining budget cannot cover the LLM timeout plus a 10-second guard. `AI_GRADE_SAFE_BUDGET_MS` defaults to 270 seconds and clamps to 30–290 seconds. Remaining/failed students produce batch status `partial`; clicking again continues them.
 
 ### Validation, scoring and persistence
 
-- Expected JSON: `{results:[{exam_question_id,score,feedback}],summary_feedback}`.
-- Every expected ID must appear exactly once; unknown/duplicate/missing IDs, score outside 0..1, empty feedback or empty summary reject that student's candidate result.
+- Preferred JSON: `{request_token,results:[{grading_key,score,feedback}],summary_feedback}`. Every attempt creates a fresh random token and keys such as `g_<token>_q1`.
+- With a matching token, short `qN` keys or stable result order are tolerated. Without a matching token, the response is accepted only when every result maps through complete unique request-scoped grading keys or exact expected legacy `exam_question_id` values. Missing/mismatched correlation is never published; `AI_GRADING_CORRELATION_RETRIES` retries only this failure with a fresh token.
+- Every expected item must appear exactly once; unknown/duplicate/missing identifiers, score outside 0..1, empty feedback or empty summary reject that student's candidate result.
 - Student answer is explicitly untrusted prompt data. System instructions say it cannot modify rubric, role, score or output format; this mitigates but cannot eliminate prompt injection.
 - Score per question is rounded to two decimals in `0.00..1.00`; unanswered is forcibly 0 regardless of model output.
 - Final score is `ROUND(SUM(per_question_score)/total_assigned_questions*10, 2)` with no weighting.
-- One DB transaction per wave writes successful `exam_questions.ai_score/ai_feedback`, successful student final score/summary/status/timestamp, and failed student error/status. A failed student does not receive a synthetic score of zero.
+- One DB transaction per student publishes `exam_questions.ai_score/ai_feedback` and the student final score/summary/status/timestamp only after the full candidate validates. An initial/retry failure becomes `failed` without a synthetic zero; a regrade failure restores `completed` and preserves the previous published scores/feedback while recording the error.
 - Batch becomes `completed` only when no failed/remaining student exists; otherwise `partial`.
+
+### Targeted grade and regrade
+
+- Results exposes **AI Grade**, **Retry AI Grade**, or **Regrade AI** only to the batch creator with a verified current setting and only for a submitted essay student with assigned questions.
+- The targeted route accepts `pending`, `failed`, or `completed`, rejects `processing`, and uses the same per-student isolation, chunking, correlation and validation path as batch grading.
+- Batch reruns continue to select only `pending` and `failed`; targeted regrade is the explicit path for replacing a completed result.
 
 ### Legacy compatibility
 
@@ -400,10 +409,12 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 | `ALLOWED_ORIGINS` | `http://localhost:5173` |
 | `SESSION_SECRET` | `secret`; must override production |
 | `AI_SETTINGS_ENCRYPTION_KEY` | required for AI; 32-byte base64 or 64-character hex, stable across deployments |
-| `AI_GRADING_CONCURRENCY` | 5, clamped 1–10 |
+| `AI_GRADING_CORRELATION_RETRIES` | 2, clamped 0–3; fresh token per retry |
 | `AI_GRADING_LLM_TIMEOUT_MS` | 60000, clamped 1000–120000 ms |
 | `AI_GRADING_MAX_PROMPT_CHARS` | 80000, minimum 10000 |
 | `AI_GRADE_SAFE_BUDGET_MS` | 270000, clamped 30000–290000 ms |
+| `SERVE_STATIC` | false; local/self-host opt-in to serve `client/dist` |
+| `DATABASE_SSL` | TLS by default; `false` only for trusted local PostgreSQL |
 | `SKIP_TIME_CHECK` | `true` bypasses schedule |
 | `DB_POOL_MIN`, `DB_POOL_MAX` | 0, 4 |
 | `DB_CONNECT_TIMEOUT_MS`, `DB_CONNECT_ATTEMPTS` | 15000, 2 |
@@ -431,7 +442,9 @@ Production migration order:
 6. `20260813_admin_query_performance.sql`
 7. `20260816_user_ai_manual_grading.sql`
 
-`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 66 total, 60 pass, 6 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs six integration cases in temporary schema `test_violation`. Root and client `npm audit --omit=dev` both reported zero production vulnerabilities on the same date.
+`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 72 total, 66 pass, 6 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs six integration cases in temporary schema `test_violation`.
+
+`npm run test:local` is the full local completion gate: build the two-service stack, verify database/app health and the served React build, run the default suite in the app image, run all six PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. The verified AI scenarios include creator-only authorization, late submitters, cross-student isolation, normal one-request-per-student behavior, chunk fallback, targeted regrade, failed-regrade preservation and rejection of uncorrelated `q1/q2` responses. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
 
 ## 14. Known implementation notes
 
@@ -440,7 +453,7 @@ Production migration order:
 - Batch listing/dashboard pagination is client-side because `/admin/batches` still returns the full list.
 - Recording reset deletes DB metadata but not S3 objects; lifecycle policy handles stale objects.
 - Manual AI Grade reads mutable `question_bank` question/rubric values at click time, and quiz finalization reads current correct answers/score at submit time. Assigned attempts do not persist an immutable question/rubric/quiz-key version.
-- A single batch request is bounded by the hosting function duration and provider latency/rate limits. Wave checkpoints make retry recoverable but do not make an in-flight external LLM call exactly-once.
+- A single batch request is bounded by the hosting function duration and provider latency/rate limits. Per-student checkpoints make retry recoverable but do not make an in-flight external LLM call exactly-once; sequential isolation trades throughput for safer response ownership.
 - Server-owned auto-submit cannot persist browser-only dirty answers that have not reached the backend.
 - Quiz finalization is post-commit and idempotent rather than atomic with the submitted transition; a hard crash can leave scores incomplete until a retry reruns finalization.
 - `deploy-vps.sh` resets the `admin` account password to hard-coded `admin321` on every run and hard-cleans `/opt/e-proc/app`; fix/accept that bootstrap behavior before production use and keep mutable runtime data outside the checkout.
