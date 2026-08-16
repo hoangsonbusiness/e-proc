@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { AlertTriangle, CheckCircle2, LoaderCircle } from 'lucide-react';
 import * as examRecorder from '../services/examRecorder';
-import { clearStudentSession } from '../services/studentSession';
 
 type FinalizationState = 'finalizing' | 'complete' | 'failed';
 
@@ -17,7 +16,7 @@ function StudentSubmit() {
     let mounted = true;
     const finalization = shouldFinalizeRecording ? examRecorder.getFinalizationPromise() : null;
     if (!shouldFinalizeRecording) {
-      clearStudentSession();
+      localStorage.clear();
       return () => { mounted = false; };
     }
     if (!finalization) {
@@ -27,7 +26,7 @@ function StudentSubmit() {
 
     finalization.then(() => {
       if (!mounted) return;
-      clearStudentSession();
+      localStorage.clear();
       setFinalizationState('complete');
     }).catch((error) => {
       console.error('[submit] recording finalization failed:', error);

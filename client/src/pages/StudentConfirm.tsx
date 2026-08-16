@@ -7,7 +7,6 @@ import {
   storeFullscreenBaselineWidth,
 } from '../services/sidePanelDetector';
 import { UserCheck, AlertTriangle } from 'lucide-react';
-import { clearStudentSession, setStudentSession } from '../services/studentSession';
 
 function waitForNextPaint(): Promise<void> {
   return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
@@ -114,14 +113,14 @@ function StudentConfirm() {
       return;
     }
 
-    setStudentSession('recordMode', recordMode); // tab-scoped: none/local/s3
+    localStorage.setItem('recordMode', recordMode); // để /exam biết mode (none/local/s3)
     if (recordMode === 'local' && recordingPassword) {
-      setStudentSession('recordingPassword', recordingPassword); // dùng ngầm cho resume-after-reload
+      localStorage.setItem('recordingPassword', recordingPassword); // dùng ngầm cho resume-after-reload
     }
-    setStudentSession('studentId', studentId.toString());
-    setStudentSession('studentToken', studentToken); // JWT belongs only to this tab
-    setStudentSession('duration', duration.toString());
-    setStudentSession('studentEmail', email); // lưu email cho watermark forensic
+    localStorage.setItem('studentId', studentId.toString());
+    localStorage.setItem('studentToken', studentToken); // [C-4] Lưu JWT học viên
+    localStorage.setItem('duration', duration.toString());
+    localStorage.setItem('studentEmail', email); // lưu email cho watermark forensic
 
     navigate('/exam');
   };
@@ -192,7 +191,7 @@ function StudentConfirm() {
 
             <button 
               onClick={() => {
-                clearStudentSession();
+                localStorage.clear();
                 clearFullscreenBaselineWidth();
                 navigate('/');
               }}

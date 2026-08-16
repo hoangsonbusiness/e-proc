@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { getStudentSession } from './studentSession';
 
 const API_BASE = '/api';
 
@@ -19,7 +18,7 @@ api.interceptors.request.use(
       config.headers.Authorization = `Bearer ${adminToken}`;
     }
     // [C-4] Student token — gắn vào tất cả /student/ request
-    const studentToken = getStudentSession('studentToken');
+    const studentToken = localStorage.getItem('studentToken');
     if (studentToken && config.url?.includes('/student/')) {
       config.headers.Authorization = `Bearer ${studentToken}`;
     }
@@ -236,7 +235,7 @@ export const studentApi = {
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý
   disconnect: () => {
-    const studentToken = getStudentSession('studentToken');
+    const studentToken = localStorage.getItem('studentToken');
     const sent = navigator.sendBeacon(
       '/api/student/exam/disconnect',
       new Blob([JSON.stringify({ student_token: studentToken })], { type: 'application/json' })
