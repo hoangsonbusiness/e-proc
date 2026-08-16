@@ -1,6 +1,6 @@
 # E-Audit Platform — Technical Specification
 
-**Version:** 2.0
+**Version:** 2.1
 
 **Last Updated:** 2026-08-16
 **Basis:** current TypeScript/React source, migrations and runtime configuration
@@ -15,7 +15,7 @@ Express 4 + TypeScript
   ├─ /api/admin   admin/mod JWT
   ├─ /api/student student JWT + active jti
   ├─ readiness/operations
-  ├─ durable AI queue
+  ├─ creator-triggered manual AI grading
   └─ S3 presigning + HeadObject verification
         │
         ├─ SQLite/better-sqlite3 (DATABASE_URL absent)
@@ -46,7 +46,7 @@ Runtime entry points:
 | Editor | Monaco via `@monaco-editor/react` |
 | Auth | `jsonwebtoken`, `bcryptjs` |
 | Excel | SheetJS `xlsx@0.20.3` official tarball, Multer memory storage |
-| AI | Gemini SDK plus OpenAI-compatible/fetch integrations |
+| AI | Fetch-based adapters for OpenAI Chat/Responses, Anthropic Messages, Gemini Generate Content and Ollama Generate |
 | Recording | MediaRecorder, File System Access, zip.js AES-256, AWS SDK S3 |
 | Tests | Node test runner; SQLite/default suite + optional PostgreSQL integration |
 
@@ -77,6 +77,8 @@ There is no lint script. Backend/frontend type-checks are `npx tsc --noEmit` in 
 
 PostgreSQL readiness checks required columns and the actual definitions of unique indexes, including partial predicate correctness.
 
+`initializeDatabase()` still executes idempotent runtime DDL (`CREATE/ALTER/INDEX IF NOT EXISTS`) for PostgreSQL as well as SQLite. This is not a replacement for ordered production migrations and remains a cold-start/locking technical debt on serverless.
+
 ## 4. Database schema
 
 SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where defined. The logical schema is:
@@ -105,7 +107,10 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | `record_enabled` | legacy compatibility; true only for `s3` |
 | `record_mode` | `none`, `local`, `s3`; source of truth |
 | `exam_type` | `essay` or `quiz` |
-| `ai_grading_enabled` | explicit per-batch essay grading switch |
+| `ai_grading_enabled` | legacy compatibility for the retired queue; ignored by manual grading |
+| `ai_setting_id` | legacy compatibility pointer; manual grading resolves creator's current setting |
+| `ai_grading_status` | `idle`, `processing`, `partial`, or `completed` |
+| `ai_grading_started_at`, `ai_graded_at` | manual run timestamps |
 | `created_by` | owner id |
 | `created_at` | timestamp |
 
@@ -118,6 +123,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | Session | `active_jti` |
 | Submit | `submitted_at`, `submit_reason` |
 | Recording | `recording_password`, `recording_finalized_at`, `recording_final_part_index`, `recording_incomplete` |
+| AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at` |
 | Audit | `created_at` |
 
 ### `exam_questions`
@@ -135,8 +141,8 @@ Required unique key: `(student_id, question_order)`.
 
 ### AI/admin tables
 
-- `ai_queue`: deterministic `id=exam_question_id`, student id, status (`pending|processing|completed|failed|cancelled`), attempts, error and timestamps.
-- `ai_settings`: id 1, provider, API key/base URL value, model, temperature, maxTokens, `worker_enabled`.
+- `user_ai_settings`: one row per `user_id`; provider label, `api_protocol`, Base URL, AES-256-GCM encrypted API key/IV/auth tag/version/mask, model, test status/config hash/timestamps. Plaintext secret is never returned by API.
+- `ai_queue` and `ai_settings`: compatibility schema for the retired per-question/global-setting worker. Manual batch grading neither inserts nor reads these tables.
 - `admin_users`: username unique, bcrypt hash, role (`admin|mod`), timestamps.
 
 ## 5. Authentication and authorization
@@ -149,6 +155,8 @@ Required unique key: `(student_id, question_order)`.
 - `requireAdmin` protects user management.
 - Backend ownership checks protect mod edits/deletes of questions and batches.
 - Mod create forces `record_mode='none'`; mod update preserves the stored mode.
+- Each admin/mod owns one LLM setting. Only exact `batches.created_by` may call manual AI Grade; role `admin` does not bypass this rule. Create/Update Batch has no active AI fields.
+- User deletion is rejected while that user owns any batch. Otherwise the owned AI setting and account are deleted in one transaction.
 
 ### Student
 
@@ -210,6 +218,7 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | POST | `/admin/batches/:id/students/import` | emails → 8-char codes |
 | GET | `/admin/batches/:id/students` | candidate list |
 | GET | `/admin/batches/:id/students/export` | XLSX email/code |
+| POST | `/admin/batches/:id/ai-grade` | creator-only manual grading of submitted students |
 | DELETE | `/admin/students/:id` | delete candidate attempt |
 | POST | `/admin/students/:studentId/reset` | reopen with `duration_minutes` 1–480 |
 
@@ -222,8 +231,9 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | GET | `/admin/batches/:id/results` | legacy full response |
 | PUT | `/admin/results/:studentId` | apply trainer score/feedback to all student questions |
 | GET | `/admin/batches/:id/results/export` | XLSX, one sheet/student |
-| GET/POST | `/admin/settings/ai` | read/upsert provider + worker switch |
-| POST | `/admin/settings/ai/test` | full connection test only for Gemini; other providers return guidance/stub text |
+| GET | `/admin/settings/ai` | return only the current user's non-secret setting fields/mask/test status |
+| POST | `/admin/settings/ai/test` | test draft provider/protocol/Base URL/key/model; returns short-lived config-bound test token |
+| PUT | `/admin/settings/ai` | save only after valid Test Connection token; encrypt API key |
 
 ### 6.5 Student exam
 
@@ -251,7 +261,7 @@ Common terminal responses use HTTP 410 with `reason` such as `submitted`, `timeo
 |---|---|---|
 | GET | `/health` | public readiness |
 | GET | `/test-db` | admin JWT |
-| GET | `/queue/process?limit=1..5` | admin JWT or exact `CRON_SECRET` bearer |
+| GET | `/queue/process?limit=1..5` | legacy only; admin JWT or exact `CRON_SECRET`; no Vercel schedule and disabled by default |
 | GET | `/queue/stats` | admin JWT |
 | POST | `/cache/flush` | admin JWT |
 | GET | `/stats` | admin JWT |
@@ -277,8 +287,10 @@ Submit transaction:
 1. Lock student; return `already=true` when submitted.
 2. Validate/persist supplied answers.
 3. Change status, timestamp/reason and recording-incomplete state.
-4. Bulk enqueue essay jobs only when enabled.
-5. After commit, score quiz idempotently.
+4. Commit without enqueueing essay AI work.
+5. After commit, score quiz idempotently. Essay grading is a separate creator-triggered route.
+
+Manual submit supplies the full browser answer map to step 2. Server-owned timeout/violation/concurrent-session calls do not have access to unsent browser state and persist only answers already received. If the process dies after step 4 but before quiz scoring completes, a later idempotent submit/finalization call can repair quiz scores.
 
 ## 8. Anti-cheat specification
 
@@ -326,15 +338,47 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 - Submitted/incomplete attempts get 15-minute recording-only grace.
 - Local file: `exam_{timestamp}_partNNN.zip`, AES-256, compression level 0.
 
-## 10. Queue/grading specification
+## 10. Manual AI grading specification
 
-- Production/Vercel loads pending jobs from DB; local non-production can also load a file queue at `data/queue.json`.
-- `src/server/cache.ts` is active orchestration. `src/ai/queue.ts` is legacy and must not be treated as current behavior.
-- Vercel disables process-local queue intervals; `vercel.json` cron calls `/api/queue/process` daily at `02:00 UTC` and processes at most 5 jobs/call.
-- Self-host/non-Vercel interval defaults to 10 seconds.
-- Worker cancellation and claim both re-check `batches.ai_grading_enabled` in SQL.
-- Stale `processing` rows older than `AI_QUEUE_STALE_MS` return to pending.
-- AI JSON parsing extracts the first object-like block; after 3 failed attempts score becomes 0 with failure feedback.
+### AI Settings
+
+- `GET/POST test/PUT /admin/settings/ai` always scopes data to `req.adminUser.id`; one user cannot read or reuse another user's plaintext secret.
+- Supported `api_protocol` values: `openai_chat`, `openai_responses`, `anthropic_messages`, `gemini_generate_content`, `ollama_generate`.
+- Provider label, Base URL and model are user-editable. API key is required except for Ollama protocol.
+- Test Connection calls the actual endpoint with a 20-second timeout and returns a JWT valid for 10 minutes, bound to user id plus exact normalized config fingerprint. Any config change requires testing again.
+- Save encrypts with AES-256-GCM using `AI_SETTINGS_ENCRYPTION_KEY`; GET returns only `keyMask` and `hasApiKey`.
+- Production requires HTTPS, rejects URL credentials, localhost/private resolved addresses, follows no redirects, caps response at 1 MB and hides provider response bodies from errors.
+
+### Batch invocation
+
+- Create/edit does not read, validate or write manual AI settings/flags; an essay batch can be created before its creator configures an LLM.
+- Batches List shows **AI Grade** only when `exam_type='essay'`, current user is creator, and the user's current setting is verified. Existing essay batches become eligible automatically after verification.
+- One button click creates one inbound request to `/admin/batches/:id/ai-grade`. Submit, startup and cron do not call manual grading.
+- The route rejects non-creator (403), quiz batch (400), missing/unverified current creator setting (400), and a non-stale concurrent run (409). It ignores legacy batch flag/setting columns.
+- A `processing` batch claim becomes retryable after six minutes to recover a hard-killed invocation.
+
+### Per-student LLM flow
+
+- Query only `students.status='submitted'` whose AI status is not `completed`; completed students are checkpoints and are skipped on rerun.
+- Each student is logically independent. The preferred call contains all assigned question IDs/orders/text, current rubrics and answers for that student.
+- Pre-split when prompt exceeds `AI_GRADING_MAX_PROMPT_CHARS`. On context/token-size or schema/JSON validation errors, recursively split the affected student's question set; unrelated students are never combined into one prompt.
+- Process students in waves of `AI_GRADING_CONCURRENCY` (default 5, clamp 1–10). Per-call timeout defaults to 60 seconds and clamps to 1–120 seconds.
+- Stop starting waves before `AI_GRADE_SAFE_BUDGET_MS` (default 270 seconds, clamp 30–290 seconds). Remaining/failed students produce batch status `partial`; clicking again continues them.
+
+### Validation, scoring and persistence
+
+- Expected JSON: `{results:[{exam_question_id,score,feedback}],summary_feedback}`.
+- Every expected ID must appear exactly once; unknown/duplicate/missing IDs, score outside 0..1, empty feedback or empty summary reject that student's candidate result.
+- Student answer is explicitly untrusted prompt data. System instructions say it cannot modify rubric, role, score or output format; this mitigates but cannot eliminate prompt injection.
+- Score per question is rounded to two decimals in `0.00..1.00`; unanswered is forcibly 0 regardless of model output.
+- Final score is `ROUND(SUM(per_question_score)/total_assigned_questions*10, 2)` with no weighting.
+- One DB transaction per wave writes successful `exam_questions.ai_score/ai_feedback`, successful student final score/summary/status/timestamp, and failed student error/status. A failed student does not receive a synthetic score of zero.
+- Batch becomes `completed` only when no failed/remaining student exists; otherwise `partial`.
+
+### Legacy compatibility
+
+- `src/server/cache.ts`, `src/server/services/queueStore.ts`, `ai_queue`, `ai_settings`, `/api/queue/process` and queue env variables remain for compatibility only.
+- `LEGACY_AI_QUEUE_ENABLED` defaults false. `vercel.json` contains no cron. Do not describe the legacy queue as the current production grading path.
 
 ## 11. Security and limits
 
@@ -355,17 +399,22 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 | `PORT` | 3001 |
 | `ALLOWED_ORIGINS` | `http://localhost:5173` |
 | `SESSION_SECRET` | `secret`; must override production |
-| `CRON_SECRET` | required for Vercel cron auth |
+| `AI_SETTINGS_ENCRYPTION_KEY` | required for AI; 32-byte base64 or 64-character hex, stable across deployments |
+| `AI_GRADING_CONCURRENCY` | 5, clamped 1–10 |
+| `AI_GRADING_LLM_TIMEOUT_MS` | 60000, clamped 1000–120000 ms |
+| `AI_GRADING_MAX_PROMPT_CHARS` | 80000, minimum 10000 |
+| `AI_GRADE_SAFE_BUDGET_MS` | 270000, clamped 30000–290000 ms |
 | `SKIP_TIME_CHECK` | `true` bypasses schedule |
 | `DB_POOL_MIN`, `DB_POOL_MAX` | 0, 4 |
 | `DB_CONNECT_TIMEOUT_MS`, `DB_CONNECT_ATTEMPTS` | 15000, 2 |
 | `STATEMENT_TIMEOUT` | `30s` |
-| `QUEUE_PROCESS_INTERVAL` | 10000, non-Vercel only |
-| `AI_QUEUE_STALE_MS` | 900000 |
+| `LEGACY_AI_QUEUE_ENABLED` | false; explicit compatibility opt-in only |
+| `CRON_SECRET` | legacy `/queue/process` auth only; no scheduled cron |
+| `QUEUE_PROCESS_INTERVAL` | 10000, legacy non-Vercel worker only |
+| `AI_QUEUE_STALE_MS` | 900000, legacy queue recovery only |
 | `ANSWER_FLUSH_INTERVAL` | 5000, legacy buffer only |
 | `ADMIN_PERF_LOGS`, `ADMIN_SLOW_REQUEST_MS` | off, 1000 |
-| `GEMINI_API_KEY` | fallback when DB settings absent |
-| `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` | Azure only |
+| `GEMINI_API_KEY` | legacy global queue fallback only |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET` | S3 mode |
 
 `JWT_EXPIRES_IN` is documented in older files but current login code hard-codes 24h; changing the env alone has no effect.
@@ -380,14 +429,19 @@ Production migration order:
 4. `20260810_violation_event_idempotency.sql`
 5. `20260813_ai_grading_controls.sql`
 6. `20260813_admin_query_performance.sql`
+7. `20260816_user_ai_manual_grading.sql`
 
-`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 57 total, 51 pass, 6 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs six integration cases in temporary schema `test_violation`. Root and client `npm audit --omit=dev` both reported zero production vulnerabilities on the same date.
+`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 66 total, 60 pass, 6 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs six integration cases in temporary schema `test_violation`. Root and client `npm audit --omit=dev` both reported zero production vulnerabilities on the same date.
 
 ## 14. Known implementation notes
 
-- `/student/select-email`, `/student/exam/flush`, legacy full question/result endpoints and `src/ai/queue.ts` remain for compatibility but are not primary UI paths.
+- `/student/select-email`, `/student/exam/flush`, legacy full question/result endpoints, `src/ai/queue.ts` and the old queue/global AI setting remain for compatibility but are not primary UI paths.
 - `/exam/start` contains unreachable legacy code after an early return; reason from the atomic implementation, not that block.
 - Batch listing/dashboard pagination is client-side because `/admin/batches` still returns the full list.
 - Recording reset deletes DB metadata but not S3 objects; lifecycle policy handles stale objects.
+- Manual AI Grade reads mutable `question_bank` question/rubric values at click time, and quiz finalization reads current correct answers/score at submit time. Assigned attempts do not persist an immutable question/rubric/quiz-key version.
+- A single batch request is bounded by the hosting function duration and provider latency/rate limits. Wave checkpoints make retry recoverable but do not make an in-flight external LLM call exactly-once.
+- Server-owned auto-submit cannot persist browser-only dirty answers that have not reached the backend.
+- Quiz finalization is post-commit and idempotent rather than atomic with the submitted transition; a hard crash can leave scores incomplete until a retry reruns finalization.
 - `deploy-vps.sh` resets the `admin` account password to hard-coded `admin321` on every run and hard-cleans `/opt/e-proc/app`; fix/accept that bootstrap behavior before production use and keep mutable runtime data outside the checkout.
 - Client/browser controls can be bypassed by a sufficiently controlled environment; high-stakes use still needs evidence review and procedural controls.

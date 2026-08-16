@@ -3,7 +3,7 @@
 Hai topology production đang được repository hỗ trợ:
 
 - **Vercel (mặc định):** frontend tĩnh + Express Function, Supabase PostgreSQL qua Transaction Pooler, và S3 nếu bật screen recording.
-- **Ubuntu VPS:** `deploy-vps.sh` dựng Docker Compose + Caddy/HTTPS, kết nối Supabase bằng Session Pooler và chạy queue worker liên tục trong process backend.
+- **Ubuntu VPS:** `deploy-vps.sh` dựng Docker Compose + Caddy/HTTPS và kết nối Supabase bằng Session Pooler. AI grading hiện vẫn được kích hoạt thủ công từ Batches List; queue worker cũ chỉ chạy khi chủ động bật compatibility flag.
 
 ### Vì sao diff có nhiều file?
 
@@ -13,11 +13,11 @@ Hai topology production đang được repository hỗ trợ:
 |---|---|---|
 | Frontend source | `client/src/**` | retry violation, browser/display guard, recorder, answer debounce |
 | Frontend artifact | `client/dist/**` | bundle hash mới mà Vercel thực sự phục vụ; được sinh bởi build, không sửa tay |
-| Backend source | `src/server/**` | transaction violation, schema readiness, queue worker, session enforcement |
+| Backend source | `src/server/**` | transaction violation, schema readiness, manual AI grading/provider layer, session enforcement |
 | Backend artifact | `dist/server/**` | JavaScript Vercel thực sự chạy; được sinh bởi TypeScript build |
 | Database | `migrations/**` | column/table/index bắt buộc trên Supabase |
 | Regression test | `test/**`, `scripts/run-postgres-tests.mjs` | SQLite test và race test PostgreSQL thật |
-| Dependency/config | hai `package*.json`, `vercel.json` | dependency đã vá, cron và lệnh test/build |
+| Dependency/config | hai `package*.json`, `vercel.json` | dependency đã vá và lệnh test/build; `vercel.json` hiện không có cron |
 
 Không phải mọi file trong diff đều là logic độc lập: phần lớn `dist/**`, asset hash và lockfile là artifact/dependency được sinh lại. Source of truth vẫn là `src/**`, `client/src/**`, migration và config.
 
@@ -51,7 +51,7 @@ npm audit --omit=dev
 cd client && npm audit --omit=dev
 ```
 
-Kết quả đã xác minh ngày 2026-08-16: `npm test` có **57 test, 51 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
+Kết quả đã xác minh ngày 2026-08-16: `npm test` có **66 test, 60 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
 
 ### 2.1. `TEST_DATABASE_URL` dùng để làm gì?
 
@@ -153,8 +153,12 @@ Chạy đúng thứ tự:
 6. `migrations/20260813_admin_query_performance.sql`
    - Mong đợi verification trả 2 index — `idx_students_batch_id`, `idx_violation_events_student_created_at`.
    - Chạy lúc ít tải vì `CREATE INDEX` thông thường có thể phải chờ hoặc chặn write xung đột trong thời gian ngắn.
+7. `migrations/20260816_user_ai_manual_grading.sql`
+   - Tạo `user_ai_settings` với API key mã hóa theo owner.
+   - Thêm trạng thái manual AI grading cho `batches` và điểm/summary/status/error cho `students`.
+   - Mong đợi verification trả các column mới của `user_ai_settings`, `batches` và `students`.
 
-Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Tuy nhiên file cuối có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
+Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
 ### 3.3. Nếu migration thứ ba báo duplicate
 
@@ -176,9 +180,11 @@ HAVING COUNT(*) > 1;
 
 Không xóa row tự động. Đối chiếu email/batch/answer của các ID được trả về, quyết định row đúng cần giữ, sửa dữ liệu rồi chạy lại migration thứ ba. Nếu không chắc row nào đúng, dừng deploy và backup dữ liệu trước khi xử lý.
 
-### 3.4. Vì sao migration production không tự chạy khi Vercel start?
+### 3.4. Vì sao vẫn phải chạy migration production trước deploy?
 
-Cold start Vercel có thể chạy đồng thời ở nhiều instance. Tự chạy DDL/dedupe lúc startup vừa tăng lock trên Supabase Free vừa làm khó kiểm soát lỗi dữ liệu. Runtime chỉ kiểm tra readiness và trả `503` nếu schema chưa đúng; thay đổi schema production phải là bước deploy có chủ đích.
+Source hiện vẫn chạy idempotent schema initialization (`CREATE/ALTER/INDEX IF NOT EXISTS`) trong `initializeDatabase()` khi instance khởi động, sau đó mới chạy `verifyRequiredSchema()`. Runtime không tự chạy tuần tự toàn bộ file `migrations/**`, không thực hiện đầy đủ các bước kiểm tra/dedupe và không tạo migration history.
+
+Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema: nó có thể tăng lock/cold-start trên Supabase Free và làm lỗi dữ liệu khó kiểm soát. Phải chạy migration có chủ đích trước deploy; readiness chỉ là hàng rào cuối trả `503` nếu required schema/index vẫn chưa đúng. Việc chuyển hoàn toàn DDL ra khỏi runtime là technical debt còn tồn tại.
 
 Supabase khuyến nghị dùng migration files/CLI cho workflow lâu dài; thao tác SQL Editor trên remote không tạo migration history. Đợt này vẫn hướng dẫn SQL Editor vì repository hiện lưu migration ngoài cấu trúc Supabase CLI. Nếu chuyển sang CLI sau này, cần import/repair migration history trước, không chạy lẫn hai workflow.
 
@@ -200,7 +206,7 @@ Các biến bắt buộc:
 - `SESSION_SECRET`: chuỗi ngẫu nhiên riêng, không dùng giá trị mặc định.
 - `DATABASE_URL`: Transaction Pooler URL từ Supabase.
 - `ALLOWED_ORIGINS`: domain production chính xác, ví dụ `https://eaudit.vercel.app`.
-- `CRON_SECRET`: chuỗi ngẫu nhiên tối thiểu 16 ký tự; Vercel tự gửi `Authorization: Bearer <CRON_SECRET>` tới cron endpoint.
+- `AI_SETTINGS_ENCRYPTION_KEY`: đúng 32 byte dạng base64 hoặc 64 ký tự hex. Key này mã hóa API key LLM của user và phải giữ ổn định giữa các deployment; mất/đổi key sẽ làm các cấu hình đã lưu không giải mã được.
 
 `DATABASE_URL` ở đây phải lấy từ **project Supabase production**, không phải `.env.test.local` hay project `e-proc-test`. Không đặt `TEST_DATABASE_URL` trên Vercel.
 
@@ -210,16 +216,26 @@ Có thể tạo secret trong PowerShell, chạy riêng từng lần và lưu nga
 [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(48))
 ```
 
+Tạo riêng key AES 64 ký tự hex cho `AI_SETTINGS_ENCRYPTION_KEY`:
+
+```powershell
+[Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLowerInvariant()
+```
+
 Biến khuyến nghị:
 
 - `DB_POOL_MAX=4`
 - `DB_POOL_MIN=0`
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
-- `AI_QUEUE_STALE_MS=900000` — recover job bị kẹt `processing` sau 15 phút; không đặt thấp hơn thời gian tối đa một lần gọi AI.
+- `AI_GRADING_CONCURRENCY=5` — số học viên được gọi LLM song song trong một wave, code clamp 1–10.
+- `AI_GRADING_LLM_TIMEOUT_MS=60000` — timeout mỗi LLM request, code clamp 1–120 giây.
+- `AI_GRADING_MAX_PROMPT_CHARS=80000` — ngưỡng chủ động chia câu hỏi của một học viên thành chunk.
+- `AI_GRADE_SAFE_BUDGET_MS=270000` — ngừng bắt đầu wave mới trước giới hạn 300 giây của function; code clamp tối đa 290 giây.
 - `ADMIN_PERF_LOGS=true` — tùy chọn, log timing cho mọi API admin trong giai đoạn lấy baseline; tắt sau khi đo xong.
 - `ADMIN_SLOW_REQUEST_MS=1000` — khi không bật full perf logs, chỉ log API admin chậm hơn ngưỡng này.
-- `GEMINI_API_KEY` hoặc cấu hình provider trong admin UI.
+
+Các biến `CRON_SECRET`, `GEMINI_API_KEY`, `QUEUE_PROCESS_INTERVAL`, `AI_QUEUE_STALE_MS` và `LEGACY_AI_QUEUE_ENABLED` chỉ phục vụ queue/global setting cũ. Không cần cấu hình chúng cho manual AI Grade; không bật `LEGACY_AI_QUEUE_ENABLED=true` nếu không chủ đích chạy compatibility worker.
 
 Nếu dùng S3 recording:
 
@@ -266,31 +282,26 @@ $health = Invoke-RestMethod 'https://<domain>/api/health'
 $health | ConvertTo-Json -Depth 5
 ```
 
-Sau health check, dùng một batch/student test riêng để chạy đủ: verify access code → start → trả lời ít nhất hai câu → tạo một violation thử nghiệm → submit → mở Admin Results kiểm tra answer, violation event, `submitted_at`, `submit_reason` và AI queue. Không dùng học viên thật cho smoke test.
+Sau health check, dùng một batch/student test riêng để chạy đủ: tạo batch essay (không cần LLM setting) → cấu hình LLM trong AI Settings → Test Connection → Save → verify access code → start → trả lời ít nhất hai câu → tạo một violation thử nghiệm → submit → tại Batches List bấm **AI Grade** → mở Results kiểm tra answer, feedback từng câu, summary feedback, điểm tổng kết, `submitted_at` và `submit_reason`. Không dùng học viên thật cho smoke test.
 
-## 7. AI queue trên Vercel Hobby
+## 7. Manual AI Grade trên Vercel Hobby
 
-Queue không còn dựa vào `setInterval` trên Vercel và không gọi AI trong cold-start readiness.
+AI grading không chạy khi học viên submit và không dùng Vercel Cron. Một lần creator bấm **AI Grade** tạo đúng một backend invocation tới `POST /api/admin/batches/:id/ai-grade`.
 
-- Enqueue được `await` tới khi row `ai_queue` đã persist.
-- Worker claim atomically bằng `UPDATE ... WHERE status='pending'`; nhiều instance không cùng chấm một job.
-- Job `processing` bị crash được trả về `pending` sau `AI_QUEUE_STALE_MS`.
-- `vercel.json` đăng ký cron `/api/queue/process` lúc `02:00 UTC` mỗi ngày; endpoint mặc định xử lý tối đa 5 job.
-- Endpoint chấp nhận `CRON_SECRET` của Vercel hoặc JWT admin.
+Trong invocation đó:
 
-Vercel Hobby hiện chỉ cho cron tối đa **một lần/ngày** và thời điểm có thể lệch trong giờ đã chọn. Muốn có kết quả ngay, admin gọi thủ công:
+- Chỉ `batches.created_by` được chạy; role `admin` không bypass ownership.
+- Chỉ creator được chấm batch essay của mình. Backend lấy verified LLM setting hiện tại của creator; không phụ thuộc legacy `ai_grading_enabled` hoặc `ai_setting_id`.
+- Mỗi học viên `submitted` có một LLM request độc lập chứa toàn bộ câu hỏi, answer và rubric; payload lớn hoặc response không hợp lệ có thể tách thành nhiều chunk cho riêng học viên đó.
+- Học viên chạy theo wave, mặc định tối đa 5 request LLM song song.
+- Mỗi wave thành công được commit vào Supabase: score/feedback từng câu, summary feedback và điểm tổng kết thang 10.
+- Khi gần hết safe budget, backend dừng tạo wave mới, trả batch status `partial`; creator bấm lại để tiếp tục. Student đã `completed` được bỏ qua.
 
-```text
-GET /api/queue/process?limit=5
-Authorization: Bearer <admin JWT>
-```
+Điểm từng câu nằm trong `0.00..1.00`. Điểm tổng kết là `ROUND(SUM(score)/total_questions*10, 2)`; câu không trả lời tính 0. Một invocation có thể phát sinh 25 outbound LLM requests cho batch 25 học viên, nhưng vẫn chỉ là một inbound Vercel Function invocation.
 
-Lặp lại tới khi `processed: 0`. Vercel không tự retry cron lỗi, nên phải theo dõi logs.
+`AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; chunk fallback làm tăng số request và tổng thời gian. Nếu function timeout, wave đã commit vẫn còn, nhưng response có thể bị ngắt và batch có thể tạm ở `processing` cho đến khi stale-claim 6 phút cho phép chạy lại.
 
-Tài liệu chính thức:
-
-- https://vercel.com/docs/cron-jobs/usage-and-pricing
-- https://vercel.com/docs/cron-jobs/manage-cron-jobs
+`ai_queue`, `ai_settings` và `/api/queue/process` chỉ còn compatibility. `vercel.json` không có cron; endpoint cũ xử lý 0 job theo mặc định vì `LEGACY_AI_QUEUE_ENABLED=false`.
 
 ## 8. Answer persistence và free tier
 
@@ -311,7 +322,7 @@ Tài liệu chính thức:
 
 ## 9. Triển khai Ubuntu VPS bằng `deploy-vps.sh`
 
-Topology này phù hợp khi cần backend/AI queue worker chạy liên tục thay vì phụ thuộc Vercel cron. Script hiện chỉ hỗ trợ **Ubuntu**, phải chạy bằng `root`, và sẽ:
+Topology này phù hợp khi cần backend chạy lâu dài thay vì serverless. Manual AI Grade vẫn được kích hoạt bằng button giống Vercel. Script hiện chỉ hỗ trợ **Ubuntu**, phải chạy bằng `root`, và sẽ:
 
 1. cài Docker Engine/Compose, Git, Caddy dependencies và UFW;
 2. chỉ mở SSH, HTTP, HTTPS/HTTP3;
@@ -328,7 +339,7 @@ Chuẩn bị DNS trỏ `APP_DOMAIN` về IPv4 của VPS, sau đó chạy từ b�
 sudo GIT_REF=<commit-or-tag> bash deploy-vps.sh
 ```
 
-Script hỏi `REPO_URL`, `APP_DOMAIN`, `DATABASE_URL`. Với VPS IPv4 chạy lâu, dùng Supabase **Session Pooler port 5432**; Transaction Pooler `6543` dành cho Vercel/serverless. Runtime VPS đặt `DB_POOL_MIN=1`, `DB_POOL_MAX=5` và `QUEUE_PROCESS_INTERVAL=10000`, nên worker xử lý queue trong process thay vì chờ cron hằng ngày.
+Script hỏi `REPO_URL`, `APP_DOMAIN`, `DATABASE_URL`. Với VPS IPv4 chạy lâu, dùng Supabase **Session Pooler port 5432**; Transaction Pooler `6543` dành cho Vercel/serverless. Runtime VPS đặt `DB_POOL_MIN=1`, `DB_POOL_MAX=5`. `QUEUE_PROCESS_INTERVAL=10000` chỉ ảnh hưởng compatibility queue nếu đồng thời bật `LEGACY_AI_QUEUE_ENABLED=true`; manual AI Grade không phụ thuộc interval.
 
 Nếu `question_bank` đang rỗng, phải cung cấp `QUESTION_BANK_CSV_URL`; importer hiện yêu cầu chính xác 599 row/ID. Nếu database đã có câu hỏi, có thể bỏ qua URL này. Các biến AI/S3 và Cloudflare có thể export trước khi chạy script.
 
@@ -347,18 +358,20 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 
 ## 10. Checklist production trước mỗi kỳ thi
 
-- [ ] Sáu migration đã chạy theo đúng thứ tự và verification query đúng.
+- [ ] Bảy migration đã chạy theo đúng thứ tự và verification query đúng.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
 - [ ] Import Excel lớn hơn 5 MiB bị từ chối; SheetJS vẫn được pin ở official tarball `0.20.3`, không hạ về npm `0.18.5`.
-- [ ] `CRON_SECRET` đã cấu hình và queue endpoint không trả 401.
+- [ ] `AI_SETTINGS_ENCRYPTION_KEY` đã cấu hình, lưu an toàn và không thay đổi giữa deployment.
+- [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
+- [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm test` có 51 pass/6 skip; `npm run test:postgres` có 6 pass/0 skip trên project test riêng.
+- [ ] `npm test` có 60 pass/6 skip; `npm run test:postgres` có 6 pass/0 skip trên project test riêng.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
-- [ ] Test một bài submit thật, xác nhận answer, violation event, recording metadata và AI queue row trong Supabase.
-- [ ] Nếu dùng VPS: đã thay `admin321`, kiểm tra certificate Caddy, UFW, Docker restart policy và queue worker.
+- [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.
+- [ ] Nếu dùng VPS: đã thay `admin321`, kiểm tra certificate Caddy, UFW và Docker restart policy.
 
 ## 11. Giới hạn còn chấp nhận
 

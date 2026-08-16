@@ -21,7 +21,9 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
     CREATE TABLE students (
       id INTEGER PRIMARY KEY, batch_id INTEGER, status TEXT, exam_started_at TEXT, exam_deadline TEXT,
       disconnected_at TEXT, submitted_at TEXT, submit_reason TEXT, active_jti TEXT,
-      recording_finalized_at TEXT, recording_final_part_index INTEGER, recording_incomplete INTEGER
+      recording_finalized_at TEXT, recording_final_part_index INTEGER, recording_incomplete INTEGER,
+      ai_final_score REAL, ai_summary_feedback TEXT, ai_grading_status TEXT DEFAULT 'pending',
+      ai_grading_error TEXT, ai_graded_at TEXT
     );
     CREATE TABLE exam_questions (
       id INTEGER PRIMARY KEY, student_id INTEGER, question_id TEXT, question_order INTEGER, answer TEXT,
@@ -32,8 +34,13 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
     CREATE TABLE recording_parts (id INTEGER PRIMARY KEY, student_id INTEGER);
   `);
   db.prepare('INSERT INTO batches (id, end_time) VALUES (1, ?)').run(batchEnd);
-  db.prepare(`INSERT INTO students VALUES
-    (7, 1, 'submitted', 'old-start', 'old-deadline', 'old-disconnect', 'old-submit', 'manual', 'old-jti', 'done', 2, 1)`).run();
+  db.prepare(`INSERT INTO students (
+    id, batch_id, status, exam_started_at, exam_deadline, disconnected_at, submitted_at,
+    submit_reason, active_jti, recording_finalized_at, recording_final_part_index,
+    recording_incomplete, ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at
+  ) VALUES
+    (7, 1, 'submitted', 'old-start', 'old-deadline', 'old-disconnect', 'old-submit', 'manual',
+     'old-jti', 'done', 2, 1, 9.5, 'old summary', 'completed', NULL, 'old-graded')`).run();
   db.prepare(`INSERT INTO exam_questions VALUES
     (10, 7, 'q1', 1, 'saved answer', 8, 'old ai', 9, 'old trainer')`).run();
   db.prepare('INSERT INTO ai_queue VALUES (10, 7)').run();
@@ -56,6 +63,9 @@ test('reopens an attempt while preserving questions and answers', async () => {
   assert.equal(student.status, 'in_progress');
   assert.equal(student.active_jti, null);
   assert.equal(student.submitted_at, null);
+  assert.equal(student.ai_final_score, null);
+  assert.equal(student.ai_summary_feedback, null);
+  assert.equal(student.ai_grading_status, 'pending');
   assert.equal(db.prepare('SELECT COUNT(*) count FROM ai_queue').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM exam_sessions').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM recording_parts').get().count, 0);

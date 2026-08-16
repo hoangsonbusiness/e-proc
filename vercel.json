@@ -28,11 +28,5 @@
     "NODE_ENV": "production",
     "DB_POOL_MIN": "0",
     "DB_POOL_MAX": "4"
-  },
-  "crons": [
-    {
-      "path": "/api/queue/process",
-      "schedule": "0 2 * * *"
-    }
-  ]
+  }
 }

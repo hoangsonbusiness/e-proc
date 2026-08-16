@@ -65,7 +65,8 @@ export async function reopenExamAttempt(
      SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL,
          submitted_at = NULL, submit_reason = NULL, active_jti = NULL,
          recording_finalized_at = NULL, recording_final_part_index = NULL,
-         recording_incomplete = FALSE
+         recording_incomplete = FALSE, ai_final_score = NULL, ai_summary_feedback = NULL,
+         ai_grading_status = 'pending', ai_grading_error = NULL, ai_graded_at = NULL
      WHERE id = ?`,
     [now.toISOString(), deadline.toISOString(), studentId],
   );

@@ -65,7 +65,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 - HTTP server entry: `src/server/server.ts`
 - Express app setup: `src/server/index.ts`
   - mounts `/api/admin` and `/api/student`
-  - exposes readiness health (`/api/health`) and internal diagnostic endpoints (admin JWT; queue processing also accepts Vercel `CRON_SECRET`)
+  - exposes readiness health (`/api/health`) and internal diagnostic endpoints (admin JWT; the disabled legacy queue endpoint can also accept `CRON_SECRET`)
 - Admin routes: `src/server/routes/admin.ts`
 - Student routes: `src/server/routes/student.ts`
 - Middleware:
@@ -86,8 +86,8 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
   - `recording_parts` (S3 recording-part metadata verified by backend `HeadObject`; unique per student + part index)
   - `exam_sessions` (anti-cheat session tracking — one row per `(student_id, jti, ip)`; `last_seen` upserted on each exam request; used to detect concurrent multi-client/multi-IP use — see Concurrent-session detection section)
-  - `ai_queue`
-  - `ai_settings`
+  - `user_ai_settings` (one encrypted, verified LLM connection per admin/mod)
+  - `ai_queue`, `ai_settings` (legacy only; manual batch grading does not use them)
   - `admin_users`
 
 ### Security model
@@ -100,7 +100,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - **User management** (`GET/POST/DELETE /api/admin/users`) is `requireAdmin`-only. Frontend page `/admin/users` (`UserManagement.tsx`); the nav link and page are hidden/redirected for mods via `useAuth().isAdmin` — but the **backend `requireAdmin` is the real gate**, the frontend hiding is only UX.
   - **Recording mode per batch** (`batches.record_mode` ∈ `{'none','local','s3'}`, default `'none'`; replaced the old boolean `batches.record_enabled` toggle — 2026-07-30): only `role === 'admin'` may set it to anything other than `'none'`. Enforced server-side in `POST/PUT /api/admin/batches` — on create a mod's requested mode is **forced to `'none'`**; on update a mod's request **keeps the existing DB `record_mode` unchanged** (mod can neither enable nor change it, for `local` OR `s3`). The batch form dropdown is `disabled` for mods (UX only). `record_enabled` is kept in sync (`= record_mode === 's3'`) for backward compat but `record_mode` is the source of truth. The `UserManagement.tsx` role selector labels mod as "cannot enable screen recording".
   - **Ownership:** mods may create questions/batches, but can edit/delete only rows whose `uploaded_by`/`created_by` matches their JWT user id. Admins may manage all rows. A mod may clone any visible batch into a new batch they own, but the server still forces the clone's recording mode to `none`.
-- Internal diagnostic endpoints require admin JWT; `/api/queue/process` additionally accepts the exact `CRON_SECRET` bearer used by Vercel Cron
+- Internal diagnostic endpoints require admin JWT; the legacy `/api/queue/process` endpoint additionally accepts an exact `CRON_SECRET` bearer, but `vercel.json` does not schedule it
 
 #### Student authentication
 After the security hardening (2026-07), student auth works via a signed JWT rather than an unverified header:
@@ -238,7 +238,7 @@ Beyond the anti-cheat layers, several backend guards were added/tightened the sa
 
 - **Rate limits:** global API limit is 1200 req/min/IP; `/student/verify` is 60 req/min/IP to allow a 25–50 candidate room behind one NAT; admin login is 10 req/min/IP and initial setup is 5 req/hour/IP.
 - **`/exam/answer` status guard:** rejects with `410` when the student is `submitted` or past `exam_deadline` — previously it buffered blindly, so answers could be overwritten after a lock/auto-submit.
-- **`/exam/submit` idempotency:** returns early (`{ already: true }`) if already `submitted`, avoiding duplicate flush + AI re-queue.
+- **`/exam/submit` idempotency:** the transaction returns `{ already: true }` when already submitted, so answers/status are not rewritten. Quiz finalization still runs afterward and is intentionally idempotent; essay AI grading is never triggered by submit.
 - **Security headers / CSP:** `src/server/index.ts` sets `Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, and (prod) HSTS via a hand-rolled middleware (no `helmet` dependency). **The CSP intentionally allows `'unsafe-eval'` and `blob:` in `script-src`/`worker-src` because Monaco requires it** — do not remove those or the editor breaks. This is a deliberate trade-off, not an oversight.
 
 #### Screen recording — three modes: `none` / `local` / `s3` (per-batch `record_mode`)
@@ -288,21 +288,23 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
   - Vite dev mode from `client/src/**` (`npm run dev` in `client/`)
   - static/public mode from `public/index.html` + `public/assets/**` (a separate, currently-stale build path — last known update predates the `extension_panel` feature; do not assume it's in sync with `client/dist`)
   - **Vercel production**, per `vercel.json`: builds/serves `dist/server/index.js` (compiled from `src/**` via `npm run build:server` → `tsc`, outDir `dist`) for `/api/*`, and `client/dist/**` (via `npm run build:client`) as static assets for everything else. This is the actual production path — `public/**` and the legacy root `server/**` directory are **not** what Vercel serves, despite both existing in the repo (see "Source of truth" note above).
-  - **Ubuntu VPS**, via `deploy-vps.sh`: generates Docker/Caddy/Compose files under `/opt/e-proc/runtime`, rebuilds from a detached checkout under `/opt/e-proc/app`, uses a long-lived DB pool/queue interval, and applies migrations automatically.
+  - **Ubuntu VPS**, via `deploy-vps.sh`: generates Docker/Caddy/Compose files under `/opt/e-proc/runtime`, rebuilds from a detached checkout under `/opt/e-proc/app`, uses a long-lived DB pool, and applies migrations automatically. Its process-local AI queue interval is legacy-only and requires `LEGACY_AI_QUEUE_ENABLED=true`.
 - A successful `client/dist` or `dist/server` build does not affect a different runtime path unless that path's artifacts are also rebuilt/synced. These paths can silently diverge from `src/**`/`client/src/**`.
 - `deploy-vps.sh` currently upserts `admin/admin321` on every run, resetting that account's password. Do not run it on a real production host without accepting/fixing this behavior, and change the credential immediately after bootstrap. The script also hard-resets/cleans only its deployment checkout; never store manual files under `/opt/e-proc/app`.
 - **Vercel build cache gotcha (confirmed 2026-07-21):** a fix was correctly committed to `src/server/routes/student.ts` and `dist/server/routes/student.js` (verified present via `git show <commit>:<path>`), Vercel auto-deployed the correct commit, yet the live deployment still served the old behavior. Redeploying with **"Use existing Build Cache" = OFF** resolved it. If a change appears correctly committed and deployed from the right commit but still doesn't take effect live, try a cache-disabled redeploy before assuming the code itself is wrong.
 
 ### Queue / AI grading
-- AI queue orchestration lives in `src/server/cache.ts`; DB state transitions shared with tests live in `src/server/services/queueStore.ts`
-- AI evaluation provider settings are also read there (`ai_settings` plus env fallback)
-- Essay grading is opt-in per batch through `batches.ai_grading_enabled`; switching it off cancels pending/processing jobs for that batch. `ai_settings.worker_enabled` pauses/resumes claims globally without deleting pending jobs.
+- AI grading is manual: submitting an essay does not enqueue work. The batch creator clicks **AI Grade** in Batches List, producing one backend invocation for the batch.
+- Only `batches.created_by` may run AI grading for that batch; role `admin` is not an ownership bypass. Create/Edit has no AI flag.
+- Batches List shows **AI Grade** when `exam_type === 'essay'`, the current user is `created_by`, and that user's current AI setting is `verified`. This applies to old and new essay batches.
+- Each submitted student is sent in an independent LLM request containing all assigned questions, answers, and rubrics. Oversized/invalid-context payloads fall back to smaller chunks. Students are processed in waves (default concurrency 5).
+- Per-question scores are 0.00–1.00. Final score is `ROUND(SUM(question scores) / total questions * 10, 2)`; unanswered questions are included as zero.
+- Each successful wave transactionally saves per-question scores/feedback plus `students.ai_final_score` and `students.ai_summary_feedback`. Completed students are skipped on retry after a partial run.
+- `user_ai_settings` is user-owned. Manual grading resolves the creator's current verified row at click time rather than a batch-bound setting. API keys are AES-256-GCM encrypted and never returned to the frontend. Save requires a short-lived token proving the exact draft passed Test Connection.
+- Provider behavior is selected by `api_protocol`: OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate Content, or Ollama Generate. Provider name, base URL, key, and model are user-editable.
 - Quiz batches never enqueue AI jobs. `submitExamAtomically()` scores exact normalized option sets immediately using each question's configured `score` and writes `Correct`/`Incorrect` feedback.
-- Startup readiness initializes/verifies DB schema and loads cache state, but deliberately does **not** call AI. Vercel queue work runs through `/api/queue/process`; process-local intervals are disabled on Vercel.
-- Queue enqueue is awaited before submit returns. Workers atomically claim `pending -> processing` in DB, and stale `processing` jobs are recovered after `AI_QUEUE_STALE_MS`.
-- `vercel.json` registers one daily Hobby-compatible cron. The route accepts either Vercel `CRON_SECRET` or an admin JWT. Hobby cron is not immediate; use the admin endpoint manually when results are needed sooner.
-- Supported AI providers: `gemini`, `openai`, `azure`, `deepseek`, `groq`, `openrouter`, `ollama`
-- AI API keys are stored in the `ai_settings` table in the database
+- The old per-question `ai_queue` worker and legacy `batches.ai_grading_enabled`/`ai_setting_id` columns remain for compatibility, but manual grading ignores them. The worker remains disabled unless `LEGACY_AI_QUEUE_ENABLED=true`; `vercel.json` no longer schedules its cron.
+- `AI_GRADE_SAFE_BUDGET_MS=270000` assumes the deployed Function can run close to 300 seconds; it does not raise the host timeout. `vercel.json` does not explicitly pin `maxDuration`, so verify Fluid Compute/function duration in the deployed project before relying on this budget.
 
 ### Question bank and admin read paths
 - Question types are `Coding`, `Conceptual`, `Fill-in`, `Debug`, `SingleChoice`, and `MultipleChoice`; levels are `Easy`, `Medium`, and `Hard`.
@@ -327,12 +329,18 @@ Batches support two blueprint formats for question assignment:
 | `DATABASE_URL` | Prod | — | PostgreSQL connection string. Absent = SQLite mode. |
 | `ALLOWED_ORIGINS` | No | `http://localhost:5173` | CORS whitelist, comma-separated |
 | `SESSION_SECRET` | No | `'secret'` | Express session secret. **Set this in production.** |
-| `CRON_SECRET` | Production | none | Protects `/api/queue/process`; Vercel Cron sends it as a Bearer token. |
+| `CRON_SECRET` | Legacy | none | Protects the disabled legacy `/api/queue/process` endpoint. |
 | `SKIP_TIME_CHECK` | No | — | Set to `'true'` to bypass exam time-window validation in any mode |
-| `GEMINI_API_KEY` | No | — | Fallback AI key if `ai_settings` table is empty |
+| `AI_SETTINGS_ENCRYPTION_KEY` | **Yes for AI** | — | 32-byte base64 or 64-hex AES key used to encrypt/decrypt user LLM API keys. Keep stable across deployments. |
+| `AI_GRADING_CONCURRENCY` | No | `5` | Students graded concurrently inside one batch invocation; clamped to 1–10. |
+| `AI_GRADING_LLM_TIMEOUT_MS` | No | `60000` | Timeout for each LLM request; clamped to 1–120 seconds. |
+| `AI_GRADING_MAX_PROMPT_CHARS` | No | `80000` | Pre-emptive per-student chunk threshold. |
+| `AI_GRADE_SAFE_BUDGET_MS` | No | `270000` | Stops starting new waves before the intended 300-second host ceiling; does not configure Vercel duration. |
+| `LEGACY_AI_QUEUE_ENABLED` | Legacy | `false` | Explicit opt-in for the retired per-question queue worker. |
+| `GEMINI_API_KEY` | Legacy | — | Used only by the retired global queue fallback. |
 | `ANSWER_FLUSH_INTERVAL` | Legacy | `5000` | The exam answer endpoint now persists directly; retained only for the unused legacy buffer code. |
-| `QUEUE_PROCESS_INTERVAL` | Self-host/local only | `10000` | Milliseconds between process-local AI queue ticks; ignored on Vercel. |
-| `AI_QUEUE_STALE_MS` | No | `900000` | Requeues a DB job left in `processing` after a crashed/timed-out worker. Keep this above the maximum grading duration. |
+| `QUEUE_PROCESS_INTERVAL` | Legacy self-host/local | `10000` | Milliseconds between retired process-local queue ticks; effective only with `LEGACY_AI_QUEUE_ENABLED=true`, ignored on Vercel. |
+| `AI_QUEUE_STALE_MS` | Legacy | `900000` | Recovery timeout for the retired per-question queue worker. |
 | `DB_POOL_MAX` | No | `4` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
 | `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
 | `DB_CONNECT_TIMEOUT_MS` | No | `15000` | PostgreSQL connect timeout per attempt. |
@@ -383,9 +391,9 @@ Batches support two blueprint formats for question assignment:
   - Requests without token return 401
 - Before deploying the 2026-08-08 schema changes to Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually and confirm its verification query returns both expected rows.
 - Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
-- Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and AI queue jobs are preserved. Atomic start + the unique question-order index prevent new start races, while deterministic AI queue primary ids and existence checks make new enqueue retries idempotent without forcing destructive cleanup. Confirm the final verification queries return six student columns and two unique indexes.
+- Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and legacy AI queue rows are preserved. Atomic start plus the unique question-order index prevents new start races. Confirm the final verification queries return six student columns and two unique indexes.
 - Also run `migrations/20260810_violation_event_idempotency.sql` before deploying the idempotent violation handler. Startup schema readiness verifies the required columns and exact unique-index definitions; a half-migrated database remains unavailable (`503`) instead of serving exam traffic.
-- Apply `migrations/20260813_ai_grading_controls.sql` before enabling per-batch AI/worker switches, then `migrations/20260813_admin_query_performance.sql` in a low-traffic window and verify its two indexes. `DEPLOY.md` is the authoritative six-file production order.
+- Apply `migrations/20260813_ai_grading_controls.sql`, then `migrations/20260813_admin_query_performance.sql`, then `migrations/20260816_user_ai_manual_grading.sql`. The last migration adds encrypted user-owned LLM settings and manual batch/student grading state. `DEPLOY.md` is the authoritative seven-file production order.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -408,7 +416,9 @@ Batches support two blueprint formats for question assignment:
 - A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.
 - Exam start now runs through a single-connection transaction with a student row lock. The deadline is `min(started_at + duration, batch.end_time)` and resume never extends it. A unique index on `(student_id, question_order)` is supplied by the 2026-08-10 migration; historical duplicate question assignments are not destructively rewritten.
 - Essay answers debounce for 5 seconds and quiz answers for 500ms, with a separate timer per question. Dirty answers are batch-saved, and the full current answer map is included in manual submit. Backend writes are guarded by `status='in_progress'` plus deadline checks and do not rely on the process-local buffer.
-- Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome; deterministic AI queue ids avoid duplicate grading jobs on retries.
+- Server-owned timeout/violation/concurrent-session submission can only commit answers already received by the backend. Browser-only dirty text is not attached to those server-side triggers and can still be lost; HTTP autosave cannot guarantee zero-loss before delivery.
+- Assigned attempts reference mutable `question_bank` rows. Manual AI Grade reads current question/rubric values when the button is clicked, and quiz finalization reads current correct answers/score at submit; there is no immutable question version snapshot.
+- Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome. Essay grading is a separate creator-owned manual action; a partial rerun skips students already marked `completed`.
 - S3 recording remains direct browser-to-S3. Answer submission completes first; `stopAndSave()` then serializes outstanding uploads and calls `/exam/recording-finalize` while `/submit` waits. The backend requires a contiguous `0..finalPartIndex` manifest. Any submit path with an unfinished S3 manifest sets `recording_incomplete=true` and receives a 15-minute recording-only grace window; answers/questions remain blocked.
 - Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
 
@@ -425,4 +435,4 @@ Batches support two blueprint formats for question assignment:
 - Student API authentication uses JWT (`studentToken`), not the `x-student-id` header. Any code that still reads `x-student-id` from request headers on student endpoints is stale and should be replaced.
 - `POST /api/student/exam/start` requires `studentAuthMiddleware` and derives `studentId` from the verified JWT; the legacy `student_id` body field sent by the frontend is ignored for identity.
 - There is intentionally no pre-exam checkbox/acknowledgement API or DB gate. Controls must use automatically observed browser/server signals; candidate self-attestation was removed as non-enforcing.
-- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/stats`, `/api/cache/flush`, `/api/stats`) require admin JWT. `/api/queue/process` accepts either admin JWT or the exact Vercel `CRON_SECRET`. All operational endpoints await startup readiness. `/api/init-tables` has been removed.
+- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/stats`, `/api/cache/flush`, `/api/stats`) require admin JWT. The legacy `/api/queue/process` accepts either admin JWT or exact `CRON_SECRET`, but has no scheduled Vercel cron and processes nothing unless `LEGACY_AI_QUEUE_ENABLED=true`. All operational endpoints await startup readiness. `/api/init-tables` has been removed.

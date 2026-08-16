@@ -27,7 +27,8 @@ function fixture(studentCount = 2) {
       id INTEGER PRIMARY KEY, batch_id INTEGER, email TEXT, status TEXT, recording_password TEXT,
       exam_started_at TEXT, exam_deadline TEXT, submitted_at TEXT, submit_reason TEXT,
       recording_finalized_at TEXT, recording_final_part_index INTEGER, recording_incomplete INTEGER,
-      created_at TEXT
+      created_at TEXT, ai_final_score REAL, ai_summary_feedback TEXT,
+      ai_grading_status TEXT DEFAULT 'pending', ai_grading_error TEXT, ai_graded_at TEXT
     );
     CREATE TABLE question_bank (
       id TEXT PRIMARY KEY, type TEXT, level TEXT, module TEXT, question_sample TEXT,
@@ -50,7 +51,11 @@ function fixture(studentCount = 2) {
     INSERT INTO question_bank VALUES ('q1', 'Coding', 'Easy', 'Java', 'Question', 'must', 'nice', 'optional');
   `);
   for (let id = 1; id <= studentCount; id += 1) {
-    database.prepare(`INSERT INTO students VALUES (?, 1, ?, 'submitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)`)
+    database.prepare(`INSERT INTO students (
+      id, batch_id, email, status, recording_password, exam_started_at, exam_deadline,
+      submitted_at, submit_reason, recording_finalized_at, recording_final_part_index,
+      recording_incomplete, created_at
+    ) VALUES (?, 1, ?, 'submitted', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, ?)`)
       .run(id, `student${id}@example.com`, `2026-08-13T00:00:${String(id).padStart(2, '0')}Z`);
     database.prepare(`INSERT INTO exam_questions VALUES (?, ?, 'q1', 1, 'answer', 6, 'ai', 8, 'trainer', CURRENT_TIMESTAMP)`)
       .run(id, id);
@@ -99,4 +104,3 @@ test('legacy and export loaders use fixed query counts', async () => {
   assert.equal(exported.length, 20);
   assert.equal(exportDb.queryCount, 3);
 });
-

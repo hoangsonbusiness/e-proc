@@ -2,7 +2,7 @@
 
 ## E-Audit Platform — AI-Powered Technical Assessment
 
-**Version:** 2.0
+**Version:** 2.1
 
 **Last Updated:** 2026-08-16
 **Reviewed source of truth:** `src/**`, `client/src/**`, `migrations/**`, package/build/deploy configuration
@@ -15,8 +15,8 @@ E-Audit Platform tổ chức bài đánh giá kỹ thuật trực tuyến dạng
 
 | Actor | Mục tiêu và quyền chính |
 |---|---|
-| Admin | Quản lý user quản trị, toàn bộ question/batch, recording, AI và kết quả |
-| Moderator (`mod`) | Tạo question/batch; chỉ sửa/xóa nội dung mình sở hữu; không được bật recording |
+| Admin | Quản lý user quản trị, toàn bộ question/batch, recording và kết quả; AI setting/AI Grade vẫn bị giới hạn theo ownership |
+| Moderator (`mod`) | Tạo question/batch; chỉ sửa/xóa nội dung mình sở hữu; không được bật recording; có LLM setting riêng |
 | Candidate | Xác thực bằng access code, làm bài trong môi trường kiểm soát và nộp bài |
 
 Không còn ràng buộc “cố định 10 câu/50 thí sinh”. Blueprint hiện nhận 1–100 câu. Năng lực tải production phải được đo, không suy ra từ các số liệu cũ trong tài liệu.
@@ -26,7 +26,7 @@ Không còn ràng buộc “cố định 10 câu/50 thí sinh”. Blueprint hi�
 - Backend quyết định cuối cùng về identity, deadline, trạng thái, violation lock và concurrent-session lock.
 - Browser telemetry là risk signal/evidence, không phải bảo đảm tuyệt đối.
 - Answer durability không phụ thuộc process-local memory.
-- Submit, violation retry và queue enqueue phải idempotent.
+- Submit và violation retry phải idempotent; manual AI Grade phải có thể chạy tiếp an toàn sau partial failure mà không ghi đè lại student đã hoàn tất.
 - Answer submit không chờ recording finalize; lỗi evidence phải hiển thị rõ để điều tra.
 - TypeScript/React source và migration là nguồn sự thật; generated artifacts không phải nguồn thiết kế.
 
@@ -37,8 +37,10 @@ Không còn ràng buộc “cố định 10 câu/50 thí sinh”. Blueprint hi�
 - Tạo admin đầu tiên qua `/admin/setup` chỉ khi `admin_users` trống.
 - Login trả JWT 24 giờ, `role`, `userId`; client lưu token/expiry/role/user id.
 - `admin` quản lý user role `admin`/`mod` và không được tự xóa chính mình.
+- Không được xóa admin/mod đang sở hữu batch; nếu không còn batch sở hữu, AI setting của user được xóa cùng account trong transaction.
 - `mod` chỉ sửa/xóa question có `uploaded_by` và batch có `created_by` bằng JWT user id.
 - Chỉ `admin` được đặt `record_mode` khác `none`. Mod clone batch vẫn bị server ép recording về `none`.
+- Mỗi admin/mod sở hữu riêng một verified LLM connection. Chỉ `batches.created_by` được bật/tắt AI Grading hoặc gọi AI Grade cho batch đó; super-admin không phải ngoại lệ.
 - Mọi route admin sau setup/login/logout xác thực JWT; việc ẩn nút trên frontend chỉ là UX.
 
 ### 3.2 Question bank
@@ -66,7 +68,7 @@ Validation:
 
 ### 3.3 Batch management
 
-Mỗi batch có tên, UTC start/end, duration, `exam_type`, blueprint, `ai_grading_enabled`, `record_mode` và `created_by`.
+Mỗi batch có tên, UTC start/end, duration, `exam_type`, blueprint, `record_mode` và `created_by`. Create/Update không có AI flag.
 
 Current blueprint:
 
@@ -82,7 +84,8 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - Tổng blueprint: 1–100 câu; feasibility đối chiếu module/level hoặc module/type/level.
 - Batch quiz chỉ lấy `SingleChoice`/`MultipleChoice`; essay loại hai type này.
 - Clone là frontend prefill form tạo mới với hậu tố `CLONE`, không có clone API riêng.
-- Tắt AI grading cancel queue jobs `pending/processing` của batch.
+- Batches List hiện **AI Grade** cho mọi batch essay cũ/mới khi current user là creator và current user có verified LLM setting.
+- Quiz và batch do user khác tạo không hiện button. Submit không tự gọi AI và không tạo manual grading work.
 
 ### 3.4 Candidate management
 
@@ -116,16 +119,22 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 ### 3.7 Grading
 
 - Quiz chấm ngay bằng exact-set match, không partial credit; đúng nhận configured score, sai 0.
-- Essay chỉ enqueue khi batch bật AI grading.
-- Queue id deterministic theo `exam_question.id`, claim atomic, tối đa 3 attempts, recover stale processing jobs.
-- `ai_settings.worker_enabled=false` dừng claim nhưng giữ pending jobs.
-- Provider: Gemini, OpenAI, Azure, Groq, DeepSeek, OpenRouter, Ollama.
+- Essay chỉ chấm khi creator có verified setting bấm **AI Grade**. Backend dùng current verified setting của creator, không dùng setting/flag lưu trên batch.
+- Một lần bấm tạo một backend invocation cho batch. Mỗi student `submitted` được gọi LLM độc lập với toàn bộ câu hỏi, answer và rubric của student đó; khi vượt ngưỡng prompt/context hoặc response sai cấu trúc, hệ thống chia nhỏ câu hỏi của chính student đó để retry.
+- Student được xử lý theo wave, mặc định concurrency 5. Mỗi wave lưu transactionally score/feedback từng câu, `ai_final_score`, `ai_summary_feedback`, trạng thái và lỗi.
+- Mỗi câu nhận 0.00–1.00, cho phép điểm lẻ tối đa hai chữ số; câu không trả lời là 0. Điểm tổng kết: `ROUND(SUM(question_score) / total_questions * 10, 2)`, không dùng trọng số.
+- LLM output phải chứa đủ đúng `exam_question_id`, không ID lạ/trùng, score hữu hạn trong range, feedback từng câu và summary feedback không rỗng.
+- Batch hết execution budget hoặc có student lỗi chuyển `partial`; creator bấm lại để chấm failed/remaining student, còn student `completed` được bỏ qua.
+- User nhập Provider, API protocol, Base URL, API Key và Model tại AI Settings. Hỗ trợ OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate Content và Ollama Generate.
+- Test Connection phải pass cho đúng cấu hình trước khi Save. API key được AES-256-GCM encrypt và không trả plaintext về frontend.
+- Production chặn URL HTTP, localhost/private address, credentials trong URL, redirect và response vượt giới hạn; lỗi provider không echo response body có thể chứa secret.
+- Legacy `ai_queue`/global `ai_settings` không tham gia luồng này và mặc định bị vô hiệu hóa.
 - Trainer override hiện áp cùng score/feedback cho toàn bộ questions của một student.
 
 ### 3.8 Results and reporting
 
 - Results summary phân trang 10/25/50; question bank và results dùng aggregate query count không tăng theo số row trong page.
-- Summary hiển thị status, average score, counted violations, forensic count, recording count/bytes và local password.
+- Summary hiển thị status, average/effective score, AI final score, AI summary feedback, counted violations, forensic count, recording count/bytes và local password.
 - Answers/feedback/violation events/recording parts load lazy theo student.
 - Detail hiển thị type, timestamp, length, question id, preview và metadata.
 - Export Excel một sheet/student; trainer score ưu tiên hơn AI/quiz score.
@@ -179,24 +188,26 @@ Concurrent session:
 |---|---|
 | `question_bank` | Question/rubric/quiz config/owner |
 | `batches` | Schedule/blueprint/exam-record-AI mode/owner |
-| `students` | Candidate attempt/code/deadline/session/submit/recording state |
+| `students` | Candidate attempt/code/deadline/session/submit/recording state và AI final result/status |
 | `exam_questions` | Assignment/option order/answer/scores |
 | `violations` | Unique counted row theo student/type |
 | `violation_events` | Append-only forensic event + idempotency id |
 | `recording_parts` | S3 part đã verify |
 | `exam_sessions` | Recent jti/IP/UA activity |
-| `ai_queue` | Durable grading jobs |
-| `ai_settings` | Provider + worker switch |
+| `user_ai_settings` | Một verified LLM connection/user; API key mã hóa và fingerprint cấu hình đã test |
+| `ai_queue`, `ai_settings` | Compatibility schema của queue/global setting cũ; không dùng bởi manual AI Grade |
 | `admin_users` | Credentials + role |
 
 Production PostgreSQL cần migrations; startup readiness kiểm tra required columns và unique-index definitions trước khi phục vụ traffic.
 
+Runtime hiện vẫn thực thi idempotent schema DDL trước readiness; production không được dựa vào cơ chế này thay cho migration có thứ tự vì nhiều serverless cold start có thể chạy đồng thời.
+
 ## 5. API surface
 
 - Public admin auth: initialization, setup, login, logout.
-- Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; AI settings/test.
+- Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility/manual AI Grade; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; owned AI settings/test/save.
 - Student: verify, start, questions, answer(s), submit, disconnect, violation, recording URL/complete/finalize.
-- Operations: readiness health; authenticated DB/queue/cache stats; queue process bằng admin JWT hoặc exact `CRON_SECRET` bearer.
+- Operations: readiness health; authenticated DB/legacy-queue/cache stats. Legacy queue process vẫn nhận admin JWT hoặc exact `CRON_SECRET`, nhưng không có Vercel cron và mặc định không xử lý job.
 
 Chi tiết method/path nằm trong `SPEC.md`.
 
@@ -216,7 +227,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - Readiness 503 khi DB/schema/cache chưa sẵn sàng.
 - Direct DB answer writes, transactional/idempotent submit.
 - Paginated/lazy admin read paths và request/DB query metrics.
-- Vercel queue chạy qua cron/admin endpoint; self-host có interval 10 giây.
+- Manual AI Grade chạy trong chính request do creator kích hoạt, checkpoint theo wave và dừng nhận wave mới trước execution budget. `vercel.json` không có cron.
 
 ### Browser compatibility
 
@@ -231,8 +242,8 @@ Chi tiết method/path nằm trong `SPEC.md`.
 3. Blueprint ngoài 1–100 hoặc vượt inventory bị từ chối; mod không bật recording qua clone/API.
 4. Verify mới revoke token cũ; missing/invalid/revoked token trả 401.
 5. Start tạo unique assignment, deadline không vượt batch end, resume không gia hạn.
-6. Answer sau deadline/submitted không ghi; submit không mất answer đang debounce.
-7. Quiz exact answer nhận configured score; essay AI-off không enqueue; worker-off không claim.
+6. Answer sau deadline/submitted không ghi; manual submit gửi full answer map nên không phụ thuộc timer đang debounce.
+7. Quiz exact answer nhận configured score; essay submit không tự chấm; chỉ creator có verified setting thấy/chạy AI Grade. Điểm AI per-question 0..1 và final score theo công thức thang 10, lưu cùng feedback/summary.
 8. Retry cùng violation event id không tăng counter; đủ threshold auto-submit server-side.
 9. Client không report được `concurrent_session`; different-IP overlap auto-submit.
 10. Unsupported display API, extended display, non-monitor share hoặc fullscreen denial đều chặn Start.
@@ -247,12 +258,16 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - Concurrent use cùng NAT/IP có thể không bị detector phát hiện.
 - Local recording do candidate kiểm soát; password phải hiện diện trong client để mã hóa.
 - S3 chỉ verify object/key/size/manifest, chưa verify duration/frame/black screen.
-- AI response JSON chưa có schema validation sâu.
+- AI output được validate cấu trúc/ID/range nhưng chất lượng chấm và prompt injection không thể được loại bỏ tuyệt đối; cần review khi kết quả bất thường.
+- Manual grading đọc question/rubric hiện tại từ `question_bank` tại lúc bấm AI Grade; quiz finalization cũng đọc correct answer/score hiện tại khi submit. Sửa question/rubric/quiz key sau khi đề đã được assign có thể thay đổi kết quả vì chưa có immutable question versioning.
+- Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Chunk fallback tăng độ bền context nhưng cũng tăng số outbound request và thời gian xử lý.
+- Server-side auto-submit chỉ dùng answer đã tới backend; dirty text còn trong browser tại thời điểm timeout/violation/concurrent-session lock có thể chưa được lưu. HTTP autosave không bảo đảm zero-loss trước khi request được giao.
+- Quiz scoring chạy sau transaction đổi trạng thái submitted. Nếu process chết đúng khoảng này, attempt có thể tạm submitted nhưng chưa đủ quiz score cho tới khi submit/finalization được gọi lại.
 - Repo chưa chứng minh SLA/load target; không dùng claim cũ “20–30 users/99.7% reduction”.
 
 ## 9. Deployment targets
 
-- Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3, daily cron.
+- Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3; manual AI Grade, không daily cron.
 - Ubuntu VPS: `deploy-vps.sh` sinh Docker/Caddy/Compose runtime ngoài checkout, dùng Supabase PostgreSQL.
 - `public/**`, root `server/**`, `index.js` và generated bundles không phải production source of truth theo Vercel config.
 

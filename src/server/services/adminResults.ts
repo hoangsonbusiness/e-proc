@@ -59,8 +59,11 @@ export async function loadBatchResultsSummary(
       s.id, s.batch_id, s.email, s.status, s.recording_password,
       s.exam_started_at, s.exam_deadline, s.submitted_at, s.submit_reason,
       s.recording_finalized_at, s.recording_final_part_index, s.recording_incomplete,
+      s.ai_final_score, s.ai_summary_feedback, s.ai_grading_status, s.ai_grading_error, s.ai_graded_at,
       s.created_at,
-      AVG(CASE WHEN eq.ai_score IS NOT NULL THEN COALESCE(eq.trainer_score, eq.ai_score) END) AS avg_score,
+      COALESCE(AVG(CASE WHEN eq.trainer_score IS NOT NULL THEN eq.trainer_score END),
+               s.ai_final_score,
+               AVG(eq.ai_score)) AS avg_score,
       COUNT(eq.id) AS questions_count
     FROM students s
     LEFT JOIN exam_questions eq ON eq.student_id = s.id
@@ -128,7 +131,10 @@ export async function loadBatchResultsSummary(
 }
 
 export async function loadStudentResultDetail(db: DbExecutor, studentId: number): Promise<any | null> {
-  const studentResult = await db.query('SELECT id, email FROM students WHERE id = ?', [studentId]);
+  const studentResult = await db.query(`
+    SELECT id, email, ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at
+    FROM students WHERE id = ?
+  `, [studentId]);
   if (studentResult.rows.length === 0) return null;
 
   const [questionsResult, violationEventsResult, recordingPartsResult] = await Promise.all([
@@ -226,7 +232,10 @@ export async function loadBatchResultsLegacy(db: DbExecutor, batchId: number): P
 
 export async function loadBatchExportData(db: DbExecutor, batchId: number): Promise<any[]> {
   const [studentsResult, questionsResult, violationsResult] = await Promise.all([
-    db.query('SELECT id, email FROM students WHERE batch_id = ? ORDER BY id', [batchId]),
+    db.query(`
+      SELECT id, email, ai_final_score, ai_summary_feedback, ai_grading_status
+      FROM students WHERE batch_id = ? ORDER BY id
+    `, [batchId]),
     db.query(`
       SELECT eq.*, q.type, q.level, q.module, q.question_sample,
         q.rubric_must_have, q.rubric_nice_to_have, q.rubric_optional
@@ -253,4 +262,3 @@ export async function loadBatchExportData(db: DbExecutor, batchId: number): Prom
     violations: violations.get(Number(student.id)) || 0,
   }));
 }
-

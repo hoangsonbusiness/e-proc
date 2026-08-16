@@ -13,7 +13,6 @@ import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTr
 import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError, ExamGuardError } from '../services/examGuard.js';
 import { parseBlueprintCompat } from '../services/blueprint.js';
 import { persistViolation, computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
-import { enqueueStudentQueueJobs } from '../services/queueStore.js';
 import { isClientReportableViolation, isServerOwnedViolation } from '../services/violationPolicy.js';
 import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEnforcer.js';
 
@@ -174,7 +173,7 @@ async function submitExamAtomically(
   const transition = await db.withTransaction(async (tx) => {
     const lockSql = `
       SELECT s.status, s.exam_deadline, s.recording_finalized_at, b.record_mode, b.record_enabled,
-             b.exam_type, b.ai_grading_enabled
+             b.exam_type
       FROM students s JOIN batches b ON b.id = s.batch_id
       WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE'}
     `;
@@ -196,13 +195,11 @@ async function submitExamAtomically(
       [new Date().toISOString(), finalReason, recordMode, studentId]
     );
 
-    if (row.exam_type !== 'quiz' && row.ai_grading_enabled) {
-      await enqueueStudentQueueJobs(tx, studentId, new Date());
-    }
     return { already: false, examType: row.exam_type || 'essay' };
   });
 
-  // Essay queue rows are committed atomically with submission. Quiz scoring is idempotent.
+  // Essay grading is triggered explicitly by the batch creator from Batches List.
+  // Quiz scoring remains idempotent and immediate.
   if (transition.examType === 'quiz') await finalizeSubmission(studentId, transition.examType);
   return transition;
 }

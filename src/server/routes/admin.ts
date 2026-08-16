@@ -31,17 +31,13 @@ import {
   validateQuestionUpdate,
   type QuestionCategory,
 } from '../services/adminQuestions.js';
+import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
+import { AiGradingError, gradeBatchManually } from '../services/batchAiGrading.js';
 
 dotenv.config();
 
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
-
-function parseBooleanFlag(value: unknown, fallback = false): boolean {
-  if (value === true || value === 1 || value === '1' || value === 'true') return true;
-  if (value === false || value === 0 || value === '0' || value === 'false') return false;
-  return fallback;
-}
 
 console.log('[Admin] USE_SQLITE:', USE_SQLITE, 'NODE_ENV:', process.env.NODE_ENV);
 
@@ -258,7 +254,14 @@ router.delete('/users/:id', requireAdmin, async (req: Request, res: Response) =>
     if (req.adminUser?.id === targetId) {
       return res.status(400).json({ error: 'Cannot delete your own account' });
     }
-    await db.query('DELETE FROM admin_users WHERE id = ?', [targetId]);
+    const ownedBatches = await db.query('SELECT COUNT(*) AS count FROM batches WHERE created_by = ?', [targetId]);
+    if (Number(ownedBatches.rows[0]?.count || 0) > 0) {
+      return res.status(409).json({ error: 'Cannot delete a user who still owns batches. Delete or transfer those batches first.' });
+    }
+    await db.withTransaction(async (tx) => {
+      await tx.query('DELETE FROM user_ai_settings WHERE user_id = ?', [targetId]);
+      await tx.query('DELETE FROM admin_users WHERE id = ?', [targetId]);
+    });
     return res.json({ success: true });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -946,10 +949,9 @@ router.delete('/questions/:id', async (req: Request, res: Response) => {
 
 router.post('/batches', async (req: Request, res: Response) => {
   try {
-    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type, ai_grading_enabled } = req.body;
-    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode, ai_grading_enabled });
+    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+    console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
-    const aiGradingEnabled = parseBooleanFlag(ai_grading_enabled, false);
 
     if (!name || !start_time || !end_time || !duration) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -982,14 +984,15 @@ router.post('/batches', async (req: Request, res: Response) => {
     let result;
     if (USE_SQLITE) {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, ai_grading_enabled, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, aiGradingEnabled ? 1 : 0, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, createdBy]);
     } else {
       result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, ai_grading_enabled, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, aiGradingEnabled, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        RETURNING id
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, createdBy]);
     }
     console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
     res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -1042,19 +1045,15 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const batchId = parseInt(id);
-    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type, ai_grading_enabled } = req.body;
+    const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
     const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
 
     const currentResult = await db.query(
-      'SELECT created_by, record_mode, ai_grading_enabled FROM batches WHERE id = ?',
+      'SELECT created_by, record_mode FROM batches WHERE id = ?',
       [batchId]
     );
     const currentBatch = currentResult.rows[0];
     if (!currentBatch) return res.status(404).json({ error: 'Batch not found' });
-    const aiGradingEnabled = parseBooleanFlag(
-      ai_grading_enabled,
-      parseBooleanFlag(currentBatch.ai_grading_enabled, false)
-    );
 
     // Kiểm tra quyền: mod chỉ được sửa batch của mình
     if (req.adminUser?.role !== 'admin') {
@@ -1076,21 +1075,10 @@ router.put('/batches/:id', async (req: Request, res: Response) => {
     }
     const recordFlag = recordMode === 's3' ? 1 : 0;
 
-    await db.withTransaction(async (tx) => {
-      await tx.query(`
-        UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?, ai_grading_enabled = ?
-        WHERE id = ?
-      `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, examType, USE_SQLITE ? (aiGradingEnabled ? 1 : 0) : aiGradingEnabled, batchId]);
-
-      if (!aiGradingEnabled) {
-        await tx.query(`
-          UPDATE ai_queue
-          SET status = 'cancelled', updated_at = ?
-          WHERE status IN ('pending', 'processing')
-            AND student_id IN (SELECT id FROM students WHERE batch_id = ?)
-        `, [new Date(), batchId]);
-      }
-    });
+    await db.query(`
+      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+      WHERE id = ?
+    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, examType, batchId]);
 
     res.json({ success: true });
   } catch (error: any) {
@@ -1430,6 +1418,29 @@ router.get('/batches/:id/results/summary', async (req: Request, res: Response) =
   }
 });
 
+// One button click is one backend invocation. Inside it, each submitted student is
+// graded with an independent LLM request (with per-student chunk fallback).
+router.post('/batches/:id/ai-grade', async (req: Request, res: Response) => {
+  try {
+    const batchId = Number(req.params.id);
+    const userId = req.adminUser?.id;
+    if (!Number.isInteger(batchId) || batchId < 1) return res.status(400).json({ error: 'Invalid batch id' });
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    return res.json(await gradeBatchManually(db, batchId, userId));
+  } catch (error: any) {
+    if (error instanceof AiGradingError) return res.status(error.statusCode).json({ error: error.message });
+    console.error('[AI Grade] Batch grading failed:', error?.message || error);
+    const batchId = Number(req.params.id);
+    if (Number.isInteger(batchId) && req.adminUser?.id) {
+      await db.query(`
+        UPDATE batches SET ai_grading_status = 'partial'
+        WHERE id = ? AND created_by = ? AND ai_grading_status = 'processing'
+      `, [batchId, req.adminUser.id]).catch(() => {});
+    }
+    return res.status(500).json({ error: error?.message || 'AI grading failed' });
+  }
+});
+
 router.get('/students/:studentId/result-detail', async (req: Request, res: Response) => {
   try {
     const studentId = Number(req.params.studentId);
@@ -1498,6 +1509,8 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
         'Rubric Optional': q.rubric_optional,
         'AI Feedback': q.ai_feedback || '',
         'AI Score': q.ai_score || 0,
+        'AI Final Score (10)': student.ai_final_score ?? '',
+        'AI Summary Feedback': student.ai_summary_feedback || '',
         'Trainer Feedback': q.trainer_feedback || '',
         'Trainer Score': (q.trainer_score ?? q.ai_score) || 0,
         'Violation Count': result.violations
@@ -1532,115 +1545,25 @@ router.get('/batches/:id/results/export', async (req: Request, res: Response) =>
 
 router.get('/settings/ai', async (req: Request, res: Response) => {
   try {
-    if (!USE_SQLITE) {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS ai_settings (
-          id INTEGER PRIMARY KEY,
-          provider TEXT NOT NULL,
-          apiKey TEXT,
-          model TEXT NOT NULL,
-          temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048,
-          worker_enabled BOOLEAN NOT NULL DEFAULT true
-        )
-      `);
-    }
-    
-    const result = await db.query('SELECT * FROM ai_settings LIMIT 1');
-    if (result.rows.length > 0) {
-      res.json(result.rows[0]);
-    } else {
-      res.json({
-        provider: 'gemini',
-        apiKey: '',
-        model: 'gemini-2.0-flash',
-        temperature: 0.3,
-        maxTokens: 2048,
-        worker_enabled: true
-      });
-    }
+    return res.json(await getOwnedAiSetting(db, req.adminUser!.id));
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.post('/settings/ai', async (req: Request, res: Response) => {
-  try {
-    const { provider, apiKey, model, temperature, maxTokens, worker_enabled } = req.body;
-    const workerEnabled = parseBooleanFlag(worker_enabled, true);
-    
-    if (USE_SQLITE) {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS ai_settings (
-          id INTEGER PRIMARY KEY,
-          provider TEXT NOT NULL,
-          apiKey TEXT,
-          model TEXT NOT NULL,
-          temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048,
-          worker_enabled INTEGER NOT NULL DEFAULT 1
-        )
-      `);
-      
-      await db.query(`
-        INSERT OR REPLACE INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens, worker_enabled)
-        VALUES (1, ?, ?, ?, ?, ?, ?)
-      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048, workerEnabled ? 1 : 0]);
-    } else {
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS ai_settings (
-          id INTEGER PRIMARY KEY,
-          provider TEXT NOT NULL,
-          apiKey TEXT,
-          model TEXT NOT NULL,
-          temperature REAL DEFAULT 0.3,
-          maxTokens INTEGER DEFAULT 2048,
-          worker_enabled BOOLEAN NOT NULL DEFAULT true
-        )
-      `);
-      
-      await db.query(`
-        INSERT INTO ai_settings (id, provider, apiKey, model, temperature, maxTokens, worker_enabled)
-        VALUES (1, $1, $2, $3, $4, $5, $6)
-        ON CONFLICT (id) DO UPDATE SET
-          provider = EXCLUDED.provider,
-          apiKey = EXCLUDED.apiKey,
-          model = EXCLUDED.model,
-          temperature = EXCLUDED.temperature,
-          maxTokens = EXCLUDED.maxTokens,
-          worker_enabled = EXCLUDED.worker_enabled
-      `, [provider, apiKey || '', model, temperature || 0.3, maxTokens || 2048, workerEnabled]);
-    }
-    
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: error.message });
   }
 });
 
 router.post('/settings/ai/test', async (req: Request, res: Response) => {
   try {
-    const { provider, apiKey, model } = req.body;
-    
-    let response = '';
-    
-    if (provider === 'gemini') {
-      const { GoogleGenerativeAI } = await import('@google/generative-ai');
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const genModel = genAI.getGenerativeModel({ model: model || 'gemini-2.0-flash' });
-      const result = await genModel.generateContent('Say "Hello, connection successful!" in one sentence.');
-      response = result.response.text();
-    } else if (provider === 'openai' || provider === 'azure') {
-      response = 'OpenAI/Azure test requires openai package. Using Gemini as fallback.';
-    } else if (provider === 'deepseek') {
-      response = 'DeepSeek test requires deepseek package. Configure and test manually.';
-    } else {
-      response = `Provider ${provider} configured. Manual testing recommended.`;
-    }
-    
-    res.json({ success: true, response });
+    return res.json(await testOwnedAiSetting(db, req.adminUser!.id, req.body));
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+router.put('/settings/ai', async (req: Request, res: Response) => {
+  try {
+    return res.json(await saveOwnedAiSetting(db, req.adminUser!.id, req.body));
+  } catch (error: any) {
+    return res.status(400).json({ error: error.message });
   }
 });
 

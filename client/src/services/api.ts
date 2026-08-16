@@ -171,10 +171,13 @@ export const adminApi = {
     api.get('/admin/settings/ai'),
   
   saveAISettings: (settings: any) =>
-    api.post('/admin/settings/ai', settings),
+    api.put('/admin/settings/ai', settings),
   
   testAI: (settings: any) =>
-    api.post('/admin/settings/ai/test', settings)
+    api.post('/admin/settings/ai/test', settings),
+
+  gradeBatchWithAI: (batchId: number) =>
+    api.post(`/admin/batches/${batchId}/ai-grade`)
 };
 
 export const studentApi = {

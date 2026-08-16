@@ -389,6 +389,38 @@ await client.query(`
   } catch (_) { /* already exists */ }
   console.log('[DB] admin_users ready');
 
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS user_ai_settings (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL UNIQUE REFERENCES admin_users(id) ON DELETE RESTRICT,
+      provider VARCHAR(100) NOT NULL,
+      api_protocol VARCHAR(40) NOT NULL,
+      base_url TEXT NOT NULL,
+      encrypted_api_key TEXT NOT NULL,
+      key_iv TEXT NOT NULL,
+      key_auth_tag TEXT NOT NULL,
+      encryption_key_version INTEGER NOT NULL DEFAULT 1,
+      key_mask VARCHAR(32) NOT NULL,
+      model VARCHAR(200) NOT NULL,
+      test_status VARCHAR(20) NOT NULL DEFAULT 'untested',
+      tested_config_hash VARCHAR(64),
+      tested_at TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_setting_id INTEGER REFERENCES user_ai_settings(id) ON DELETE RESTRICT');
+  await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_status VARCHAR(20) NOT NULL DEFAULT 'idle'");
+  await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_started_at TIMESTAMP');
+  await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_graded_at TIMESTAMP');
+  await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_final_score NUMERIC(4,2)');
+  await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_summary_feedback TEXT');
+  await client.query("ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_status VARCHAR(20) NOT NULL DEFAULT 'pending'");
+  await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_error TEXT');
+  await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_graded_at TIMESTAMP');
+  await client.query('CREATE INDEX IF NOT EXISTS idx_students_batch_ai_grading ON students(batch_id, status, ai_grading_status)');
+  console.log('[DB] user-owned AI settings and manual grading columns ready');
+
     console.log('[DB] All PostgreSQL tables initialized');
   } finally {
     client.release();
@@ -634,6 +666,28 @@ function initSqlite() {
       )
     `);
 
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS user_ai_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL UNIQUE,
+        provider TEXT NOT NULL,
+        api_protocol TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        encrypted_api_key TEXT NOT NULL,
+        key_iv TEXT NOT NULL,
+        key_auth_tag TEXT NOT NULL,
+        encryption_key_version INTEGER NOT NULL DEFAULT 1,
+        key_mask TEXT NOT NULL,
+        model TEXT NOT NULL,
+        test_status TEXT NOT NULL DEFAULT 'untested',
+        tested_config_hash TEXT,
+        tested_at DATETIME,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE RESTRICT
+      )
+    `);
+
     // Migration cho SQLite DB cũ: thêm cột nếu chưa có (SQLite không có IF NOT EXISTS cho ADD COLUMN)
     const batchCols = (sqliteDb.prepare("PRAGMA table_info(batches)").all() as { name: string }[]).map(c => c.name);
     if (!batchCols.includes('record_enabled')) {
@@ -653,6 +707,27 @@ function initSqlite() {
     if (!batchCols.includes('ai_grading_enabled')) {
       sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_grading_enabled INTEGER NOT NULL DEFAULT 0');
     }
+    if (!batchCols.includes('ai_setting_id')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_setting_id INTEGER');
+    }
+    if (!batchCols.includes('ai_grading_status')) {
+      sqliteDb.exec("ALTER TABLE batches ADD COLUMN ai_grading_status TEXT NOT NULL DEFAULT 'idle'");
+    }
+    if (!batchCols.includes('ai_grading_started_at')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_grading_started_at DATETIME');
+    }
+    if (!batchCols.includes('ai_graded_at')) {
+      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_graded_at DATETIME');
+    }
+    const gradingStudentAdds: Array<[string, string]> = [
+      ['ai_final_score', 'REAL'], ['ai_summary_feedback', 'TEXT'],
+      ['ai_grading_status', "TEXT NOT NULL DEFAULT 'pending'"],
+      ['ai_grading_error', 'TEXT'], ['ai_graded_at', 'DATETIME'],
+    ];
+    for (const [name, def] of gradingStudentAdds) {
+      if (!colNames.includes(name)) sqliteDb.exec(`ALTER TABLE students ADD COLUMN ${name} ${def}`);
+    }
+    sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_students_batch_ai_grading ON students(batch_id, status, ai_grading_status)');
     const adminCols = (sqliteDb.prepare("PRAGMA table_info(admin_users)").all() as { name: string }[]).map(c => c.name);
     if (!adminCols.includes('role')) {
       sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
@@ -718,15 +793,19 @@ export async function verifyRequiredSchema(): Promise<void> {
       students: [
         'exam_started_at', 'exam_deadline', 'disconnected_at', 'recording_password',
         'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
-        'recording_final_part_index', 'recording_incomplete',
+        'recording_final_part_index', 'recording_incomplete', 'ai_final_score',
+        'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
       ],
-      batches: ['record_mode', 'exam_type', 'ai_grading_enabled'],
+      batches: ['record_mode', 'exam_type', 'ai_grading_enabled', 'ai_setting_id',
+        'ai_grading_status', 'ai_grading_started_at', 'ai_graded_at'],
       exam_questions: ['option_order'],
       violation_events: ['metadata_json', 'event_id'],
       recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
       exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
       ai_queue: ['id', 'status', 'attempts', 'updated_at'],
       ai_settings: ['worker_enabled'],
+      user_ai_settings: ['user_id', 'api_protocol', 'base_url', 'encrypted_api_key',
+        'key_iv', 'key_auth_tag', 'key_mask', 'model', 'test_status', 'tested_config_hash'],
     };
     const columnRows = await pgPool.query(
       `SELECT table_name, column_name FROM information_schema.columns

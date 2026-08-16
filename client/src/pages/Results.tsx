@@ -163,7 +163,7 @@ function Results() {
 
   const getAverageScore = (student: any) => {
     const score = student.student?.avg_score;
-    return score == null ? '0.0' : Number(score).toFixed(1);
+    return score == null ? '-' : Number(score).toFixed(2);
   };
 
   const sanitizeQuestion = (html: string): string => {
@@ -404,6 +404,12 @@ function Results() {
               </div>
 
               <div className="p-6 space-y-6">
+                {selectedStudent.student.ai_summary_feedback && (
+                  <div className="p-5 bg-indigo-50 border border-indigo-200 rounded-xl">
+                    <h4 className="flex items-center gap-2 text-indigo-900 font-bold mb-2 m-0 border-none pb-0"><Cpu size={16} /> AI Summary Feedback</h4>
+                    <p className="text-indigo-800 whitespace-pre-wrap leading-relaxed m-0">{selectedStudent.student.ai_summary_feedback}</p>
+                  </div>
+                )}
                 {/* All Questions */}
                 {selectedStudent.questions.map((q: any, index: number) => (
                   <div key={q.id} className="bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
@@ -416,11 +422,11 @@ function Results() {
                           {q.module} ({q.level}) - {q.type}
                         </strong>
                       </div>
-                      <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${q.ai_score >= 7 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                          q.ai_score >= 5 ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                      <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${q.ai_score >= 0.7 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
+                          q.ai_score >= 0.5 ? 'bg-amber-50 text-amber-700 border-amber-200' :
                             'bg-red-50 text-red-700 border-red-200'
                         }`}>
-                        <Cpu size={12} /> AI Score: {q.ai_score ?? '-'}
+                        <Cpu size={12} /> AI Score: {q.ai_score == null ? '-' : `${Number(q.ai_score).toFixed(2)}/1`}
                       </span>
                     </div>
 

@@ -32,7 +32,8 @@ class FileCache {
         // Vercel có thể freeze instance sau response; interval nền không phải scheduler tin cậy.
         if (!process.env.VERCEL) {
             this.startFlushInterval();
-            this.startQueueProcessor();
+            if (process.env.LEGACY_AI_QUEUE_ENABLED === 'true')
+                this.startQueueProcessor();
         }
         this.initialized = true;
     }
@@ -346,6 +347,10 @@ class FileCache {
         await recoverStaleQueueJobs(db, cutoff, new Date());
     }
     async processQueue(limit = 5) {
+        if (process.env.LEGACY_AI_QUEUE_ENABLED !== 'true') {
+            console.log('[Queue] Legacy per-question AI queue is disabled');
+            return 0;
+        }
         const usesDatabaseQueue = !!process.env.VERCEL || process.env.NODE_ENV === 'production';
         if (usesDatabaseQueue) {
             await this.recoverStaleProcessingJobs();
