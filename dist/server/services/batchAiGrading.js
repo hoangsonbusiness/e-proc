@@ -203,7 +203,7 @@ export async function gradeBatchManually(db, batchId, userId) {
     const studentIds = studentsResult.rows.map((row) => Number(row.id));
     if (studentIds.length === 0) {
         await db.query(`UPDATE batches SET ai_grading_status = 'completed', ai_graded_at = ? WHERE id = ?`, [new Date().toISOString(), batchId]);
-        return { success: true, total: 0, completed: 0, failed: 0, remaining: 0, message: 'No submitted students require grading' };
+        return { success: true, total: 0, completed: 0, failed: 0, remaining: 0, failures: [], message: 'No submitted students require grading' };
     }
     const placeholders = studentIds.map(() => '?').join(', ');
     const questionRows = await db.query(`
@@ -236,6 +236,7 @@ export async function gradeBatchManually(db, batchId, userId) {
     let completed = 0;
     let failed = 0;
     let processed = 0;
+    const failureDetails = [];
     try {
         for (let offset = 0; offset < studentIds.length; offset += concurrency) {
             if (Date.now() + llmTimeoutMs + 10_000 >= deadline)
@@ -256,6 +257,7 @@ export async function gradeBatchManually(db, batchId, userId) {
             completed += successes.length;
             failed += failures.length;
             processed += wave.length;
+            failureDetails.push(...failures);
         }
     }
     catch (error) {
@@ -267,5 +269,5 @@ export async function gradeBatchManually(db, batchId, userId) {
     await db.query(`
     UPDATE batches SET ai_grading_status = ?, ai_graded_at = ? WHERE id = ?
   `, [status, new Date().toISOString(), batchId]);
-    return { success: true, total: studentIds.length, completed, failed, remaining, status };
+    return { success: true, total: studentIds.length, completed, failed, remaining, status, failures: failureDetails };
 }

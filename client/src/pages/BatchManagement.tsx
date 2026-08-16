@@ -533,7 +533,10 @@ function BatchManagement() {
     try {
       const response = await adminApi.gradeBatchWithAI(Number(batch.id));
       const result = response.data;
-      alert(`AI Grade finished. Completed: ${result.completed}, Failed: ${result.failed}, Remaining: ${result.remaining}.`);
+      const failureDetails = Array.isArray(result.failures)
+        ? result.failures.map((failure: any) => `Student #${failure.studentId}: ${failure.error}`).join('\n')
+        : '';
+      alert(`AI Grade finished. Completed: ${result.completed}, Failed: ${result.failed}, Remaining: ${result.remaining}.${failureDetails ? `\n\n${failureDetails}` : ''}`);
       await loadBatches();
     } catch (error: any) {
       alert(error.response?.data?.error || error.message || 'AI grading failed');
