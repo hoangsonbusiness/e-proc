@@ -428,6 +428,21 @@ test('manual grading rejects a stale response from a previous student request', 
   }), questions, 'student-2-request'), /does not belong to the current grading request/);
 });
 
+test('manual grading accepts a response without request_token when all request-scoped grading keys match', () => {
+  const requestToken = 'abc123';
+  const result = validateGradingResponse(JSON.stringify({
+    results: [
+      { grading_key: 'g_abc123_q1', score: 0.8, feedback: 'Current first result' },
+      { grading_key: 'g_abc123_q2', score: 1, feedback: 'Current second result' },
+    ],
+    summary_feedback: 'Current summary',
+  }), questions, requestToken);
+  assert.deepEqual(result.grades.map(({ examQuestionId, score }) => ({ examQuestionId, score })), [
+    { examQuestionId: 101, score: 0.8 },
+    { examQuestionId: 102, score: 0 },
+  ]);
+});
+
 test('final score is normalized to ten and rounded to two decimals', () => {
   assert.equal(calculateFinalScore([{ score: 1 }, { score: 0.5 }, { score: 0 }], 3), 5);
   assert.equal(calculateFinalScore([{ score: 1 }, { score: 1 }, { score: 0 }], 3), 6.67);

@@ -64,9 +64,13 @@ function parseJsonObject(text: string): any {
   }
 }
 
+function gradingKey(index: number, requestToken?: string): string {
+  return requestToken ? `g_${requestToken}_q${index + 1}` : `q${index + 1}`;
+}
+
 function promptFor(questions: GradingQuestion[], requestToken: string): string {
   const payload = questions.map((question, index) => ({
-    grading_key: `q${index + 1}`,
+    grading_key: gradingKey(index, requestToken),
     question_order: question.questionOrder,
     question: question.question,
     student_answer: question.answer,
@@ -77,12 +81,13 @@ function promptFor(questions: GradingQuestion[], requestToken: string): string {
     },
   }));
   return `Evaluate every item in INPUT and return exactly this shape:
-{"request_token":"${requestToken}","results":[{"grading_key":"q1","score":0.75,"feedback":"..."}],"summary_feedback":"..."}
+{"request_token":"${requestToken}","results":[{"grading_key":"${gradingKey(0, requestToken)}","score":0.75,"feedback":"..."}],"summary_feedback":"..."}
 
 Requirements:
 - request_token must exactly equal "${requestToken}".
 - results must contain every grading_key exactly once and no unknown keys.
 - copy grading_key verbatim from INPUT; do not replace it with question_order or another identifier.
+- if request_token is omitted by the model, every request-scoped grading_key is still mandatory.
 - keep results in exactly the same order as INPUT.
 - score must be a finite number from 0.00 to 1.00.
 - feedback must explain the score against the rubric.
@@ -98,12 +103,9 @@ export function validateGradingResponse(
   expectedRequestToken?: string,
 ): { grades: QuestionGrade[]; summary: string } {
   const parsed = parseJsonObject(text);
-  if (expectedRequestToken && parsed?.request_token !== expectedRequestToken) {
-    throw new Error('LLM response does not belong to the current grading request');
-  }
   if (!Array.isArray(parsed?.results)) throw new Error('LLM results must be an array');
   if (parsed.results.length !== questions.length) throw new Error('LLM returned a different number of results than questions');
-  const questionsByKey = new Map(questions.map((question, index) => [`q${index + 1}`, question]));
+  const questionsByKey = new Map(questions.map((question, index) => [gradingKey(index, expectedRequestToken), question]));
   const expectedIds = new Set(questions.map((question) => question.id));
   const questionsFromIdentifiers = parsed.results.map((item: any) => {
     const gradingKey = typeof item?.grading_key === 'string' ? item.grading_key.trim() : '';
@@ -114,10 +116,14 @@ export function validateGradingResponse(
   });
   const identifierIds = questionsFromIdentifiers.map((question) => question?.id).filter((id): id is number => id !== undefined);
   const identifiersAreCompleteAndUnique = identifierIds.length === questions.length && new Set(identifierIds).size === questions.length;
+  const requestTokenMatches = !!expectedRequestToken && parsed?.request_token === expectedRequestToken;
   // Some custom models/gateways do not preserve per-question identifiers reliably.
-  // Production only permits this order fallback after the unique request token has
-  // proved that the response belongs to this exact student/chunk request.
-  if (!identifiersAreCompleteAndUnique && !expectedRequestToken) {
+  // A response belongs to this request when either its token matches or every
+  // request-scoped grading key (or exact backend question ID) maps uniquely.
+  if (expectedRequestToken && !requestTokenMatches && !identifiersAreCompleteAndUnique) {
+    throw new Error('LLM response does not belong to the current grading request');
+  }
+  if (!expectedRequestToken && !identifiersAreCompleteAndUnique) {
     throw new Error('LLM returned an unknown or duplicate grading key/question ID');
   }
   const resolvedQuestions = identifiersAreCompleteAndUnique
@@ -170,7 +176,9 @@ async function gradeChunkWithFallback(
   deadline: number,
 ): Promise<{ grades: QuestionGrade[]; summaries: string[] }> {
   try {
-    const requestToken = crypto.randomUUID();
+    // Keep the token short enough for smaller/custom models to copy reliably while
+    // retaining enough entropy to distinguish requests and stale responses.
+    const requestToken = crypto.randomBytes(8).toString('hex');
     const configuredTimeout = Math.max(1_000, Math.min(Number(process.env.AI_GRADING_LLM_TIMEOUT_MS || 60_000), 120_000));
     const remainingMs = deadline - Date.now() - 5_000;
     if (remainingMs < 1_000) throw new Error('AI grading execution budget exhausted');
