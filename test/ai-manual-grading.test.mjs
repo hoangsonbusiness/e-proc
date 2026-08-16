@@ -121,7 +121,7 @@ test('production provider URL validation blocks local and private targets', asyn
 
 test('saving a verified setting encrypts the key and returns only a mask', async () => {
   process.env.JWT_SECRET = 'unit-test-jwt-secret';
-  process.env.AI_SETTINGS_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64');
+  process.env.AI_SETTINGS_ENCRYPTION_KEY = `  "${'ab'.repeat(32)}" \r\n`;
   const config = normalizeConnectionConfig({
     provider: 'Custom', apiProtocol: 'openai_chat', baseUrl: 'https://example.com/v1', model: 'model-a',
   }, 'super-secret-key');

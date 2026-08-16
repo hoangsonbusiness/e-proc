@@ -2,7 +2,10 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { callLlm, connectionFingerprint, normalizeConnectionConfig } from './aiProvider.js';
 function encryptionKey() {
-    const raw = process.env.AI_SETTINGS_ENCRYPTION_KEY || '';
+    const configured = (process.env.AI_SETTINGS_ENCRYPTION_KEY || '').trim();
+    const hasMatchingQuotes = configured.length >= 2 && ((configured.startsWith('"') && configured.endsWith('"'))
+        || (configured.startsWith("'") && configured.endsWith("'")));
+    const raw = (hasMatchingQuotes ? configured.slice(1, -1) : configured).trim();
     if (/^[a-fA-F0-9]{64}$/.test(raw))
         return Buffer.from(raw, 'hex');
     try {
@@ -11,7 +14,7 @@ function encryptionKey() {
             return decoded;
     }
     catch (_) { /* handled below */ }
-    throw new Error('AI_SETTINGS_ENCRYPTION_KEY must be a 32-byte base64 value or 64 hex characters');
+    throw new Error(`AI_SETTINGS_ENCRYPTION_KEY must be a 32-byte base64 value or 64 hex characters (received ${raw.length} characters after trimming)`);
 }
 function encryptSecret(value) {
     const iv = crypto.randomBytes(12);

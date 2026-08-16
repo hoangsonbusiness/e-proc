@@ -124,95 +124,159 @@ function AISettings() {
     }
   };
 
+  const controlClassName = 'w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-transparent focus:bg-white focus:ring-2 focus:ring-blue-500';
+  const iconControlClassName = `${controlClassName} pl-10 font-mono text-sm`;
+
   return (
-    <div className="container">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-slate-200 gap-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-indigo-100 text-indigo-600 rounded-lg"><Cpu size={24} /></div>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900 m-0 border-none pb-0">AI Settings</h1>
-            <p className="text-sm text-slate-500 mt-1">This configuration belongs only to your account.</p>
+    <div className="min-h-screen bg-slate-50">
+      <div className="container space-y-6">
+        <div className="flex flex-col items-start justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-indigo-100 p-2 text-indigo-600">
+              <Cpu size={24} />
+            </div>
+            <div>
+              <h1 className="m-0 border-none pb-0 text-2xl font-bold tracking-tight text-slate-900">AI Settings</h1>
+              <p className="mt-1 text-sm text-slate-500">This configuration belongs only to your account.</p>
+            </div>
           </div>
+          <Link
+            to="/admin/dashboard"
+            aria-label="Back to Dashboard"
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+          >
+            <ArrowLeft size={16} />
+            <span className="hidden sm:inline">Back to Dashboard</span>
+          </Link>
         </div>
-        <Link to="/admin" className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium text-sm hover:bg-slate-50">
-          <ArrowLeft size={16} /> Back to Dashboard
-        </Link>
-      </div>
-      <AdminNav />
 
-      <div className="max-w-3xl mx-auto bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-          <div>
-            <h2 className="font-bold text-slate-900 m-0">Custom LLM connection</h2>
-            <p className="text-xs text-slate-500 mt-1">URLs and model names are editable and are not restricted to a fixed list.</p>
+        <AdminNav />
+
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col items-start justify-between gap-3 border-b border-slate-200 bg-slate-50/70 p-5 sm:flex-row sm:items-center sm:px-6">
+            <div>
+              <h2 className="m-0 border-none pb-0 text-lg font-bold text-slate-900">Custom LLM connection</h2>
+              <p className="mt-1 text-sm text-slate-500">Configure the provider, protocol, endpoint, key, and model used to grade your essay batches.</p>
+            </div>
+            <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-bold ${savedStatus === 'verified' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
+              {savedStatus === 'verified' ? 'Verified' : 'Not configured'}
+            </span>
           </div>
-          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${savedStatus === 'verified' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}>
-            {savedStatus === 'verified' ? 'Verified' : 'Not configured'}
-          </span>
-        </div>
 
-        <div className="p-6 space-y-5">
-          {loading ? <p className="text-slate-500">Loading settings...</p> : <>
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-1">API Provider</label>
-              <input list="provider-suggestions" value={form.provider} onChange={(event) => updateField('provider', event.target.value)} placeholder="e.g. OpenAI, Anthropic, STU Gateway" className="w-full px-3 py-2 border border-slate-300 rounded-lg" />
-              <datalist id="provider-suggestions">
-                <option value="OpenAI" /><option value="Anthropic" /><option value="Google Gemini" />
-                <option value="OpenRouter" /><option value="Groq" /><option value="DeepSeek" /><option value="Ollama" />
-              </datalist>
-            </div>
-
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-1">API Protocol</label>
-              <select value={form.apiProtocol} onChange={(event) => handleProtocolChange(event.target.value as AiProtocol)} className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white">
-                {PROTOCOLS.map((protocol) => <option key={protocol.value} value={protocol.value}>{protocol.label}</option>)}
-              </select>
-              <p className="text-xs text-slate-500 mt-1">Protocol tells the backend how to construct requests and read responses.</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-1">Base URL</label>
-              <div className="relative">
-                <LinkIcon size={16} className="absolute left-3 top-3 text-slate-400" />
-                <input value={form.baseUrl} onChange={(event) => updateField('baseUrl', event.target.value)} placeholder="https://api.example.com/v1" className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg font-mono text-sm" />
+          <div className="p-5 sm:p-6">
+            {loading ? (
+              <div className="flex min-h-40 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                Loading settings...
               </div>
-            </div>
+            ) : (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                  <div className="space-y-2">
+                    <label className="block text-sm font-bold text-slate-700">API Provider</label>
+                    <input
+                      list="provider-suggestions"
+                      value={form.provider}
+                      onChange={(event) => updateField('provider', event.target.value)}
+                      placeholder="e.g. OpenAI, Anthropic, STU Gateway"
+                      className={controlClassName}
+                    />
+                    <datalist id="provider-suggestions">
+                      <option value="OpenAI" /><option value="Anthropic" /><option value="Google Gemini" />
+                      <option value="OpenRouter" /><option value="Groq" /><option value="DeepSeek" /><option value="Ollama" />
+                    </datalist>
+                  </div>
 
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-1">API Key</label>
-              <div className="relative">
-                <KeyRound size={16} className="absolute left-3 top-3 text-slate-400" />
-                <input type="password" autoComplete="new-password" value={form.apiKey} onChange={(event) => updateField('apiKey', event.target.value)} placeholder={hasStoredKey ? `Stored key: ${keyMask} (leave blank to keep it)` : 'Enter API key'} className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg font-mono text-sm" />
+                  <div className="space-y-2">
+                    <label className="block text-sm font-bold text-slate-700">API Protocol</label>
+                    <select
+                      value={form.apiProtocol}
+                      onChange={(event) => handleProtocolChange(event.target.value as AiProtocol)}
+                      className={`${controlClassName} bg-white`}
+                    >
+                      {PROTOCOLS.map((protocol) => <option key={protocol.value} value={protocol.value}>{protocol.label}</option>)}
+                    </select>
+                    <p className="text-xs leading-5 text-slate-500">Protocol tells the backend how to construct requests and read responses.</p>
+                  </div>
+
+                  <div className="space-y-2 lg:col-span-2">
+                    <label className="block text-sm font-bold text-slate-700">Base URL</label>
+                    <div className="relative">
+                      <LinkIcon size={17} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        value={form.baseUrl}
+                        onChange={(event) => updateField('baseUrl', event.target.value)}
+                        placeholder="https://api.example.com/v1"
+                        className={iconControlClassName}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-sm font-bold text-slate-700">API Key</label>
+                    <div className="relative">
+                      <KeyRound size={17} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={form.apiKey}
+                        onChange={(event) => updateField('apiKey', event.target.value)}
+                        placeholder={hasStoredKey ? `Stored key: ${keyMask} (leave blank to keep it)` : 'Enter API key'}
+                        className={iconControlClassName}
+                      />
+                    </div>
+                    <p className="text-xs leading-5 text-slate-500">The plaintext key is never returned to this page.</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-sm font-bold text-slate-700">Model</label>
+                    <input
+                      value={form.model}
+                      onChange={(event) => updateField('model', event.target.value)}
+                      placeholder="Enter the exact model identifier"
+                      className={`${controlClassName} font-mono text-sm`}
+                    />
+                  </div>
+                </div>
+
+                {notice && (
+                  <div className={`flex items-start gap-2 rounded-xl border p-4 text-sm ${notice.success ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-800'}`}>
+                    {notice.success ? <CheckCircle2 size={18} className="mt-0.5 shrink-0" /> : <XCircle size={18} className="mt-0.5 shrink-0" />}
+                    <span className="min-w-0 break-words leading-5">{notice.message}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-6 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="text-xs text-slate-500">
+                    {testedAt ? `Last verified: ${new Date(testedAt).toLocaleString()}` : 'Test the connection successfully before saving.'}
+                  </div>
+                  <div className="flex flex-col gap-3 sm:flex-row">
+                    <button
+                      type="button"
+                      onClick={handleTest}
+                      disabled={testing || saving}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-blue-300 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 shadow-sm transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    >
+                      <Cpu size={17} /> {testing ? 'Testing...' : 'Test Connection'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSave}
+                      disabled={!testToken || testing || saving}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    >
+                      <Save size={17} /> {saving ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-800">
+                  <ShieldAlert size={18} className="mt-0.5 shrink-0" />
+                  <span>Production blocks localhost/private-network URLs. A local Ollama endpoint cannot be reached from Vercel unless it is exposed through a secure public HTTPS endpoint.</span>
+                </div>
               </div>
-              <p className="text-xs text-slate-500 mt-1">The plaintext key is never returned to this page.</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-1">Model</label>
-              <input value={form.model} onChange={(event) => updateField('model', event.target.value)} placeholder="Enter the exact model identifier" className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-sm" />
-            </div>
-
-            {notice && <div className={`flex gap-2 p-3 rounded-lg border text-sm ${notice.success ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-red-50 border-red-200 text-red-800'}`}>
-              {notice.success ? <CheckCircle2 size={18} className="shrink-0" /> : <XCircle size={18} className="shrink-0" />}
-              <span>{notice.message}</span>
-            </div>}
-
-            <div className="flex flex-wrap justify-end gap-3 pt-2">
-              <button onClick={handleTest} disabled={testing || saving} className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-indigo-300 text-indigo-700 rounded-lg font-bold text-sm hover:bg-indigo-50 disabled:opacity-50">
-                <Cpu size={17} /> {testing ? 'Testing...' : 'Test Connection'}
-              </button>
-              <button onClick={handleSave} disabled={!testToken || testing || saving} className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:opacity-50">
-                <Save size={17} /> {saving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-
-            <div className="flex gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-              <ShieldAlert size={17} className="shrink-0" />
-              <span>Production blocks localhost/private-network URLs. A local Ollama endpoint cannot be reached from Vercel unless it is exposed through a secure public HTTPS endpoint.</span>
-            </div>
-            {testedAt && <p className="text-right text-xs text-slate-400">Last verified: {new Date(testedAt).toLocaleString()}</p>}
-          </>}
-        </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );

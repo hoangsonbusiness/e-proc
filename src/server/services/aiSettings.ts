@@ -10,13 +10,18 @@ interface EncryptedSecret {
 }
 
 function encryptionKey(): Buffer {
-  const raw = process.env.AI_SETTINGS_ENCRYPTION_KEY || '';
+  const configured = (process.env.AI_SETTINGS_ENCRYPTION_KEY || '').trim();
+  const hasMatchingQuotes = configured.length >= 2 && (
+    (configured.startsWith('"') && configured.endsWith('"'))
+    || (configured.startsWith("'") && configured.endsWith("'"))
+  );
+  const raw = (hasMatchingQuotes ? configured.slice(1, -1) : configured).trim();
   if (/^[a-fA-F0-9]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
   try {
     const decoded = Buffer.from(raw, 'base64');
     if (decoded.length === 32) return decoded;
   } catch (_) { /* handled below */ }
-  throw new Error('AI_SETTINGS_ENCRYPTION_KEY must be a 32-byte base64 value or 64 hex characters');
+  throw new Error(`AI_SETTINGS_ENCRYPTION_KEY must be a 32-byte base64 value or 64 hex characters (received ${raw.length} characters after trimming)`);
 }
 
 function encryptSecret(value: string): EncryptedSecret {
