@@ -124,6 +124,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | Session | `active_jti` |
 | Submit | `submitted_at`, `submit_reason` |
 | Recording | `recording_password`, `recording_finalized_at`, `recording_final_part_index`, `recording_incomplete` |
+| AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at`, `ai_grading_started_at`, `ai_grading_attempt_token` |
 | AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at` |
 | Audit | `created_at` |
 
@@ -364,7 +365,8 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 - Query only `students.status='submitted'` whose AI status is not `completed`; completed students are checkpoints and are skipped on rerun.
 - Each student is logically independent. The preferred call contains all assigned question IDs/orders/text, current rubrics and answers for that student.
 - Pre-split when prompt exceeds `AI_GRADING_MAX_PROMPT_CHARS`. On context/token-size or schema/JSON validation errors, recursively split the affected student's question set; unrelated students are never combined into one prompt.
-- Process students strictly sequentially, one at a time, so OpenAI-compatible custom gateways cannot cross responses between concurrent requests that share one key/model. Per-call timeout defaults to 60 seconds and clamps to 1–120 seconds.
+- Process students through a bounded worker pool. `AI_GRADING_CONCURRENCY` defaults to 3 and clamps to 1–5; `1` restores sequential behavior. Every worker claims one student, loads only that student's rows, performs the external call without holding a DB connection, and publishes through student-scoped transactional updates. Per-call timeout defaults to 60 seconds and clamps to 1–120 seconds.
+- A claim writes a UUID attempt token and start timestamp. `AI_GRADING_STALE_MS` defaults to six minutes and is always at least the safe budget plus 60 seconds. The next creator request recovers stale initial attempts to `failed` and stale regrades to `completed` with their old published result intact. Publish/failure updates require the exact token, so a late old worker cannot overwrite a replacement attempt.
 - Stop starting another student when the remaining budget cannot cover the LLM timeout plus a 10-second guard. `AI_GRADE_SAFE_BUDGET_MS` defaults to 270 seconds and clamps to 30–290 seconds. Remaining/failed students produce batch status `partial`; clicking again continues them.
 
 ### Validation, scoring and persistence
@@ -381,7 +383,7 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 ### Targeted grade and regrade
 
 - Results exposes **AI Grade**, **Retry AI Grade**, or **Regrade AI** only to the batch creator with a verified current setting and only for a submitted essay student with assigned questions.
-- The targeted route accepts `pending`, `failed`, or `completed`, rejects `processing`, and uses the same per-student isolation, chunking, correlation and validation path as batch grading.
+- The targeted route accepts `pending`, `failed`, or `completed`. It rejects a fresh `processing` lease, but atomically recovers and retries a stale one. It uses the same per-student isolation, chunking, correlation and validation path as batch grading.
 - Batch reruns continue to select only `pending` and `failed`; targeted regrade is the explicit path for replacing a completed result.
 
 ### Legacy compatibility
@@ -409,10 +411,12 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 | `ALLOWED_ORIGINS` | `http://localhost:5173` |
 | `SESSION_SECRET` | `secret`; must override production |
 | `AI_SETTINGS_ENCRYPTION_KEY` | required for AI; 32-byte base64 or 64-character hex, stable across deployments |
+| `AI_GRADING_CONCURRENCY` | 3, clamped 1–5; 1 restores sequential processing |
 | `AI_GRADING_CORRELATION_RETRIES` | 2, clamped 0–3; fresh token per retry |
 | `AI_GRADING_LLM_TIMEOUT_MS` | 60000, clamped 1000–120000 ms |
 | `AI_GRADING_MAX_PROMPT_CHARS` | 80000, minimum 10000 |
 | `AI_GRADE_SAFE_BUDGET_MS` | 270000, clamped 30000–290000 ms |
+| `AI_GRADING_STALE_MS` | 360000; clamped 60000–1800000 ms and forced to at least safe budget + 60000 ms |
 | `SERVE_STATIC` | false; local/self-host opt-in to serve `client/dist` |
 | `DATABASE_SSL` | TLS by default; `false` only for trusted local PostgreSQL |
 | `SKIP_TIME_CHECK` | `true` bypasses schedule |
@@ -441,10 +445,11 @@ Production migration order:
 5. `20260813_ai_grading_controls.sql`
 6. `20260813_admin_query_performance.sql`
 7. `20260816_user_ai_manual_grading.sql`
+8. `20260817_ai_grading_student_recovery.sql`
 
 `npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 72 total, 66 pass, 6 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs six integration cases in temporary schema `test_violation`.
 
-`npm run test:local` is the full local completion gate: build the two-service stack, verify database/app health and the served React build, run the default suite in the app image, run all six PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. The verified AI scenarios include creator-only authorization, late submitters, cross-student isolation, normal one-request-per-student behavior, chunk fallback, targeted regrade, failed-regrade preservation and rejection of uncorrelated `q1/q2` responses. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
+`npm run test:local` is the full local completion gate: build the two-service stack, verify database/app health and the served React build, run the default suite in the app image, run all six PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. The verified AI scenarios include creator-only authorization, late submitters, cross-student isolation, normal one-request-per-student behavior, chunk fallback, targeted regrade, failed-regrade preservation, stale initial/regrade recovery, fresh-lease protection and rejection of uncorrelated `q1/q2` responses. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
 
 ## 14. Known implementation notes
 

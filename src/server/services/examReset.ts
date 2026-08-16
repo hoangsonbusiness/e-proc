@@ -66,7 +66,8 @@ export async function reopenExamAttempt(
          submitted_at = NULL, submit_reason = NULL, active_jti = NULL,
          recording_finalized_at = NULL, recording_final_part_index = NULL,
          recording_incomplete = FALSE, ai_final_score = NULL, ai_summary_feedback = NULL,
-         ai_grading_status = 'pending', ai_grading_error = NULL, ai_graded_at = NULL
+         ai_grading_status = 'pending', ai_grading_error = NULL, ai_graded_at = NULL,
+         ai_grading_started_at = NULL, ai_grading_attempt_token = NULL
      WHERE id = ?`,
     [now.toISOString(), deadline.toISOString(), studentId],
   );

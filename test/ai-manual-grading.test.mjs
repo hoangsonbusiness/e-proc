@@ -81,10 +81,35 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
         return { rows: [setting], rowCount: 1 };
       }
       if (normalized.startsWith('UPDATE batches') && normalized.includes("SET ai_grading_status = 'processing'")) {
-        if (batch.ai_grading_status === 'processing') return { rows: [], rowCount: 0 };
+        const staleBefore = new Date(params[2]).getTime();
+        const existingStartedAt = batch.ai_grading_started_at ? new Date(batch.ai_grading_started_at).getTime() : null;
+        if (batch.ai_grading_status === 'processing' && existingStartedAt !== null && existingStartedAt >= staleBefore) {
+          return { rows: [], rowCount: 0 };
+        }
         batch.ai_grading_status = 'processing';
         batch.ai_grading_started_at = params[0];
         return { rows: [], rowCount: 1 };
+      }
+      if (normalized.startsWith('UPDATE students SET ai_grading_status = CASE')) {
+        const batchId = Number(params[0]);
+        const staleBefore = new Date(params[1]).getTime();
+        const scopedStudentId = params.length > 2 ? Number(params[2]) : null;
+        let recovered = 0;
+        for (const student of students) {
+          const startedAt = student.ai_grading_started_at ? new Date(student.ai_grading_started_at).getTime() : null;
+          if (student.batch_id !== batchId || student.status !== 'submitted' || student.ai_grading_status !== 'processing') continue;
+          if (scopedStudentId !== null && student.id !== scopedStudentId) continue;
+          if (startedAt !== null && startedAt >= staleBefore) continue;
+          const hasPublishedResult = student.ai_final_score !== null && student.ai_final_score !== undefined && !!student.ai_graded_at;
+          student.ai_grading_status = hasPublishedResult ? 'completed' : 'failed';
+          student.ai_grading_error = hasPublishedResult
+            ? 'Interrupted AI regrade recovered; previous published result was preserved'
+            : 'Interrupted AI grading recovered; retry is safe';
+          student.ai_grading_started_at = null;
+          student.ai_grading_attempt_token = null;
+          recovered += 1;
+        }
+        return { rows: [], rowCount: recovered };
       }
       if (normalized.startsWith('SELECT id FROM students')) {
         return {
@@ -108,8 +133,8 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
       }
       if (normalized.startsWith('UPDATE students SET ai_grading_status = \'processing\'')) {
         if (normalized.includes('WHERE id = ? AND batch_id = ?')) {
-          const student = students.find((entry) => entry.id === Number(params[0]) && entry.batch_id === Number(params[1]));
-          const expectedStatus = params.length >= 3 ? String(params[2]) : null;
+          const student = students.find((entry) => entry.id === Number(params[2]) && entry.batch_id === Number(params[3]));
+          const expectedStatus = params.length >= 5 ? String(params[4]) : null;
           const eligible = student
             && student.status === 'submitted'
             && (expectedStatus
@@ -118,6 +143,8 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
           if (!eligible) return { rows: [], rowCount: 0 };
           student.ai_grading_status = 'processing';
           student.ai_grading_error = null;
+          student.ai_grading_started_at = params[0];
+          student.ai_grading_attempt_token = params[1];
           return { rows: [], rowCount: 1 };
         }
         const selected = new Set(params.map(Number));
@@ -148,7 +175,8 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
       }
       if (normalized.startsWith('UPDATE students') && normalized.includes('SET ai_final_score = ?')) {
         const student = students.find((entry) => entry.id === Number(params[3]));
-        if (!student || student.status !== 'submitted' || student.ai_grading_status !== 'processing') {
+        if (!student || student.status !== 'submitted' || student.ai_grading_status !== 'processing'
+          || student.ai_grading_attempt_token !== params[4]) {
           return { rows: [], rowCount: 0 };
         }
         student.ai_final_score = params[0];
@@ -156,33 +184,47 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
         student.ai_grading_status = 'completed';
         student.ai_grading_error = null;
         student.ai_graded_at = params[2];
+        student.ai_grading_started_at = null;
+        student.ai_grading_attempt_token = null;
         return { rows: [], rowCount: 1 };
       }
       if (normalized.startsWith('UPDATE students SET ai_grading_status = \'failed\'')) {
-        const student = students.find((entry) => entry.id === Number(params[1]));
+        const student = students.find((entry) => entry.id === Number(params[1]) && entry.batch_id === Number(params[2]));
+        if (!student || student.ai_grading_status !== 'processing' || student.ai_grading_attempt_token !== params[3]) {
+          return { rows: [], rowCount: 0 };
+        }
         student.ai_grading_status = 'failed';
         student.ai_grading_error = params[0];
+        student.ai_grading_started_at = null;
+        student.ai_grading_attempt_token = null;
         return { rows: [], rowCount: 1 };
       }
       if (normalized.startsWith('UPDATE students SET ai_grading_status = ?, ai_grading_error = ?')) {
         const student = students.find((entry) => entry.id === Number(params[2]) && entry.batch_id === Number(params[3]));
-        if (!student || student.ai_grading_status !== 'processing') return { rows: [], rowCount: 0 };
+        if (!student || student.ai_grading_status !== 'processing' || student.ai_grading_attempt_token !== params[4]) {
+          return { rows: [], rowCount: 0 };
+        }
         student.ai_grading_status = params[0];
         student.ai_grading_error = params[1];
+        student.ai_grading_started_at = null;
+        student.ai_grading_attempt_token = null;
         return { rows: [], rowCount: 1 };
       }
       if (normalized.startsWith('UPDATE batches SET ai_grading_status = ?')) {
         batch.ai_grading_status = params[0];
         batch.ai_graded_at = params[1];
+        batch.ai_grading_started_at = null;
         return { rows: [], rowCount: 1 };
       }
       if (normalized.startsWith("UPDATE batches SET ai_grading_status = 'completed'")) {
         batch.ai_grading_status = 'completed';
         batch.ai_graded_at = params[0];
+        batch.ai_grading_started_at = null;
         return { rows: [], rowCount: 1 };
       }
       if (normalized.startsWith("UPDATE batches SET ai_grading_status = 'partial'")) {
         batch.ai_grading_status = 'partial';
+        batch.ai_grading_started_at = null;
         return { rows: [], rowCount: 1 };
       }
       throw new Error(`Unexpected SQL: ${normalized}`);
@@ -227,10 +269,12 @@ test('a later AI Grade run grades a newly submitted student without regrading co
   const previousNodeEnv = process.env.NODE_ENV;
   const previousVercel = process.env.VERCEL;
   const previousEncryptionKey = process.env.AI_SETTINGS_ENCRYPTION_KEY;
+  const previousGradingConcurrency = process.env.AI_GRADING_CONCURRENCY;
   const encryptionKey = Buffer.alloc(32, 11);
   process.env.NODE_ENV = 'test';
   delete process.env.VERCEL;
   process.env.AI_SETTINGS_ENCRYPTION_KEY = encryptionKey.toString('hex');
+  process.env.AI_GRADING_CONCURRENCY = '2';
 
   let providerCalls = 0;
   let activeProviderCalls = 0;
@@ -238,6 +282,10 @@ test('a later AI Grade run grades a newly submitted student without regrading co
   let providerShouldFail = false;
   let previousProviderContent = null;
   let staleSecondResponseRemaining = 1;
+  let signalDelayedAttemptStarted;
+  let releaseDelayedAttempt;
+  const delayedAttemptStarted = new Promise((resolve) => { signalDelayedAttemptStarted = resolve; });
+  const delayedAttemptRelease = new Promise((resolve) => { releaseDelayedAttempt = resolve; });
   const providerInputs = [];
   const provider = http.createServer(async (request, response) => {
     providerCalls += 1;
@@ -272,6 +320,10 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     const content = shouldReturnStaleResponse ? previousProviderContent : currentContent;
     if (shouldReturnStaleResponse) staleSecondResponseRemaining -= 1;
     else previousProviderContent = currentContent;
+    if (input.some((question) => question.student_answer === 'Delayed old attempt')) {
+      signalDelayedAttemptStarted();
+      await delayedAttemptRelease;
+    }
     // Keep the request open long enough for a Promise.all implementation to
     // overlap multiple students and make this regression test fail.
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -321,16 +373,18 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     assert.equal(students[1].ai_grading_status, 'completed');
     assert.equal(students[0].ai_final_score, 10);
     assert.equal(students[1].ai_final_score, 2.5);
-    assert.deepEqual(providerInputs.map((input) => input.map((item) => item.student_answer)), [
-      ['First answer'],
-      ['Fifth answer'],
+    assert.deepEqual(
+      providerInputs.slice(0, 2).map((input) => input.map((item) => item.student_answer)).sort(),
+      [['Fifth answer'], ['First answer']].sort(),
+    );
+    assert.deepEqual(providerInputs.slice(2).map((input) => input.map((item) => item.student_answer)), [
       ['Second answer'],
       ['Second answer'],
     ]);
     assert.equal(questionRows[0].ai_feedback, 'Graded only: First answer');
     assert.equal(questionRows[1].ai_feedback, 'Graded only: Second answer');
     assert.equal(providerCalls, 4);
-    assert.equal(maxActiveProviderCalls, 1);
+    assert.equal(maxActiveProviderCalls, 2);
 
     questionRows[0].answer = 'First answer revised';
     const regraded = await gradeStudentManually(db, 77, 101, 9);
@@ -361,11 +415,30 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       (error) => error instanceof AiGradingError && error.statusCode === 403,
     );
     students[0].ai_grading_status = 'processing';
+    students[0].ai_grading_started_at = new Date().toISOString();
+    students[0].ai_grading_attempt_token = 'fresh-active-attempt';
     await assert.rejects(
       gradeStudentManually(db, 77, 101, 9),
       (error) => error instanceof AiGradingError && error.statusCode === 409,
     );
     students[0].ai_grading_status = 'completed';
+    students[0].ai_grading_started_at = null;
+    students[0].ai_grading_attempt_token = null;
+
+    questionRows[0].answer = 'Delayed old attempt';
+    const delayedOldAttempt = gradeStudentManually(db, 77, 101, 9);
+    await delayedAttemptStarted;
+    students[0].ai_grading_started_at = new Date(Date.now() - 7 * 60_000).toISOString();
+    questionRows[0].answer = 'Recovered new attempt';
+    const recoveredRegrade = await gradeStudentManually(db, 77, 101, 9);
+    assert.equal(recoveredRegrade.status, 'completed');
+    releaseDelayedAttempt();
+    await assert.rejects(delayedOldAttempt, /grading lease expired or belongs to another attempt/);
+    assert.equal(students[0].ai_grading_status, 'completed');
+    assert.equal(students[0].ai_grading_attempt_token, null);
+    assert.equal(students[0].ai_grading_started_at, null);
+    assert.equal(questionRows[0].ai_feedback, 'Graded only: Recovered new attempt');
+    assert.equal(students[0].ai_summary_feedback, 'Summary only: Recovered new attempt');
 
     students[3].status = 'submitted';
     const individual = await gradeStudentManually(db, 77, 104, 9);
@@ -375,16 +448,21 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     );
     assert.equal(questionRows[2].ai_feedback, 'Graded only: Fourth answer');
     assert.equal(students[3].ai_grading_status, 'completed');
-    assert.equal(providerCalls, 7);
+    assert.equal(providerCalls, 9);
 
     students[2].status = 'submitted';
+    students[2].ai_grading_status = 'processing';
+    students[2].ai_grading_started_at = new Date(Date.now() - 7 * 60_000).toISOString();
+    students[2].ai_grading_attempt_token = 'stale-initial-attempt';
     const third = await gradeBatchManually(db, 77, 9);
     assert.deepEqual(
-      { completed: third.completed, failed: third.failed, remaining: third.remaining, failures: third.failures },
-      { completed: 0, failed: 1, remaining: 0, failures: [{ studentId: 103, error: 'Student has no assigned questions' }] },
+      { completed: third.completed, failed: third.failed, remaining: third.remaining, recovered: third.recovered, failures: third.failures },
+      { completed: 0, failed: 1, remaining: 0, recovered: 1, failures: [{ studentId: 103, error: 'Student has no assigned questions' }] },
     );
     assert.equal(students[2].ai_grading_status, 'failed');
-    assert.equal(providerCalls, 7);
+    assert.equal(students[2].ai_grading_attempt_token, null);
+    assert.equal(students[2].ai_grading_started_at, null);
+    assert.equal(providerCalls, 9);
   } finally {
     await new Promise((resolve, reject) => provider.close((error) => error ? reject(error) : resolve()));
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -393,6 +471,8 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     else process.env.VERCEL = previousVercel;
     if (previousEncryptionKey === undefined) delete process.env.AI_SETTINGS_ENCRYPTION_KEY;
     else process.env.AI_SETTINGS_ENCRYPTION_KEY = previousEncryptionKey;
+    if (previousGradingConcurrency === undefined) delete process.env.AI_GRADING_CONCURRENCY;
+    else process.env.AI_GRADING_CONCURRENCY = previousGradingConcurrency;
   }
 });
 

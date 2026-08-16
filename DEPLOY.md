@@ -187,6 +187,10 @@ Chạy đúng thứ tự:
    - Tạo `user_ai_settings` với API key mã hóa theo owner.
    - Thêm trạng thái manual AI grading cho `batches` và điểm/summary/status/error cho `students`.
    - Mong đợi verification trả các column mới của `user_ai_settings`, `batches` và `students`.
+8. `migrations/20260817_ai_grading_student_recovery.sql`
+   - Thêm timestamp/token lease cho mỗi student grading attempt và index recovery.
+   - Mong đợi verification trả 2 column và index `idx_students_ai_grading_lease`.
+   - Chỉ chạy khi không có AI Grade request đang hoạt động.
 
 Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
@@ -258,10 +262,12 @@ Biến khuyến nghị:
 - `DB_POOL_MIN=0`
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
+- `AI_GRADING_CONCURRENCY=3` — số học viên chấm đồng thời trong một batch invocation, code clamp 1–5; đặt `1` để fallback tuần tự.
 - `AI_GRADING_CORRELATION_RETRIES=2` — số lần retry riêng cho lỗi response correlation, code clamp 0–3; mỗi attempt dùng request token mới.
 - `AI_GRADING_LLM_TIMEOUT_MS=60000` — timeout mỗi LLM request, code clamp 1–120 giây.
 - `AI_GRADING_MAX_PROMPT_CHARS=80000` — ngưỡng chủ động chia câu hỏi của một học viên thành chunk.
 - `AI_GRADE_SAFE_BUDGET_MS=270000` — ngừng bắt đầu student mới trước giới hạn 300 giây của function; code clamp tối đa 290 giây.
+- `AI_GRADING_STALE_MS=360000` — recovery lease student/batch; luôn được nâng tối thiểu bằng safe budget + 60 giây.
 - `ADMIN_PERF_LOGS=true` — tùy chọn, log timing cho mọi API admin trong giai đoạn lấy baseline; tắt sau khi đo xong.
 - `ADMIN_SLOW_REQUEST_MS=1000` — khi không bật full perf logs, chỉ log API admin chậm hơn ngưỡng này.
 
@@ -323,15 +329,16 @@ Trong invocation đó:
 - Chỉ `batches.created_by` được chạy; role `admin` không bypass ownership.
 - Chỉ creator được chấm batch essay của mình. Backend lấy verified LLM setting hiện tại của creator; không phụ thuộc legacy `ai_grading_enabled` hoặc `ai_setting_id`.
 - Mỗi học viên `submitted` có một LLM request độc lập chứa toàn bộ câu hỏi, answer và rubric; payload lớn hoặc response không hợp lệ có thể tách thành nhiều chunk cho riêng học viên đó.
-- Học viên được xử lý tuần tự, mỗi lần một người, để tránh custom gateway trả chéo response giữa các request dùng cùng key/model.
+- Học viên được xử lý qua bounded worker pool mặc định 3, clamp 1–5. Mỗi worker claim student riêng, đọc theo `student_id`, gọi LLM không giữ DB connection, rồi publish trong transaction có điều kiện theo chính student đó.
 - Mỗi attempt gửi `request_token` và grading key riêng; correlation sai được retry tối đa theo `AI_GRADING_CORRELATION_RETRIES`, luôn với token mới, và không được publish nếu vẫn không xác định được ownership của response.
+- Mỗi student claim có UUID lease token và start timestamp. Request mới chỉ recover lease stale; mọi publish/failure phải khớp token nên worker cũ trả muộn không thể ghi đè kết quả mới.
 - Mỗi student thành công được commit riêng vào Supabase: score/feedback từng câu, summary feedback và điểm tổng kết thang 10.
 - Khi gần hết safe budget, backend dừng nhận student mới, trả batch status `partial`; creator bấm lại để tiếp tục. Student đã `completed` được bỏ qua.
 - Results có route targeted grade/retry/regrade. Regrade thất bại giữ nguyên score/feedback/status completed trước đó; chỉ kết quả mới đầy đủ, đúng correlation và qua validation mới thay thế dữ liệu đã publish.
 
 Điểm từng câu nằm trong `0.00..1.00`. Điểm tổng kết là `ROUND(SUM(score)/total_questions*10, 2)`; câu không trả lời tính 0. Một invocation có thể phát sinh 25 outbound LLM requests cho batch 25 học viên, nhưng vẫn chỉ là một inbound Vercel Function invocation.
 
-`AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; xử lý tuần tự, chunk fallback và correlation retry làm tăng tổng thời gian. Nếu function timeout, student đã commit vẫn còn, nhưng response có thể bị ngắt và batch có thể tạm ở `processing` cho đến khi stale-claim 6 phút cho phép chạy lại.
+`AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; provider throttling, chunk fallback và correlation retry vẫn có thể làm tăng tổng thời gian dù worker chạy song song. Nếu function bị hard-kill, student đã commit vẫn còn; sau stale threshold, request tiếp theo phục hồi attempt chưa publish thành retryable, giữ nguyên kết quả regrade cũ, và token cũ bị vô hiệu hóa.
 
 `ai_queue`, `ai_settings` và `/api/queue/process` chỉ còn compatibility. `vercel.json` không có cron; endpoint cũ xử lý 0 job theo mặc định vì `LEGACY_AI_QUEUE_ENABLED=false`.
 
@@ -390,7 +397,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 
 ## 10. Checklist production trước mỗi kỳ thi
 
-- [ ] Bảy migration đã chạy theo đúng thứ tự và verification query đúng.
+- [ ] Tám migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery chỉ chạy khi không có AI Grade request hoạt động.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.

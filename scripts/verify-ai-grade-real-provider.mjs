@@ -16,6 +16,7 @@ const protocol = String(process.env.AI_GRADE_REAL_PROTOCOL || '').trim();
 const providerBaseUrl = String(process.env.AI_GRADE_REAL_BASE_URL || '').trim().replace(/\/+$/, '');
 const apiKey = String(process.env.AI_GRADE_REAL_API_KEY || '').trim();
 const model = String(process.env.AI_GRADE_REAL_MODEL || '').trim();
+const studentCount = Number.parseInt(process.env.AI_GRADE_REAL_STUDENT_COUNT || '4', 10);
 const supportedProtocols = new Set([
   'openai_chat',
   'openai_responses',
@@ -28,6 +29,9 @@ for (const [name, value] of Object.entries({ provider, protocol, providerBaseUrl
   if (!value) throw new Error(`Missing ${name} in .env.ai-grade.local`);
 }
 if (!supportedProtocols.has(protocol)) throw new Error(`Unsupported AI_GRADE_REAL_PROTOCOL: ${protocol}`);
+if (!Number.isInteger(studentCount) || studentCount < 1 || studentCount > 100) {
+  throw new Error('AI_GRADE_REAL_STUDENT_COUNT must be an integer from 1 to 100');
+}
 const parsedProviderUrl = new URL(providerBaseUrl);
 if (parsedProviderUrl.protocol !== 'https:' && parsedProviderUrl.protocol !== 'http:') {
   throw new Error('AI_GRADE_REAL_BASE_URL must use http or https');
@@ -121,9 +125,12 @@ function gradingRequestMetadata(prompt) {
   const input = JSON.parse(prompt.slice(markerIndex + marker.length));
   const expectedToken = prompt.match(/request_token must exactly equal "([^"]+)"/)?.[1] || '';
   const answers = input.map((item) => String(item?.student_answer || ''));
+  const ownerLabels = new Set(answers.map((answer) => answer.match(/^STUDENT_([A-Z0-9-]+)_CANARY/)?.[1]).filter(Boolean));
   const owner = answers.every((answer) => answer === '')
     ? 'student_A_empty'
-    : (answers.every((answer) => answer.includes('STUDENT_B_CANARY')) ? 'student_B' : 'mixed_or_unknown');
+    : (ownerLabels.size === 1 && answers.every((answer) => answer.includes(`STUDENT_${[...ownerLabels][0]}_CANARY`))
+      ? `student_${[...ownerLabels][0]}`
+      : 'mixed_or_unknown');
   return {
     owner,
     expectedToken,
@@ -154,11 +161,15 @@ function correlationMetadata(request, responseText) {
     shortKeysOnly: returnedKeys.length === request.expectedKeys.length
       && returnedKeys.every((key, index) => key === `q${index + 1}`),
     responseTextFingerprint: fingerprint(responseText),
-    responseMentionsStudentBCanary: String(responseText || '').includes('STUDENT_B_CANARY'),
+    responseMentionsOwnerCanary: request.owner === 'student_A_empty'
+      ? false
+      : String(responseText || '').includes(`${request.owner.toUpperCase()}_CANARY`),
   };
 }
 
 const proxyRecords = [];
+let activeGradingRequests = 0;
+let maxActiveGradingRequests = 0;
 const proxyServer = http.createServer(async (request, response) => {
   try {
     const chunks = [];
@@ -167,6 +178,10 @@ const proxyServer = http.createServer(async (request, response) => {
     const requestEnvelope = JSON.parse(requestBody.toString('utf8') || '{}');
     const prompt = extractPrompt(requestEnvelope);
     const requestMetadata = gradingRequestMetadata(prompt);
+    if (requestMetadata) {
+      activeGradingRequests += 1;
+      maxActiveGradingRequests = Math.max(maxActiveGradingRequests, activeGradingRequests);
+    }
     const headers = { ...request.headers };
     delete headers.host;
     delete headers['content-length'];
@@ -197,6 +212,8 @@ const proxyServer = http.createServer(async (request, response) => {
     response.statusCode = 502;
     response.setHeader('Content-Type', 'application/json');
     response.end(JSON.stringify({ error: `Local diagnostic proxy failed: ${error instanceof Error ? error.message : String(error)}` }));
+  } finally {
+    if (activeGradingRequests > 0) activeGradingRequests -= 1;
   }
 });
 
@@ -208,15 +225,21 @@ const questionIds = Array.from({ length: 3 }, (_, index) => `REAL_AI_${suffix}_Q
 let adminId;
 let batchId;
 let studentAId;
-let studentBId;
+const lateStudents = [];
+const lateStudentLabels = Array.from(
+  { length: studentCount },
+  (_, index) => `S${String(index + 1).padStart(2, '0')}`,
+);
 const report = {
   provider,
   protocol,
   model,
+  studentCount,
   connectionTest: null,
   firstGrade: null,
   secondGrade: null,
   proxyRecords,
+  maxActiveGradingRequests: 0,
   database: null,
   detectedBug: null,
 };
@@ -293,21 +316,30 @@ try {
     VALUES ($1, $2, $3, 'submitted', NOW(), 'pending') RETURNING id
   `, [batchId, `real-a-${suffix}@example.test`, `${suffix.slice(0, 4)}A001`]);
   studentAId = Number(studentA.rows[0].id);
-  const studentB = await pool.query(`
-    INSERT INTO students (batch_id, email, access_code, status, ai_grading_status)
-    VALUES ($1, $2, $3, 'in_progress', 'pending') RETURNING id
-  `, [batchId, `real-b-${suffix}@example.test`, `${suffix.slice(0, 4)}B001`]);
-  studentBId = Number(studentB.rows[0].id);
+  for (const label of lateStudentLabels) {
+    const inserted = await pool.query(`
+      INSERT INTO students (batch_id, email, access_code, status, ai_grading_status)
+      VALUES ($1, $2, $3, 'in_progress', 'pending') RETURNING id
+    `, [batchId, `real-${label.toLowerCase()}-${suffix}@example.test`, `${suffix.slice(0, 4)}${label.slice(1)}`]);
+    lateStudents.push({ id: Number(inserted.rows[0].id), label });
+  }
 
   for (const [index, questionId] of questionIds.entries()) {
     await pool.query(`
       INSERT INTO exam_questions (student_id, question_id, question_order, answer)
       VALUES ($1, $2, $3, '')
     `, [studentAId, questionId, index + 1]);
-    await pool.query(`
-      INSERT INTO exam_questions (student_id, question_id, question_order, answer)
-      VALUES ($1, $2, $3, $4)
-    `, [studentBId, questionId, index + 1, `STUDENT_B_CANARY_${suffix}_Q${index + 1}: dependency injection improves testability.`]);
+    for (const student of lateStudents) {
+      await pool.query(`
+        INSERT INTO exam_questions (student_id, question_id, question_order, answer)
+        VALUES ($1, $2, $3, $4)
+      `, [
+        student.id,
+        questionId,
+        index + 1,
+        `STUDENT_${student.label}_CANARY_${suffix}_Q${index + 1}: dependency injection improves testability.`,
+      ]);
+    }
   }
 
   const first = await requestJson(`/api/admin/batches/${batchId}/ai-grade`, { method: 'POST', token });
@@ -321,52 +353,66 @@ try {
   `, [studentAId]);
 
   await pool.query(`
-    UPDATE students SET status = 'submitted', submitted_at = NOW() WHERE id = $1
-  `, [studentBId]);
+    UPDATE students SET status = 'submitted', submitted_at = NOW() WHERE id = ANY($1::int[])
+  `, [lateStudents.map((student) => student.id)]);
+  const secondStartedAt = performance.now();
   const second = await requestJson(`/api/admin/batches/${batchId}/ai-grade`, { method: 'POST', token });
-  report.secondGrade = { status: second.status, payload: second.payload };
+  report.secondGrade = { status: second.status, durationMs: Math.round(performance.now() - secondStartedAt), payload: second.payload };
+  report.maxActiveGradingRequests = maxActiveGradingRequests;
 
   const studentsAfter = await pool.query(`
     SELECT id, ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at
-    FROM students WHERE id IN ($1, $2) ORDER BY id
-  `, [studentAId, studentBId]);
+    FROM students WHERE batch_id = $1 ORDER BY id
+  `, [batchId]);
   const studentAQuestionsAfter = await pool.query(`
     SELECT question_order, ai_score, ai_feedback FROM exam_questions WHERE student_id = $1 ORDER BY question_order
   `, [studentAId]);
-  const studentBQuestionsAfter = await pool.query(`
-    SELECT question_order, ai_score, ai_feedback FROM exam_questions WHERE student_id = $1 ORDER BY question_order
-  `, [studentBId]);
+  const lateQuestionRows = await pool.query(`
+    SELECT student_id, question_order, ai_score, ai_feedback
+    FROM exam_questions WHERE student_id = ANY($1::int[]) ORDER BY student_id, question_order
+  `, [lateStudents.map((student) => student.id)]);
 
   const studentAUnchanged = JSON.stringify(studentABefore.rows[0]) === JSON.stringify({
     ai_final_score: studentsAfter.rows.find((row) => Number(row.id) === studentAId)?.ai_final_score,
     ai_summary_feedback: studentsAfter.rows.find((row) => Number(row.id) === studentAId)?.ai_summary_feedback,
     ai_graded_at: studentsAfter.rows.find((row) => Number(row.id) === studentAId)?.ai_graded_at,
   }) && JSON.stringify(studentAQuestionsBefore.rows) === JSON.stringify(studentAQuestionsAfter.rows);
-  const studentBRow = studentsAfter.rows.find((row) => Number(row.id) === studentBId);
+  const lateStudentResults = lateStudents.map((student) => {
+    const row = studentsAfter.rows.find((entry) => Number(entry.id) === student.id);
+    const questionRows = lateQuestionRows.rows.filter((entry) => Number(entry.student_id) === student.id);
+    return {
+      label: student.label,
+      status: row?.ai_grading_status,
+      finalScore: row?.ai_final_score === null ? null : Number(row?.ai_final_score),
+      error: row?.ai_grading_error || null,
+      publishedQuestions: questionRows.filter((entry) => entry.ai_score !== null).length,
+    };
+  });
   report.database = {
     studentAStatus: studentsAfter.rows.find((row) => Number(row.id) === studentAId)?.ai_grading_status,
     studentAFinalScore: Number(studentsAfter.rows.find((row) => Number(row.id) === studentAId)?.ai_final_score),
     studentAUnchangedAfterSecondGrade: studentAUnchanged,
-    studentBStatus: studentBRow?.ai_grading_status,
-    studentBFinalScore: studentBRow?.ai_final_score === null ? null : Number(studentBRow?.ai_final_score),
-    studentBError: studentBRow?.ai_grading_error || null,
-    studentBPublishedQuestions: studentBQuestionsAfter.rows.filter((row) => row.ai_score !== null).length,
+    lateStudents: lateStudentResults,
   };
 
-  const secondStudentRecords = proxyRecords.filter((record) => record.owner === 'student_B');
-  const allSecondPromptsAreIsolated = secondStudentRecords.length > 0
-    && secondStudentRecords.every((record) => record.owner === 'student_B');
+  const secondStudentRecords = proxyRecords.filter((record) => record.owner !== 'student_A_empty');
+  const expectedOwners = new Set(lateStudentLabels.map((label) => `student_${label}`));
+  const actualOwners = new Set(secondStudentRecords.map((record) => record.owner));
+  const allSecondPromptsAreIsolated = secondStudentRecords.length >= lateStudents.length
+    && secondStudentRecords.every((record) => expectedOwners.has(record.owner))
+    && [...expectedOwners].every((owner) => actualOwners.has(owner));
   const hasCorrelationMismatch = secondStudentRecords.some((record) => !record.tokenMatches && !record.scopedKeysMatch);
+  const anyLateStudentFailed = lateStudentResults.some((student) => student.status !== 'completed');
   report.detectedBug = {
-    secondPromptContainsOnlyStudentB: allSecondPromptsAreIsolated,
+    secondPromptsContainOneCorrectStudentEach: allSecondPromptsAreIsolated,
     providerReturnedCorrelationMismatch: hasCorrelationMismatch,
     studentAWasOverwritten: !studentAUnchanged,
-    studentBGradeFailed: second.status !== 200 || studentBRow?.ai_grading_status !== 'completed',
+    anyLateStudentGradeFailed: second.status !== 200 || anyLateStudentFailed,
   };
 
   assert.equal(studentAUnchanged, true, 'Student A result changed while grading Student B');
-  assert.equal(allSecondPromptsAreIsolated, true, 'The application sent mixed or wrong-student answers in Student B request');
-  if (second.status !== 200 || studentBRow?.ai_grading_status !== 'completed') process.exitCode = 2;
+  assert.equal(allSecondPromptsAreIsolated, true, 'The application sent mixed or wrong-student answers in a grading request');
+  if (second.status !== 200 || anyLateStudentFailed) process.exitCode = 2;
 } catch (error) {
   report.detectedBug = report.detectedBug || { testHarnessError: error instanceof Error ? error.message : String(error) };
   process.exitCode = 1;

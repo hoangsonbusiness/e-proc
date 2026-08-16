@@ -22,6 +22,7 @@ interface QuestionGrade {
 
 interface StudentCandidate {
   studentId: number;
+  attemptToken: string;
   grades: QuestionGrade[];
   summaryFeedback: string;
   finalScore: number;
@@ -33,6 +34,25 @@ interface StudentFailure {
 }
 
 type StudentGradingMode = 'initial' | 'regrade';
+
+const DEFAULT_SAFE_BUDGET_MS = 270_000;
+const MAX_SAFE_BUDGET_MS = 290_000;
+const DEFAULT_STALE_MS = 6 * 60_000;
+
+function gradingSafeBudgetMs(): number {
+  const configured = Number(process.env.AI_GRADE_SAFE_BUDGET_MS || DEFAULT_SAFE_BUDGET_MS);
+  return Number.isFinite(configured)
+    ? Math.max(30_000, Math.min(Math.trunc(configured), MAX_SAFE_BUDGET_MS))
+    : DEFAULT_SAFE_BUDGET_MS;
+}
+
+function gradingStaleMs(): number {
+  const configured = Number(process.env.AI_GRADING_STALE_MS || DEFAULT_STALE_MS);
+  const bounded = Number.isFinite(configured)
+    ? Math.max(60_000, Math.min(Math.trunc(configured), 30 * 60_000))
+    : DEFAULT_STALE_MS;
+  return Math.max(bounded, gradingSafeBudgetMs() + 60_000);
+}
 
 interface TransactionalDb extends DbExecutor {
   withTransaction<T>(work: (tx: DbExecutor) => Promise<T>): Promise<T>;
@@ -233,7 +253,13 @@ async function gradeChunkWithFallback(
   }
 }
 
-async function gradeStudent(config: LlmConnectionConfig, studentId: number, questions: GradingQuestion[], deadline: number): Promise<StudentCandidate> {
+async function gradeStudent(
+  config: LlmConnectionConfig,
+  studentId: number,
+  questions: GradingQuestion[],
+  deadline: number,
+  attemptToken: string,
+): Promise<StudentCandidate> {
   if (questions.length === 0) throw new Error('Student has no assigned questions');
   if (questions.some((question) => question.studentId !== studentId)) {
     throw new Error('Grading input contains questions owned by another student');
@@ -248,6 +274,7 @@ async function gradeStudent(config: LlmConnectionConfig, studentId: number, ques
   const grades = parts.flatMap((part) => part.grades);
   return {
     studentId,
+    attemptToken,
     grades,
     summaryFeedback: parts.flatMap((part) => part.summaries).join('\n\n').slice(0, 10_000),
     finalScore: calculateFinalScore(grades, questions.length),
@@ -277,6 +304,24 @@ async function loadStudentQuestions(db: DbExecutor, batchId: number, studentId: 
 }
 
 async function publishCandidate(tx: DbExecutor, candidate: StudentCandidate): Promise<void> {
+  const savedStudent = await tx.query(`
+    UPDATE students
+    SET ai_final_score = ?, ai_summary_feedback = ?, ai_grading_status = 'completed',
+        ai_grading_error = NULL, ai_graded_at = ?, ai_grading_started_at = NULL,
+        ai_grading_attempt_token = NULL
+    WHERE id = ? AND status = 'submitted' AND ai_grading_status = 'processing'
+      AND ai_grading_attempt_token = ?
+  `, [
+    candidate.finalScore,
+    candidate.summaryFeedback,
+    new Date().toISOString(),
+    candidate.studentId,
+    candidate.attemptToken,
+  ]);
+  if (savedStudent.rowCount !== 1) {
+    throw new Error('Refused to publish AI result: grading lease expired or belongs to another attempt');
+  }
+
   const scoreCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
   const feedbackCases = candidate.grades.map(() => 'WHEN ? THEN ?').join(' ');
   const ids = candidate.grades.map((grade) => grade.examQuestionId);
@@ -294,15 +339,44 @@ async function publishCandidate(tx: DbExecutor, candidate: StudentCandidate): Pr
   if (savedQuestions.rowCount !== candidate.grades.length) {
     throw new Error(`Refused to publish AI result: expected ${candidate.grades.length} owned questions, updated ${savedQuestions.rowCount}`);
   }
-  const savedStudent = await tx.query(`
+}
+
+async function recoverStaleStudentGradings(
+  db: DbExecutor,
+  batchId: number,
+  studentId?: number,
+): Promise<number> {
+  const staleBefore = new Date(Date.now() - gradingStaleMs()).toISOString();
+  const scopedStudent = studentId === undefined ? '' : ' AND id = ?';
+  const result = await db.query(`
     UPDATE students
-    SET ai_final_score = ?, ai_summary_feedback = ?, ai_grading_status = 'completed',
-        ai_grading_error = NULL, ai_graded_at = ?
-    WHERE id = ? AND status = 'submitted' AND ai_grading_status = 'processing'
-  `, [candidate.finalScore, candidate.summaryFeedback, new Date().toISOString(), candidate.studentId]);
-  if (savedStudent.rowCount !== 1) {
-    throw new Error('Refused to publish AI result: submitted student ownership check failed');
-  }
+    SET ai_grading_status = CASE
+          WHEN ai_final_score IS NOT NULL AND ai_graded_at IS NOT NULL THEN 'completed'
+          ELSE 'failed'
+        END,
+        ai_grading_error = CASE
+          WHEN ai_final_score IS NOT NULL AND ai_graded_at IS NOT NULL
+            THEN 'Interrupted AI regrade recovered; previous published result was preserved'
+          ELSE 'Interrupted AI grading recovered; retry is safe'
+        END,
+        ai_grading_started_at = NULL,
+        ai_grading_attempt_token = NULL
+    WHERE batch_id = ? AND status = 'submitted' AND ai_grading_status = 'processing'
+      AND (ai_grading_started_at IS NULL OR ai_grading_started_at < ?)${scopedStudent}
+  `, studentId === undefined ? [batchId, staleBefore] : [batchId, staleBefore, studentId]);
+  return result.rowCount;
+}
+
+async function loadStudentTarget(db: DbExecutor, batchId: number, studentId: number): Promise<any> {
+  const targetResult = await db.query(`
+    SELECT s.id, s.status, COALESCE(s.ai_grading_status, 'pending') AS ai_grading_status,
+           s.ai_grading_started_at, s.ai_grading_attempt_token, s.ai_final_score, s.ai_graded_at,
+           b.id AS batch_id, b.created_by, b.exam_type
+    FROM students s
+    JOIN batches b ON b.id = s.batch_id
+    WHERE s.id = ? AND b.id = ?
+  `, [studentId, batchId]);
+  return targetResult.rows[0];
 }
 
 export async function gradeStudentManually(
@@ -311,19 +385,16 @@ export async function gradeStudentManually(
   studentId: number,
   userId: number,
 ): Promise<{ success: true; studentId: number; mode: StudentGradingMode; status: 'completed'; finalScore: number }> {
-  const targetResult = await db.query(`
-    SELECT s.id, s.status, COALESCE(s.ai_grading_status, 'pending') AS ai_grading_status,
-           b.id AS batch_id, b.created_by, b.exam_type
-    FROM students s
-    JOIN batches b ON b.id = s.batch_id
-    WHERE s.id = ? AND b.id = ?
-  `, [studentId, batchId]);
-  const target = targetResult.rows[0];
+  let target = await loadStudentTarget(db, batchId, studentId);
   if (!target) throw new AiGradingError('Student not found in this batch', 404);
   if (Number(target.created_by) !== userId) throw new AiGradingError('Only the batch creator can run AI Grade', 403);
   if (target.exam_type === 'quiz') throw new AiGradingError('Quiz batches are scored without AI');
   if (target.status !== 'submitted') throw new AiGradingError('Only submitted students can be graded', 409);
-  if (target.ai_grading_status === 'processing') throw new AiGradingError('AI grading is already running for this student', 409);
+  if (target.ai_grading_status === 'processing') {
+    const recovered = await recoverStaleStudentGradings(db, batchId, studentId);
+    if (recovered !== 1) throw new AiGradingError('AI grading is already running for this student', 409);
+    target = await loadStudentTarget(db, batchId, studentId);
+  }
 
   const previousStatus = String(target.ai_grading_status || 'pending');
   const mode: StudentGradingMode = previousStatus === 'completed' ? 'regrade' : 'initial';
@@ -332,27 +403,33 @@ export async function gradeStudentManually(
   }
 
   const config = await loadVerifiedConnection(db, userId);
+  const attemptToken = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
   const claimed = await db.query(`
     UPDATE students
-    SET ai_grading_status = 'processing', ai_grading_error = NULL
+    SET ai_grading_status = 'processing', ai_grading_error = NULL,
+        ai_grading_started_at = ?, ai_grading_attempt_token = ?
     WHERE id = ? AND batch_id = ? AND status = 'submitted'
       AND COALESCE(ai_grading_status, 'pending') = ?
-  `, [studentId, batchId, previousStatus]);
+  `, [startedAt, attemptToken, studentId, batchId, previousStatus]);
   if (claimed.rowCount !== 1) throw new AiGradingError('AI grading state changed; please refresh and try again', 409);
 
   try {
-    const safeBudgetMs = Math.max(30_000, Math.min(Number(process.env.AI_GRADE_SAFE_BUDGET_MS || 270_000), 290_000));
+    const safeBudgetMs = gradingSafeBudgetMs();
     const questions = await loadStudentQuestions(db, batchId, studentId);
-    const candidate = await gradeStudent(config, studentId, questions, Date.now() + safeBudgetMs);
+    const candidate = await gradeStudent(config, studentId, questions, Date.now() + safeBudgetMs, attemptToken);
     await db.withTransaction((tx) => publishCandidate(tx, candidate));
     return { success: true, studentId, mode, status: 'completed', finalScore: candidate.finalScore };
   } catch (error: any) {
     const message = String(error?.message || 'AI grading failed').slice(0, 1_000);
     const restoredStatus = mode === 'regrade' ? 'completed' : 'failed';
     await db.query(`
-      UPDATE students SET ai_grading_status = ?, ai_grading_error = ?
+      UPDATE students
+      SET ai_grading_status = ?, ai_grading_error = ?, ai_grading_started_at = NULL,
+          ai_grading_attempt_token = NULL
       WHERE id = ? AND batch_id = ? AND ai_grading_status = 'processing'
-    `, [restoredStatus, message, studentId, batchId]);
+        AND ai_grading_attempt_token = ?
+    `, [restoredStatus, message, studentId, batchId, attemptToken]);
     throw new AiGradingError(message, 502);
   }
 }
@@ -368,13 +445,16 @@ export async function gradeBatchManually(db: TransactionalDb, batchId: number, u
   if (batch.exam_type === 'quiz') throw new AiGradingError('Quiz batches are scored without AI');
 
   const config = await loadVerifiedConnection(db, userId);
-  const staleBefore = new Date(Date.now() - 6 * 60_000).toISOString();
+  const staleBefore = new Date(Date.now() - gradingStaleMs()).toISOString();
+  const batchStartedAt = new Date().toISOString();
   const claimed = await db.query(`
     UPDATE batches
     SET ai_grading_status = 'processing', ai_grading_started_at = ?
     WHERE id = ? AND (ai_grading_status <> 'processing' OR ai_grading_started_at IS NULL OR ai_grading_started_at < ?)
-  `, [new Date().toISOString(), batchId, staleBefore]);
+  `, [batchStartedAt, batchId, staleBefore]);
   if (claimed.rowCount !== 1) throw new AiGradingError('AI grading is already running for this batch', 409);
+
+  const recovered = await recoverStaleStudentGradings(db, batchId);
 
   const studentsResult = await db.query(`
     SELECT id FROM students
@@ -384,59 +464,83 @@ export async function gradeBatchManually(db: TransactionalDb, batchId: number, u
   `, [batchId]);
   const studentIds = studentsResult.rows.map((row: any) => Number(row.id));
   if (studentIds.length === 0) {
-    await db.query(`UPDATE batches SET ai_grading_status = 'completed', ai_graded_at = ? WHERE id = ?`, [new Date().toISOString(), batchId]);
-    return { success: true, total: 0, completed: 0, failed: 0, remaining: 0, failures: [], message: 'No submitted students require grading' };
+    await db.query(`
+      UPDATE batches SET ai_grading_status = 'completed', ai_graded_at = ?, ai_grading_started_at = NULL
+      WHERE id = ?
+    `, [new Date().toISOString(), batchId]);
+    return { success: true, total: 0, completed: 0, failed: 0, remaining: 0, recovered, failures: [], message: 'No submitted students require grading' };
   }
 
-  const safeBudgetMs = Math.max(30_000, Math.min(Number(process.env.AI_GRADE_SAFE_BUDGET_MS || 270_000), 290_000));
+  const safeBudgetMs = gradingSafeBudgetMs();
   const deadline = Date.now() + safeBudgetMs;
   const llmTimeoutMs = Math.max(1_000, Math.min(Number(process.env.AI_GRADING_LLM_TIMEOUT_MS || 60_000), 120_000));
+  const configuredConcurrency = Number(process.env.AI_GRADING_CONCURRENCY || 3);
+  const concurrency = Number.isFinite(configuredConcurrency)
+    ? Math.max(1, Math.min(Math.trunc(configuredConcurrency), 5))
+    : 3;
   let completed = 0;
   let failed = 0;
   let processed = 0;
   const failureDetails: StudentFailure[] = [];
 
   try {
-    // Grade strictly one student at a time. Besides reducing provider pressure,
-    // this prevents custom OpenAI-compatible gateways from crossing responses
-    // between concurrent requests made with the same API key/model.
-    for (const studentId of studentIds) {
-      if (Date.now() + llmTimeoutMs + 10_000 >= deadline) break;
-      const claimedStudent = await db.query(`
-        UPDATE students SET ai_grading_status = 'processing', ai_grading_error = NULL
-        WHERE id = ? AND batch_id = ? AND status = 'submitted'
-          AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
-      `, [studentId, batchId]);
-      if (claimedStudent.rowCount !== 1) continue;
+    let nextStudentIndex = 0;
+    const runWorker = async (): Promise<void> => {
+      while (true) {
+        if (Date.now() + llmTimeoutMs + 10_000 >= deadline) return;
+        const index = nextStudentIndex;
+        nextStudentIndex += 1;
+        if (index >= studentIds.length) return;
+        const studentId = studentIds[index];
+        const attemptToken = crypto.randomUUID();
+        const startedAt = new Date().toISOString();
+        const claimedStudent = await db.query(`
+          UPDATE students
+          SET ai_grading_status = 'processing', ai_grading_error = NULL,
+              ai_grading_started_at = ?, ai_grading_attempt_token = ?
+          WHERE id = ? AND batch_id = ? AND status = 'submitted'
+            AND COALESCE(ai_grading_status, 'pending') IN ('pending', 'failed')
+        `, [startedAt, attemptToken, studentId, batchId]);
+        if (claimedStudent.rowCount !== 1) continue;
 
-      processed += 1;
-      try {
-        const questions = await loadStudentQuestions(db, batchId, studentId);
-        const candidate = await gradeStudent(config, studentId, questions, deadline);
-        await db.withTransaction((tx) => publishCandidate(tx, candidate));
-        completed += 1;
-      } catch (error: any) {
-        const failure: StudentFailure = {
-          studentId,
-          error: String(error?.message || 'AI grading failed').slice(0, 1_000),
-        };
-        await db.query(`
-          UPDATE students SET ai_grading_status = 'failed', ai_grading_error = ?
-          WHERE id = ? AND batch_id = ? AND ai_grading_status = 'processing'
-        `, [failure.error, studentId, batchId]);
-        failed += 1;
-        failureDetails.push(failure);
+        processed += 1;
+        try {
+          const questions = await loadStudentQuestions(db, batchId, studentId);
+          const candidate = await gradeStudent(config, studentId, questions, deadline, attemptToken);
+          await db.withTransaction((tx) => publishCandidate(tx, candidate));
+          completed += 1;
+        } catch (error: any) {
+          const failure: StudentFailure = {
+            studentId,
+            error: String(error?.message || 'AI grading failed').slice(0, 1_000),
+          };
+          await db.query(`
+            UPDATE students
+            SET ai_grading_status = 'failed', ai_grading_error = ?, ai_grading_started_at = NULL,
+                ai_grading_attempt_token = NULL
+            WHERE id = ? AND batch_id = ? AND ai_grading_status = 'processing'
+              AND ai_grading_attempt_token = ?
+          `, [failure.error, studentId, batchId, attemptToken]);
+          failed += 1;
+          failureDetails.push(failure);
+        }
       }
-    }
+    };
+    const workerResults = await Promise.allSettled(
+      Array.from({ length: Math.min(concurrency, studentIds.length) }, () => runWorker()),
+    );
+    const rejectedWorker = workerResults.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (rejectedWorker) throw rejectedWorker.reason;
   } catch (error) {
-    await db.query(`UPDATE batches SET ai_grading_status = 'partial' WHERE id = ?`, [batchId]);
+    await db.query(`UPDATE batches SET ai_grading_status = 'partial', ai_grading_started_at = NULL WHERE id = ?`, [batchId]);
     throw error;
   }
 
   const remaining = studentIds.length - processed;
   const status = remaining > 0 || failed > 0 ? 'partial' : 'completed';
+  failureDetails.sort((left, right) => left.studentId - right.studentId);
   await db.query(`
-    UPDATE batches SET ai_grading_status = ?, ai_graded_at = ? WHERE id = ?
+    UPDATE batches SET ai_grading_status = ?, ai_graded_at = ?, ai_grading_started_at = NULL WHERE id = ?
   `, [status, new Date().toISOString(), batchId]);
-  return { success: true, total: studentIds.length, completed, failed, remaining, status, failures: failureDetails };
+  return { success: true, total: studentIds.length, completed, failed, remaining, recovered, status, concurrency, failures: failureDetails };
 }

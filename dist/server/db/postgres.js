@@ -417,7 +417,10 @@ async function initPostgres() {
         await client.query("ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_status VARCHAR(20) NOT NULL DEFAULT 'pending'");
         await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_error TEXT');
         await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_graded_at TIMESTAMP');
+        await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_started_at TIMESTAMP');
+        await client.query('ALTER TABLE students ADD COLUMN IF NOT EXISTS ai_grading_attempt_token VARCHAR(64)');
         await client.query('CREATE INDEX IF NOT EXISTS idx_students_batch_ai_grading ON students(batch_id, status, ai_grading_status)');
+        await client.query('CREATE INDEX IF NOT EXISTS idx_students_ai_grading_lease ON students(batch_id, ai_grading_status, ai_grading_started_at)');
         console.log('[DB] user-owned AI settings and manual grading columns ready');
         console.log('[DB] All PostgreSQL tables initialized');
     }
@@ -704,12 +707,14 @@ function initSqlite() {
             ['ai_final_score', 'REAL'], ['ai_summary_feedback', 'TEXT'],
             ['ai_grading_status', "TEXT NOT NULL DEFAULT 'pending'"],
             ['ai_grading_error', 'TEXT'], ['ai_graded_at', 'DATETIME'],
+            ['ai_grading_started_at', 'DATETIME'], ['ai_grading_attempt_token', 'TEXT'],
         ];
         for (const [name, def] of gradingStudentAdds) {
             if (!colNames.includes(name))
                 sqliteDb.exec(`ALTER TABLE students ADD COLUMN ${name} ${def}`);
         }
         sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_students_batch_ai_grading ON students(batch_id, status, ai_grading_status)');
+        sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_students_ai_grading_lease ON students(batch_id, ai_grading_status, ai_grading_started_at)');
         const adminCols = sqliteDb.prepare("PRAGMA table_info(admin_users)").all().map(c => c.name);
         if (!adminCols.includes('role')) {
             sqliteDb.exec("ALTER TABLE admin_users ADD COLUMN role TEXT DEFAULT 'admin'");
@@ -788,6 +793,7 @@ export async function verifyRequiredSchema() {
                 'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
                 'recording_final_part_index', 'recording_incomplete', 'ai_final_score',
                 'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
+                'ai_grading_started_at', 'ai_grading_attempt_token',
             ],
             batches: ['record_mode', 'exam_type', 'ai_grading_enabled', 'ai_setting_id',
                 'ai_grading_status', 'ai_grading_started_at', 'ai_graded_at'],

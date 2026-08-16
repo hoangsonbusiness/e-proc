@@ -353,6 +353,65 @@ try {
   assert.equal(afterShortKeys.rows[0].ai_summary_feedback, preserved.rows[0].ai_summary_feedback);
   assert.equal(afterShortKeys.rows[0].ai_grading_status, 'completed');
 
+  mockState.mode = 'normal';
+  await pool.query(`
+    UPDATE students
+    SET ai_grading_status = 'processing', ai_grading_started_at = NOW(),
+        ai_grading_attempt_token = 'fresh-active-integration-attempt'
+    WHERE id = $1
+  `, [studentTwo.id]);
+  const freshProcessing = await requestJson(`/api/admin/batches/${batchId}/students/${studentTwo.id}/ai-grade`, {
+    method: 'POST', token: ownerToken,
+  });
+  assert.equal(freshProcessing.response.status, 409, JSON.stringify(freshProcessing.payload));
+  await pool.query(`
+    UPDATE students
+    SET ai_grading_status = 'processing', ai_grading_started_at = NOW() - INTERVAL '7 minutes',
+        ai_grading_attempt_token = 'stale-regrade-integration-attempt'
+    WHERE id = $1
+  `, [studentTwo.id]);
+  const recoveredRegrade = await requestJson(`/api/admin/batches/${batchId}/students/${studentTwo.id}/ai-grade`, {
+    method: 'POST', token: ownerToken,
+  });
+  assert.equal(recoveredRegrade.response.status, 200, JSON.stringify(recoveredRegrade.payload));
+  assert.equal(recoveredRegrade.payload.mode, 'regrade');
+  const recoveredRegradeState = await pool.query(`
+    SELECT ai_grading_status, ai_grading_started_at, ai_grading_attempt_token
+    FROM students WHERE id = $1
+  `, [studentTwo.id]);
+  assert.equal(recoveredRegradeState.rows[0].ai_grading_status, 'completed');
+  assert.equal(recoveredRegradeState.rows[0].ai_grading_started_at, null);
+  assert.equal(recoveredRegradeState.rows[0].ai_grading_attempt_token, null);
+
+  const staleInitialStudent = students[23];
+  await pool.query(`
+    UPDATE students
+    SET ai_final_score = NULL, ai_summary_feedback = NULL, ai_graded_at = NULL,
+        ai_grading_status = 'processing', ai_grading_started_at = NOW() - INTERVAL '7 minutes',
+        ai_grading_attempt_token = 'stale-initial-integration-attempt'
+    WHERE id = $1
+  `, [staleInitialStudent.id]);
+  const recoveredInitial = await requestJson(`/api/admin/batches/${batchId}/ai-grade`, {
+    method: 'POST', token: ownerToken,
+  });
+  assert.equal(recoveredInitial.response.status, 200, JSON.stringify(recoveredInitial.payload));
+  assert.deepEqual(
+    {
+      total: recoveredInitial.payload.total,
+      completed: recoveredInitial.payload.completed,
+      failed: recoveredInitial.payload.failed,
+      recovered: recoveredInitial.payload.recovered,
+    },
+    { total: 1, completed: 1, failed: 0, recovered: 1 },
+  );
+  const recoveredInitialState = await pool.query(`
+    SELECT ai_grading_status, ai_grading_started_at, ai_grading_attempt_token
+    FROM students WHERE id = $1
+  `, [staleInitialStudent.id]);
+  assert.equal(recoveredInitialState.rows[0].ai_grading_status, 'completed');
+  assert.equal(recoveredInitialState.rows[0].ai_grading_started_at, null);
+  assert.equal(recoveredInitialState.rows[0].ai_grading_attempt_token, null);
+
   console.log(JSON.stringify({
     success: true,
     batchId,
@@ -369,6 +428,10 @@ try {
       'targeted regrade',
       'failed regrade preserves published result',
       'unscoped q1/q2 response is rejected without overwriting result',
+      'fresh processing lease is not stolen',
+      'stale regrade recovers while preserving the published result until replacement',
+      'stale initial grading becomes retryable in the same batch request',
+      'completed and failed attempts clear grading lease metadata',
     ],
   }, null, 2));
 } finally {

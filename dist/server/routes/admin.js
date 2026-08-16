@@ -1286,7 +1286,7 @@ router.post('/batches/:id/ai-grade', async (req, res) => {
         const batchId = Number(req.params.id);
         if (Number.isInteger(batchId) && req.adminUser?.id) {
             await db.query(`
-        UPDATE batches SET ai_grading_status = 'partial'
+        UPDATE batches SET ai_grading_status = 'partial', ai_grading_started_at = NULL
         WHERE id = ? AND created_by = ? AND ai_grading_status = 'processing'
       `, [batchId, req.adminUser.id]).catch(() => { });
         }

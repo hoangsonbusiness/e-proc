@@ -310,8 +310,9 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - AI grading is manual: submitting an essay does not enqueue work. The batch creator clicks **AI Grade** in Batches List, producing one backend invocation for the batch.
 - Only `batches.created_by` may run AI grading for that batch; role `admin` is not an ownership bypass. Create/Edit has no AI flag.
 - Batches List shows **AI Grade** when `exam_type === 'essay'`, the current user is `created_by`, and that user's current AI setting is `verified`. This applies to old and new essay batches.
-- Each submitted student is sent independently with all assigned questions, answers, and rubrics. Oversized/invalid-context payloads fall back to smaller chunks for that student only. Students are processed **strictly sequentially, one at a time**, to prevent custom gateways from crossing responses between concurrent requests.
+- Each submitted student is sent independently with all assigned questions, answers, and rubrics. Oversized/invalid-context payloads fall back to smaller chunks for that student only. Batch grading uses a bounded worker pool (`AI_GRADING_CONCURRENCY`, default 3, clamped 1–5); request tokens, student-scoped reads and student-scoped transactional publish prevent responses from crossing students.
 - Every LLM attempt uses a fresh `request_token` and request-scoped grading keys. Missing/mismatched correlation is rejected unless the complete response can be matched by strong unique identifiers; `AI_GRADING_CORRELATION_RETRIES` controls correlation-only retries.
+- Each claimed student also receives a persisted `ai_grading_attempt_token` and `ai_grading_started_at`. A stale lease is recovered after `AI_GRADING_STALE_MS` (never less than the safe execution budget plus 60 seconds); a late worker cannot publish or fail the replacement attempt because every write is fenced by its token.
 - Per-question scores are 0.00–1.00. Final score is `ROUND(SUM(question scores) / total questions * 10, 2)`; unanswered questions are included as zero.
 - Each successful student is published in its own transaction with per-question scores/feedback plus `students.ai_final_score` and `students.ai_summary_feedback`. Completed students are skipped on batch retry after a partial run.
 - Results supports creator-only initial grade/retry/regrade through `POST /admin/batches/:batchId/students/:studentId/ai-grade`. A failed regrade preserves the previously completed score and feedback; replacement occurs only after the new complete result passes correlation and validation.
@@ -347,10 +348,12 @@ Batches support two blueprint formats for question assignment:
 | `CRON_SECRET` | Legacy | none | Protects the disabled legacy `/api/queue/process` endpoint. |
 | `SKIP_TIME_CHECK` | No | — | Set to `'true'` to bypass exam time-window validation in any mode |
 | `AI_SETTINGS_ENCRYPTION_KEY` | **Yes for AI** | — | 32-byte base64 or 64-hex AES key used to encrypt/decrypt user LLM API keys. Keep stable across deployments. |
+| `AI_GRADING_CONCURRENCY` | No | `3` | Maximum students graded concurrently inside one batch invocation; clamped to 1–5. Set `1` for sequential fallback. |
 | `AI_GRADING_CORRELATION_RETRIES` | No | `2` | Extra retries for response-correlation mismatch; clamped to 0–3, with a fresh request token per attempt. |
 | `AI_GRADING_LLM_TIMEOUT_MS` | No | `60000` | Timeout for each LLM request; clamped to 1–120 seconds. |
 | `AI_GRADING_MAX_PROMPT_CHARS` | No | `80000` | Pre-emptive per-student chunk threshold. |
 | `AI_GRADE_SAFE_BUDGET_MS` | No | `270000` | Stops starting another student before the intended 300-second host ceiling; does not configure Vercel duration. |
+| `AI_GRADING_STALE_MS` | No | `360000` | Student/batch lease recovery threshold; clamped to 1–30 minutes and forced to at least safe budget + 60 seconds. |
 | `SERVE_STATIC` | Local/self-host | `false` | When `true`, Express serves `client/dist` and fails startup if its `index.html` is missing. |
 | `DATABASE_SSL` | Local PostgreSQL | TLS enabled | Set to `false` only for the trusted local Compose database; production PostgreSQL keeps TLS. |
 | `LEGACY_AI_QUEUE_ENABLED` | Legacy | `false` | Explicit opt-in for the retired per-question queue worker. |
@@ -411,7 +414,7 @@ Batches support two blueprint formats for question assignment:
 - Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
 - Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and legacy AI queue rows are preserved. Atomic start plus the unique question-order index prevents new start races. Confirm the final verification queries return six student columns and two unique indexes.
 - Also run `migrations/20260810_violation_event_idempotency.sql` before deploying the idempotent violation handler. Startup schema readiness verifies the required columns and exact unique-index definitions; a half-migrated database remains unavailable (`503`) instead of serving exam traffic.
-- Apply `migrations/20260813_ai_grading_controls.sql`, then `migrations/20260813_admin_query_performance.sql`, then `migrations/20260816_user_ai_manual_grading.sql`. The last migration adds encrypted user-owned LLM settings and manual batch/student grading state. `DEPLOY.md` is the authoritative seven-file production order.
+- Apply `migrations/20260813_ai_grading_controls.sql`, then `migrations/20260813_admin_query_performance.sql`, `migrations/20260816_user_ai_manual_grading.sql`, and `migrations/20260817_ai_grading_student_recovery.sql`. The final migration adds fenced, recoverable student grading leases. `DEPLOY.md` is the authoritative eight-file production order.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
