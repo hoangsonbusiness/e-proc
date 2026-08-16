@@ -236,6 +236,8 @@ test('a later AI Grade run grades a newly submitted student without regrading co
   let activeProviderCalls = 0;
   let maxActiveProviderCalls = 0;
   let providerShouldFail = false;
+  let previousProviderContent = null;
+  let staleSecondResponseRemaining = 1;
   const providerInputs = [];
   const provider = http.createServer(async (request, response) => {
     providerCalls += 1;
@@ -255,7 +257,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     const input = JSON.parse(prompt.slice(prompt.indexOf(inputMarker) + inputMarker.length));
     providerInputs.push(input);
     const requestToken = prompt.match(/request_token must exactly equal "([^"]+)"/)?.[1];
-    const content = JSON.stringify({
+    const currentContent = JSON.stringify({
       request_token: requestToken,
       results: input.map((question) => ({
         grading_key: question.grading_key,
@@ -264,6 +266,12 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       })),
       summary_feedback: `Summary only: ${input.map((question) => question.student_answer).join('|')}`,
     });
+    const shouldReturnStaleResponse = input.some((question) => question.student_answer === 'Second answer')
+      && staleSecondResponseRemaining > 0
+      && previousProviderContent !== null;
+    const content = shouldReturnStaleResponse ? previousProviderContent : currentContent;
+    if (shouldReturnStaleResponse) staleSecondResponseRemaining -= 1;
+    else previousProviderContent = currentContent;
     // Keep the request open long enough for a Promise.all implementation to
     // overlap multiple students and make this regression test fail.
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -317,10 +325,11 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       ['First answer'],
       ['Fifth answer'],
       ['Second answer'],
+      ['Second answer'],
     ]);
     assert.equal(questionRows[0].ai_feedback, 'Graded only: First answer');
     assert.equal(questionRows[1].ai_feedback, 'Graded only: Second answer');
-    assert.equal(providerCalls, 3);
+    assert.equal(providerCalls, 4);
     assert.equal(maxActiveProviderCalls, 1);
 
     questionRows[0].answer = 'First answer revised';
@@ -331,7 +340,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     );
     assert.equal(questionRows[0].ai_feedback, 'Graded only: First answer revised');
     assert.equal(students[0].ai_summary_feedback, 'Summary only: First answer revised');
-    assert.equal(providerCalls, 4);
+    assert.equal(providerCalls, 5);
 
     const preserved = {
       score: students[0].ai_final_score,
@@ -366,7 +375,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     );
     assert.equal(questionRows[2].ai_feedback, 'Graded only: Fourth answer');
     assert.equal(students[3].ai_grading_status, 'completed');
-    assert.equal(providerCalls, 6);
+    assert.equal(providerCalls, 7);
 
     students[2].status = 'submitted';
     const third = await gradeBatchManually(db, 77, 9);
@@ -375,7 +384,7 @@ test('a later AI Grade run grades a newly submitted student without regrading co
       { completed: 0, failed: 1, remaining: 0, failures: [{ studentId: 103, error: 'Student has no assigned questions' }] },
     );
     assert.equal(students[2].ai_grading_status, 'failed');
-    assert.equal(providerCalls, 6);
+    assert.equal(providerCalls, 7);
   } finally {
     await new Promise((resolve, reject) => provider.close((error) => error ? reject(error) : resolve()));
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;

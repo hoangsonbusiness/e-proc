@@ -153,22 +153,37 @@ function splitByPromptSize(questions, maxChars) {
 }
 async function gradeChunkWithFallback(config, questions, deadline) {
     try {
-        // Keep the token short enough for smaller/custom models to copy reliably while
-        // retaining enough entropy to distinguish requests and stale responses.
-        const requestToken = crypto.randomBytes(8).toString('hex');
-        const configuredTimeout = Math.max(1_000, Math.min(Number(process.env.AI_GRADING_LLM_TIMEOUT_MS || 60_000), 120_000));
-        const remainingMs = deadline - Date.now() - 5_000;
-        if (remainingMs < 1_000)
-            throw new Error('AI grading execution budget exhausted');
-        const response = await callLlm(config, {
-            system: SYSTEM_PROMPT,
-            prompt: promptFor(questions, requestToken),
-            temperature: 0.1,
-            maxOutputTokens: Math.min(8_000, Math.max(1_024, questions.length * 350)),
-            timeoutMs: Math.min(configuredTimeout, remainingMs),
-        });
-        const validated = validateGradingResponse(response, questions, requestToken);
-        return { grades: validated.grades, summaries: [validated.summary] };
+        const configuredRetries = Number(process.env.AI_GRADING_CORRELATION_RETRIES || 2);
+        const correlationRetries = Number.isFinite(configuredRetries)
+            ? Math.max(0, Math.min(Math.trunc(configuredRetries), 3))
+            : 2;
+        for (let attempt = 0; attempt <= correlationRetries; attempt += 1) {
+            try {
+                // Every attempt gets a fresh token. A stale response from a previous
+                // student can therefore never become valid merely because we retried.
+                const requestToken = crypto.randomBytes(8).toString('hex');
+                const configuredTimeout = Math.max(1_000, Math.min(Number(process.env.AI_GRADING_LLM_TIMEOUT_MS || 60_000), 120_000));
+                const remainingMs = deadline - Date.now() - 5_000;
+                if (remainingMs < 1_000)
+                    throw new Error('AI grading execution budget exhausted');
+                const response = await callLlm(config, {
+                    system: SYSTEM_PROMPT,
+                    prompt: promptFor(questions, requestToken),
+                    temperature: 0.1,
+                    maxOutputTokens: Math.min(8_000, Math.max(1_024, questions.length * 350)),
+                    timeoutMs: Math.min(configuredTimeout, remainingMs),
+                });
+                const validated = validateGradingResponse(response, questions, requestToken);
+                return { grades: validated.grades, summaries: [validated.summary] };
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const isCorrelationFailure = /does not belong to the current grading request/i.test(message);
+                if (!isCorrelationFailure || attempt >= correlationRetries)
+                    throw error;
+            }
+        }
+        throw new Error('LLM response does not belong to the current grading request');
     }
     catch (error) {
         const message = error instanceof Error ? error.message : String(error);
