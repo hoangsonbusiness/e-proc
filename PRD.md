@@ -1,537 +1,259 @@
-# PRODUCT REQUIREMENT DOCUMENT (PRD)
+# PRODUCT REQUIREMENTS DOCUMENT (PRD)
 
-## E-Audit Platform (AI-Powered Technical Assessment Platform)
+## E-Audit Platform — AI-Powered Technical Assessment
 
-**Version:** 1.1  
-**Last Updated:** 2026-04-12  
-**Project:** e-audit-platform
+**Version:** 2.0
 
----
-
-## 1. Project Overview
-
-### 1.1 Definition
-
-E-Audit Platform là hệ thống tự động hóa quy trình phỏng vấn/kiểm tra kiến thức IT bằng hình thức thi tự luận trực tuyến, có giám sát hành vi và chấm điểm tự động bởi AI.
-
-### 1.2 Target Users
-
-| Role | Description |
-|------|------------|
-| **Admin/Trainer** | Người tạo đề, quản lý thí sinh, xem báo cáo, phúc khảo |
-| **Student** | Người làm bài thi |
-
-### 1.3 MVP Constraints
-
-- **Số câu hỏi mỗi bài thi:** Cố định 10 câu
-- **Thời gian làm bài:** Configurable per Batch (mặc định 30 phút)
-- **Số lượng thí sinh tối đa/Batch:** 50
+**Last Updated:** 2026-08-16
+**Reviewed source of truth:** `src/**`, `client/src/**`, `migrations/**`, package/build/deploy configuration
 
 ---
 
-## 2. Tech Stack
+## 1. Product overview
 
-### 2.1 Backend
+E-Audit Platform tổ chức bài đánh giá kỹ thuật trực tuyến dạng tự luận/coding hoặc trắc nghiệm, có chấm điểm tự động, phúc khảo, screen recording, forensic log và các cơ chế chống gian lận ở browser lẫn server.
 
-| Component | Technology |
-|----------|-----------|
-| Runtime | Node.js v18+ |
-| Framework | Express.js with TypeScript |
-| Database (Dev) | SQLite with `better-sqlite3` |
-| Database (Prod) | PostgreSQL (Supabase) |
-| Queue | File-based (no Redis) |
-| AI | Google Gemini API, OpenAI, Groq, DeepSeek, Ollama |
-| File Processing | `xlsx` (Excel), `multer` |
+| Actor | Mục tiêu và quyền chính |
+|---|---|
+| Admin | Quản lý user quản trị, toàn bộ question/batch, recording, AI và kết quả |
+| Moderator (`mod`) | Tạo question/batch; chỉ sửa/xóa nội dung mình sở hữu; không được bật recording |
+| Candidate | Xác thực bằng access code, làm bài trong môi trường kiểm soát và nộp bài |
 
-### 2.2 Frontend
+Không còn ràng buộc “cố định 10 câu/50 thí sinh”. Blueprint hiện nhận 1–100 câu. Năng lực tải production phải được đo, không suy ra từ các số liệu cũ trong tài liệu.
 
-| Component | Technology |
-|----------|-----------|
-| Framework | React 18 with TypeScript |
-| Build Tool | Vite |
-| HTTP Client | Axios |
-| UI | Custom CSS + Headless UI |
+## 2. Product principles
 
----
+- Backend quyết định cuối cùng về identity, deadline, trạng thái, violation lock và concurrent-session lock.
+- Browser telemetry là risk signal/evidence, không phải bảo đảm tuyệt đối.
+- Answer durability không phụ thuộc process-local memory.
+- Submit, violation retry và queue enqueue phải idempotent.
+- Answer submit không chờ recording finalize; lỗi evidence phải hiển thị rõ để điều tra.
+- TypeScript/React source và migration là nguồn sự thật; generated artifacts không phải nguồn thiết kế.
 
-## 3. Functional Requirements
+## 3. Functional requirements
 
-### 3.1 Admin Features
+### 3.1 Admin authentication and roles
 
-#### 3.1.1 Question Bank Management
+- Tạo admin đầu tiên qua `/admin/setup` chỉ khi `admin_users` trống.
+- Login trả JWT 24 giờ, `role`, `userId`; client lưu token/expiry/role/user id.
+- `admin` quản lý user role `admin`/`mod` và không được tự xóa chính mình.
+- `mod` chỉ sửa/xóa question có `uploaded_by` và batch có `created_by` bằng JWT user id.
+- Chỉ `admin` được đặt `record_mode` khác `none`. Mod clone batch vẫn bị server ép recording về `none`.
+- Mọi route admin sau setup/login/logout xác thực JWT; việc ẩn nút trên frontend chỉ là UX.
 
-- **Import Excel:** Upload file Excel để import/update câu hỏi
-- **Excel Format:**
+### 3.2 Question bank
 
-| Column | Type | Description |
-|--------|------|-------------|
-| ID | String | Khóa chính (e.g., DB-E-01) |
-| Type | Enum | `Coding`, `Conceptual` |
-| Level | Enum | `Easy`, `Medium`, `Hard` |
-| Module | String | Topic/Module name |
-| Question Sample | Text | Nội dung câu hỏi |
-| Rubric Must-have | Text | Tiêu chí 70% |
-| Rubric Nice-to-have | Text | Tiêu chí 20% |
-| Rubric Optional | Text | Tiêu chí 10% |
+Loại câu hỏi: `Coding`, `Conceptual`, `Fill-in`, `Debug`, `SingleChoice`, `MultipleChoice`; level: `Easy`, `Medium`, `Hard`.
 
-- **Logic:**
-  - ID trùng → Update toàn bộ nội dung
-  - Module được normalize Unicode
-  - Invalid Level/Type → Báo lỗi dòng đó
+Admin/mod có thể:
 
-#### 3.1.2 Batch Management
+- import/update essay và quiz từ hai Excel format;
+- tạo thủ công tại `/admin/questions/new`;
+- kiểm tra ID trước khi lưu; sửa tại `/admin/questions/:id/edit` nhưng không đổi ID;
+- xem live sanitized-HTML preview giống candidate renderer;
+- lọc module + nhóm essay/quiz, phân trang 10/25/50;
+- xóa đơn/bulk theo ownership.
 
-- **Create Batch:**
-  - Tên Batch
-  - Start Time, End Time
-  - Duration (phút)
-  - **Blueprint Config** (Ma trận đề thi)
+Validation:
 
-- **Blueprint JSON Structure:**
+- ID bắt buộc, tối đa 50 ký tự, phân biệt hoa/thường; duplicate exact ID trả 409.
+- Module/question bắt buộc; module được normalize Unicode.
+- Quiz có 2–6 option không rỗng, key A–F duy nhất, correct answer phải tồn tại.
+- `SingleChoice` có đúng một đáp án; `MultipleChoice` có ít nhất một; score > 0.
+- Non-quiz xóa quiz fields và dùng score 1.
+- Question/rubric được lưu verbatim, sanitize tại render boundary.
+- Excel parsing trong memory, giới hạn 5 MiB và một file/request.
+
+### 3.3 Batch management
+
+Mỗi batch có tên, UTC start/end, duration, `exam_type`, blueprint, `ai_grading_enabled`, `record_mode` và `created_by`.
+
+Current blueprint:
+
 ```json
 {
-  "blueprint": [
-    { "module": "Database", "easy": 1, "medium": 1, "hard": 0 },
-    { "module": "Java Core", "easy": 2, "medium": 1, "hard": 1 }
-  ],
-  "total_questions": 10
+  "blueprintMode": "module",
+  "items": [{ "module": "Java Core", "easy": 2, "medium": 1, "hard": 0 }]
 }
 ```
 
-- **Feasibility Check:** Kiểm tra đủ câu hỏi trong Question Bank trước khi tạo Batch
-
-#### 3.1.3 Student Management
-
-- **Import Emails:** Textarea, mỗi dòng 1 email
-- **Generate Code:** Sinh Access Code 6 ký tự ngẫu nhiên (Uppercase + Số)
-- **Export Excel:** Tải file chứa Email và Code
-
-#### 3.1.4 Results & Reports
-
-- **View Online:**
-  - Biểu đồ phân phối điểm
-  - Chi tiết từng câu hỏi của học viên
-  - AI Score, AI Feedback
-  - Trainer Score, Trainer Feedback (override)
-
-- **Export Excel:** Multiple sheets (1 sheet = 1 student)
-
-#### 3.1.5 AI Settings
-
-- **Config Providers:** Gemini, OpenAI, Azure, Groq, DeepSeek, Ollama, OpenRouter
-- **Test Connection:** Kiểm tra API hoạt động
-
-### 3.2 Student Features
-
-#### 3.2.1 Authentication
-
-1. Nhập Access Code 6 ký tự
-2. Kiểm tra Batch time (Start ≤ Now ≤ End)
-3. Chọn Email từ danh sách
-
-#### 3.2.2 Exam Interface
-
-- **Auto Fullscreen:** Yêu cầu fullscreen khi vào
-- **One-by-One View:** Hiển thị 1 câu, có Prev/Next
-- **Autosave:** Debounce 2 giây, buffer answers
-- **Timer:** Đếm ngược, auto submit khi hết giờ
-
-#### 3.2.3 Anti-Cheating
-
-| Violation | Action |
-|----------|-------|
-| Violation 1 | Cảnh báo đỏ, không chặn |
-| Violation 2 | Lock exam, auto submit |
-
-- **Violation Types:** `fullscreen_exit`, `tab_switch`
-
-#### 3.2.4 Submit
-
-- **Frontend:** "Cảm ơn, bài thi đã được ghi nhận..."
-- **Backend:**
-  1. Update status = 'submitted'
-  2. Flush cached answers to DB
-  3. Add jobs to AI queue
-
----
-
-## 4. Database Schema
-
-### 4.1 Tables
-
-#### question_bank
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | VARCHAR(50) | PRIMARY KEY |
-| type | TEXT | CHECK IN ('Coding', 'Conceptual') |
-| level | TEXT | CHECK IN ('Easy', 'Medium', 'Hard') |
-| module | TEXT | NOT NULL |
-| question_sample | TEXT | NOT NULL |
-| rubric_must_have | TEXT | NOT NULL |
-| rubric_nice_to_have | TEXT | NOT NULL |
-| rubric_optional | TEXT | NOT NULL |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-| updated_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### batches
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY AUTOINCREMENT |
-| name | TEXT | NOT NULL |
-| start_time | TIMESTAMP | NOT NULL |
-| end_time | TIMESTAMP | NOT NULL |
-| duration | INTEGER | NOT NULL |
-| blueprint | JSONB/TEXT | |
-| status | TEXT | DEFAULT 'draft' |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### students
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY AUTOINCREMENT |
-| batch_id | INTEGER | FOREIGN KEY → batches(id) |
-| email | TEXT | NOT NULL |
-| access_code | VARCHAR(6) | NOT NULL |
-| status | TEXT | DEFAULT 'pending' |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### exam_questions
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY AUTOINCREMENT |
-| student_id | INTEGER | FOREIGN KEY → students(id) |
-| question_id | VARCHAR(50) | FOREIGN KEY → question_bank(id) |
-| question_order | INTEGER | NOT NULL |
-| answer | TEXT | |
-| ai_score | FLOAT | |
-| ai_feedback | TEXT | |
-| trainer_score | FLOAT | |
-| trainer_feedback | TEXT | |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### violations
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY AUTOINCREMENT |
-| student_id | INTEGER | FOREIGN KEY → students(id) |
-| type | TEXT | NOT NULL |
-| count | INTEGER | DEFAULT 0 |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### ai_queue
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY AUTOINCREMENT |
-| exam_question_id | INTEGER | FOREIGN KEY → exam_questions(id) |
-| student_id | INTEGER | FOREIGN KEY → students(id) |
-| status | TEXT | DEFAULT 'pending' |
-| attempts | INTEGER | DEFAULT 0 |
-| error_message | TEXT | |
-| created_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-| updated_at | TIMESTAMP | DEFAULT CURRENT_TIMESTAMP |
-
-#### ai_settings
-
-| Column | Type | Constraints |
-|--------|------|------------|
-| id | INTEGER | PRIMARY KEY |
-| provider | TEXT | NOT NULL |
-| apiKey | TEXT | |
-| model | TEXT | NOT NULL |
-| temperature | REAL | DEFAULT 0.3 |
-| maxTokens | INTEGER | DEFAULT 2048 |
-
----
-
-## 5. API Endpoints
-
-### 5.1 Admin APIs
-
-#### Question Bank
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/admin/questions/import | Import từ Excel |
-| GET | /api/admin/questions | List all questions |
-| GET | /api/admin/questions/modules | Get unique modules |
-| DELETE | /api/admin/questions/:id | Delete question |
-
-#### Batch Management
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/admin/batches | Create batch with blueprint |
-| GET | /api/admin/batches | List batches |
-| GET | /api/admin/batches/:id | Get batch details |
-| PUT | /api/admin/batches/:id | Update batch |
-| DELETE | /api/admin/batches/:id | Delete batch |
-| POST | /api/admin/batches/:id/check-feasibility | Check question availability |
-
-#### Student Management
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/admin/batches/:id/students/import | Import emails |
-| GET | /api/admin/batches/:id/students | List students |
-| GET | /api/admin/batches/:id/students/export | Export Excel |
-
-#### Results
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | /api/admin/batches/:id/results | Get all results |
-| GET | /api/admin/batches/:id/results/export | Export Excel |
-| PUT | /api/admin/results/:studentId | Trainer override |
-
-#### Settings
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | /api/admin/settings/ai | Get AI settings |
-| POST | /api/admin/settings/ai | Save AI settings |
-| POST | /api/admin/settings/ai/test | Test AI connection |
-
-### 5.2 Student APIs
-
-#### Authentication
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/student/verify | Verify access code |
-| POST | /api/student/select-email | Select email |
-
-#### Exam
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/student/exam/start | Start exam (randomize) |
-| GET | /api/student/exam/questions | Get questions |
-| POST | /api/student/exam/answer | Save answer (cache) |
-| POST | /api/student/exam/flush | Flush cached answers |
-| POST | /api/student/exam/submit | Submit exam |
-
-#### Violations
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | /api/student/violation | Report violation |
-
-### 5.3 System APIs
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | /api/health | Health check |
-| GET | /api/queue/process | Process queue manual |
-| GET | /api/queue/stats | Queue statistics |
-| POST | /api/cache/flush | Flush answers |
-| GET | /api/stats | System stats |
-
----
-
-## 6. Frontend Pages
-
-### 6.1 Admin Pages
-
-| Route | Page | Description |
-|-------|------|-------------|
-| /admin | Login | Admin login |
-| /admin/dashboard | Dashboard | Overview |
-| /admin/questions | Question Bank | Import/view questions |
-| /admin/batches | Batch Management | Create/configure batches |
-| /admin/batches/:id/students | Student Management | Import/export students |
-| /admin/batches/:id/results | Results | View/export results |
-| /admin/settings | AI Settings | Configure AI providers |
-
-### 6.2 Student Pages
-
-| Route | Page | Description |
-|-------|------|-------------|
-| / | Login | Enter access code |
-| /exam | Exam | Full exam interface |
-| /submit | Submit | Thank you page |
-
----
-
-## 7. Performance Optimizations
-
-### 7.1 Answer Caching
-
-- **In-memory buffer** cho autosave
-- **Batch write** mỗi 5 giây (configurable via `ANSWER_FLUSH_INTERVAL`)
-- **Giảm 99.7%** số lần ghi DB
-
-### 7.2 AI Queue Processing
-
-- **File-based queue** tại `data/ai-queue.json`
-- **Periodic processing** mỗi 10 giây (configurable via `QUEUE_PROCESS_INTERVAL`)
-- **Parallel processing** nhiều jobs
-- **Auto retry** 3 lần/job
-
-### 7.3 Database
-
-- **SQLite:** WAL mode cho concurrent reads
-- **PostgreSQL:** Connection pooling (min: 2, max: 10)
-
----
-
-## 8. AI Engine
-
-### 8.1 Supported Providers
-
-| Provider | Model Default | Package |
-|----------|-------------|--------|
-| Gemini | gemini-2.0-flash | @google/generative-ai |
-| OpenAI | gpt-4o-mini | openai |
-| Azure | deployment name | openai |
-| Groq | llama-3.1-70b-versatile | groq |
-| DeepSeek | deepseek-chat | openai |
-| Ollama | llama3 | fetch |
-| OpenRouter | any model | openai |
-
-### 8.2 Evaluation Prompt Template
-
-```
-You are an expert technical interviewer. Evaluate the following answer based on the rubric.
-
-Question: {question}
-Answer: {answer}
-
-Rubric Must-have (70%): {must_have}
-Rubric Nice-to-have (20%): {nice_to_have}
-Rubric Optional (10%): {optional}
-
-Provide a JSON response with "score" (0-10) and "feedback" (detailed feedback):
-```
-
-### 8.3 Config
-
-| Parameter | Default |
-|-----------|---------|
-| Timeout | 60 giây |
-| Retry | 3 lần |
-| Fallback Score | 0.0 |
-| Fallback Feedback | "AI Evaluation Failed" |
-
----
-
-## 9. Non-Functional Requirements
-
-| ID | Requirement | Target |
-|----|-------------|-------|
-| NFR-01 | Concurrency | 30 concurrent connections |
-| NFR-02 | Queue Throughput | 5 submissions/phút |
-| NFR-03 | Data Validation | Nghiêm ngặt từ Excel |
-| NFR-04 | Security | Access code encrypted, API protection |
-
----
-
-## 10. Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| PORT | 3001 | Server port |
-| NODE_ENV | development | Env mode |
-| DATABASE_URL | - | PostgreSQL connection |
-| USE_SQLITE | true | Use SQLite (dev) |
-| GEMINI_API_KEY | - | Gemini API key |
-| SESSION_SECRET | - | Session secret |
-| ANSWER_FLUSH_INTERVAL | 5000 | Cache flush (ms) |
-| QUEUE_PROCESS_INTERVAL | 10000 | Queue process (ms) |
-
----
-
-## 11. Acceptance Criteria
-
-### 11.1 Feasibility Check
-
-- Admin tạo Batch, nhập 4 câu Java Hard nhưng DB chỉ có 3 → Hệ thống báo lỗi "Không đủ câu hỏi"
-
-### 11.2 Randomization
-
-- Mỗi học viên nhận câu hỏi khác nhau dựa trên blueprint
-
-### 11.3 Trainer Override
-
-- AI chấm 7.0, Trainer sửa thành 8.5 → Export Excel hiển thị 8.5
-
-### 11.4 Queue
-
-- 10 người cùng submit → Không báo lỗi 504
-
-### 11.5 Violations
-
-- Sau 2 violations → Lock exam tự động
-
-### 11.6 Fullscreen
-
-- Yêu cầu fullscreen khi vào exam
-
-### 11.7 Performance
-
-- Hỗ trợ 20-30 concurrent users với caching
-
----
-
-## 12. Project Structure
-
-```
-/home/ast/Workspace_OpenCode
-├── src/
-│   ├── server/
-│   │   ├── index.ts          # Express app entry
-│   │   ├── server.ts       # HTTP server
-│   │   ├── db/
-│   │   │   └── postgres.ts  # Database layer
-│   │   ├── routes/
-│   │   │   ├── admin.ts    # Admin APIs
-│   │   │   └── student.ts # Student APIs
-│   │   └── cache.ts        # File cache & queue
-│   ├── ai/
-│   │   └── queue.ts       # AI queue worker
-│   └── utils/
-│       └── string.ts     # Utilities
-├── client/
-│   └── src/
-│       ├── App.tsx            # Router
-│       ├── pages/               # Page components
-│       └── services/
-│           └── api.ts       # API client
-├── data/                     # SQLite DB, queue file
-├── public/                   # Static assets
-├── package.json
-└── .env
-```
-
----
-
-## 13. Dependencies
-
-### Production Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| express | ^4.18.2 | Web framework |
-| better-sqlite3 | ^12.8.0 | SQLite driver |
-| pg | ^8.11.3 | PostgreSQL driver |
-| @google/generative-ai | ^0.2.1 | Gemini AI |
-| openai | ^6.34.0 | OpenAI client |
-| groq | ^5.20.0 | Groq client |
-| xlsx | ^0.18.5 | Excel processing |
-| multer | ^1.4.5-lts.1 | File upload |
-| express-session | ^1.17.3 | Session |
-| express-rate-limit | ^7.1.5 | Rate limiting |
-| cors | ^2.8.5 | CORS |
-| dotenv | ^16.3.1 | Environment |
-| uuid | ^9.0.0 | UUID |
-
-### Dev Dependencies
-
-| Package | Version |
-|---------|---------|
-| typescript | ^5.3.3 |
-| tsx | ^4.7.0 |
-| @types/* | latest |
-
----
-
-**Document End**
-
-*Generated from source code analysis on 2026-04-12*
+Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
+
+- Tổng blueprint: 1–100 câu; feasibility đối chiếu module/level hoặc module/type/level.
+- Batch quiz chỉ lấy `SingleChoice`/`MultipleChoice`; essay loại hai type này.
+- Clone là frontend prefill form tạo mới với hậu tố `CLONE`, không có clone API riêng.
+- Tắt AI grading cancel queue jobs `pending/processing` của batch.
+
+### 3.4 Candidate management
+
+- Import email; duplicate trong batch/request được skip và trả danh sách.
+- Access code mới dài 8 ký tự, dùng `crypto.randomInt`, tránh ký tự dễ nhầm và retry collision.
+- Production unique toàn cục `students.access_code`; login vẫn nhận code legacy 6 ký tự.
+- Admin list/export email+code, xóa candidate hoặc reopen attempt.
+- Reopen giữ questions/answers; yêu cầu còn questions và batch chưa kết thúc; duration 1–480 phút, deadline không vượt batch end; xóa score/AI job/session/recording metadata, revoke token cũ và buộc verify lại.
+
+### 3.5 Candidate authentication and preflight
+
+1. `/student/verify` kiểm tra access code, status, time window.
+2. Server tạo JWT 4 giờ `{studentId,batchId,jti}`, ghi `active_jti`; verify mới revoke token cũ.
+3. UI dùng email đầu tiên và chuyển tới `/confirm`; `/select-email` chỉ còn legacy, không thuộc flow hiện tại.
+4. Preflight fail closed nếu `screen.isExtended=true` hoặc API không trả boolean.
+5. Recording yêu cầu recent Chrome/Edge desktop và đúng `displaySurface='monitor'`.
+6. Fullscreen phải thành công; sau hai animation frames, lưu immutable document-width baseline vào `sessionStorage`.
+7. Lưu token/context vào `localStorage`, điều hướng `/exam`.
+
+### 3.6 Exam lifecycle and answers
+
+- Start dùng transaction + PostgreSQL row lock, randomize theo blueprint, xáo câu và quiz options; option order được persist.
+- Deadline = `min(started_at + duration, batch.end_time)`; resume không gia hạn.
+- Essay/code debounce 5 giây/câu; quiz 500ms/câu.
+- Dirty answers gửi batch qua `/exam/answers`; `/exam/answer` vẫn tương thích.
+- Backend kiểm tra assignment, answer ≤100.000 ký tự, quiz options, status và deadline.
+- Manual submit gửi full answer map trong transaction; submit idempotent, ghi `submitted_at`/`submit_reason`.
+- Auto-submit reasons: `timeout`, `absent_too_long`, `violation`, `recording_stopped`, `concurrent_session`; manual dùng `manual`.
+- Disconnect beacon ghi timestamp; lần load questions sau >120 giây auto-submit.
+
+### 3.7 Grading
+
+- Quiz chấm ngay bằng exact-set match, không partial credit; đúng nhận configured score, sai 0.
+- Essay chỉ enqueue khi batch bật AI grading.
+- Queue id deterministic theo `exam_question.id`, claim atomic, tối đa 3 attempts, recover stale processing jobs.
+- `ai_settings.worker_enabled=false` dừng claim nhưng giữ pending jobs.
+- Provider: Gemini, OpenAI, Azure, Groq, DeepSeek, OpenRouter, Ollama.
+- Trainer override hiện áp cùng score/feedback cho toàn bộ questions của một student.
+
+### 3.8 Results and reporting
+
+- Results summary phân trang 10/25/50; question bank và results dùng aggregate query count không tăng theo số row trong page.
+- Summary hiển thị status, average score, counted violations, forensic count, recording count/bytes và local password.
+- Answers/feedback/violation events/recording parts load lazy theo student.
+- Detail hiển thị type, timestamp, length, question id, preview và metadata.
+- Export Excel một sheet/student; trainer score ưu tiên hơn AI/quiz score.
+- Legacy full-results API còn cho compatibility; current UI dùng summary/detail.
+
+### 3.9 Screen recording
+
+| Mode | Hành vi |
+|---|---|
+| `none` | Không screen share, không recording-stop guard |
+| `local` | Part 5 phút, ZIP AES-256 vào folder candidate chọn; password server sinh/lưu/trả ngầm |
+| `s3` | Part 5 phút, PUT trực tiếp S3 bằng presigned URL; backend `HeadObject` trước khi persist metadata |
+
+- VP9, fallback VP8, 5 fps, khoảng 600 kbps.
+- Candidate dừng share → `recording_stopped`, lock ngay lần đầu.
+- F5 mất recorder singleton → blocking modal bắt share/chọn folder lại.
+- Answer submit xong trước; `/submit` chờ shared `stopAndSave()` promise.
+- S3 finalize yêu cầu contiguous manifest `0..finalPartIndex`.
+- Manifest chưa xong khi submit đặt `recording_incomplete=true`; recording endpoints có grace 15 phút.
+- S3 cần CORS `PUT`, lifecycle retention và IAM `PutObject` + `GetObject` cho `HeadObject`.
+
+### 3.10 Anti-cheat and forensic policy
+
+Client-reportable:
+
+`tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`.
+
+`concurrent_session` là server-owned; client POST bị 400.
+
+- Lock khi một lockable type ≥2 hoặc tổng lockable violations ≥2.
+- `recording_stopped` lock lần đầu.
+- Forensic-only: `suspicious_paste`, `rapid_text_insertion`, `multiple_display_detected`, `concurrent_session`. Concurrent IP overlap vẫn lock trực tiếp.
+- Fullscreen exit report sau 5 giây và lần hai sau thêm 5 giây.
+- Focus lost report sau blur 3 giây; tab hidden dùng `visibilitychange`.
+- Clipboard bị chặn trong Monaco; cooldown 3 giây/type.
+- Single insertion ≥300 chars: bỏ qua exact registered suggestion; unmatched content bị undo và log preview ≤500.
+- Rapid insertion: tổng ≥300 chars/2,5 giây, mỗi change <300, telemetry cooldown 10 giây.
+- Side panel: immutable document width giảm >80px trong 2 poll ×1,5 giây, tối đa hai report.
+- Multiple display poll 3 giây forensic-only; watermark email/SID/time cập nhật, dịch vị trí mỗi 15 giây.
+- Client sinh `event_id`; unique `(student_id,event_id)` làm violation retry idempotent.
+
+Concurrent session:
+
+- Track `(student_id,jti,ip)` trên questions/answer(s)/violation.
+- Active window 60 giây; hai IP khác nhau có `last_seen` cách <10 giây là overlap lockable.
+- Nhiều IP/UA/jti không overlap chỉ log; overlap auto-submit trực tiếp.
+
+## 4. Data model
+
+| Table | Vai trò |
+|---|---|
+| `question_bank` | Question/rubric/quiz config/owner |
+| `batches` | Schedule/blueprint/exam-record-AI mode/owner |
+| `students` | Candidate attempt/code/deadline/session/submit/recording state |
+| `exam_questions` | Assignment/option order/answer/scores |
+| `violations` | Unique counted row theo student/type |
+| `violation_events` | Append-only forensic event + idempotency id |
+| `recording_parts` | S3 part đã verify |
+| `exam_sessions` | Recent jti/IP/UA activity |
+| `ai_queue` | Durable grading jobs |
+| `ai_settings` | Provider + worker switch |
+| `admin_users` | Credentials + role |
+
+Production PostgreSQL cần migrations; startup readiness kiểm tra required columns và unique-index definitions trước khi phục vụ traffic.
+
+## 5. API surface
+
+- Public admin auth: initialization, setup, login, logout.
+- Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; AI settings/test.
+- Student: verify, start, questions, answer(s), submit, disconnect, violation, recording URL/complete/finalize.
+- Operations: readiness health; authenticated DB/queue/cache stats; queue process bằng admin JWT hoặc exact `CRON_SECRET` bearer.
+
+Chi tiết method/path nằm trong `SPEC.md`.
+
+## 6. Non-functional requirements
+
+### Security
+
+- `JWT_SECRET` bắt buộc; production đặt `SESSION_SECRET` riêng.
+- CORS allowlist; CSP/HSTS production/frame deny/no-sniff/no-referrer/Permissions-Policy.
+- CSP giữ `'unsafe-eval'` và `blob:` vì Monaco; client minification không phải security boundary.
+- Rate limit: global 1200/phút/IP; verify 60/phút/IP; admin login 10/phút/IP; setup 5/giờ/IP.
+- JSON/urlencoded 10 MiB; Excel 5 MiB.
+
+### Reliability and performance
+
+- SQLite WAL local; PostgreSQL pool mặc định min 0/max 4.
+- Readiness 503 khi DB/schema/cache chưa sẵn sàng.
+- Direct DB answer writes, transactional/idempotent submit.
+- Paginated/lazy admin read paths và request/DB query metrics.
+- Vercel queue chạy qua cron/admin endpoint; self-host có interval 10 giây.
+
+### Browser compatibility
+
+- Exam yêu cầu recent desktop Chrome/Edge có `screen.isExtended`.
+- Recording cần HTTPS, Screen Recording permission, Fullscreen, MediaRecorder, whole-monitor share; local thêm File System Access API.
+- OS screenshot/shortcut detection vẫn best effort.
+
+## 7. Acceptance criteria
+
+1. Duplicate exact question ID trả 409; edit giữ ID; quiz invalid trả 400.
+2. Question paging/filter/ownership UI khớp backend 403.
+3. Blueprint ngoài 1–100 hoặc vượt inventory bị từ chối; mod không bật recording qua clone/API.
+4. Verify mới revoke token cũ; missing/invalid/revoked token trả 401.
+5. Start tạo unique assignment, deadline không vượt batch end, resume không gia hạn.
+6. Answer sau deadline/submitted không ghi; submit không mất answer đang debounce.
+7. Quiz exact answer nhận configured score; essay AI-off không enqueue; worker-off không claim.
+8. Retry cùng violation event id không tăng counter; đủ threshold auto-submit server-side.
+9. Client không report được `concurrent_session`; different-IP overlap auto-submit.
+10. Unsupported display API, extended display, non-monitor share hoặc fullscreen denial đều chặn Start.
+11. Side-panel persistent shrink tạo tối đa hai report; transient shrink không report.
+12. S3 metadata chỉ persist sau HeadObject; finalize thiếu part trả 409; submit page phản ánh finalize failure.
+13. Health trả 503 pending/error và 200 chỉ khi ready.
+14. Results dùng paged summary/lazy detail; export giữ trainer-score precedence.
+
+## 8. Known limitations
+
+- Không ngăn tuyệt đối thiết bị thứ hai, VM, OS accessibility, spoofed UA/IP hoặc custom client.
+- Concurrent use cùng NAT/IP có thể không bị detector phát hiện.
+- Local recording do candidate kiểm soát; password phải hiện diện trong client để mã hóa.
+- S3 chỉ verify object/key/size/manifest, chưa verify duration/frame/black screen.
+- AI response JSON chưa có schema validation sâu.
+- Repo chưa chứng minh SLA/load target; không dùng claim cũ “20–30 users/99.7% reduction”.
+
+## 9. Deployment targets
+
+- Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3, daily cron.
+- Ubuntu VPS: `deploy-vps.sh` sinh Docker/Caddy/Compose runtime ngoài checkout, dùng Supabase PostgreSQL.
+- `public/**`, root `server/**`, `index.js` và generated bundles không phải production source of truth theo Vercel config.
+
+Xem migration, environment và smoke checklist tại `DEPLOY.md`.

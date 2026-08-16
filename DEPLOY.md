@@ -1,6 +1,9 @@
 # Deploy Guide — E-Audit Platform
 
-Production target: một project Vercel phục vụ frontend tĩnh + Express function, Supabase PostgreSQL qua Transaction Pooler, và S3 nếu bật screen recording.
+Hai topology production đang được repository hỗ trợ:
+
+- **Vercel (mặc định):** frontend tĩnh + Express Function, Supabase PostgreSQL qua Transaction Pooler, và S3 nếu bật screen recording.
+- **Ubuntu VPS:** `deploy-vps.sh` dựng Docker Compose + Caddy/HTTPS, kết nối Supabase bằng Session Pooler và chạy queue worker liên tục trong process backend.
 
 ### Vì sao diff có nhiều file?
 
@@ -48,16 +51,18 @@ npm audit --omit=dev
 cd client && npm audit --omit=dev
 ```
 
-Kết quả `npm test` hiện mong đợi: 9 SQLite test pass và 5 PostgreSQL test skip. Việc skip là có chủ ý khi chưa cấu hình database test; nó không chứng minh race PostgreSQL đã đúng.
+Kết quả đã xác minh ngày 2026-08-16: `npm test` có **57 test, 51 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
 
 ### 2.1. `TEST_DATABASE_URL` dùng để làm gì?
 
-Năm integration test cần PostgreSQL thật để kiểm tra những hành vi SQLite không mô phỏng được:
+Sáu integration test cần PostgreSQL thật để kiểm tra những hành vi SQLite không mô phỏng được:
 
-- hai transaction violation khác type chạy đồng thời vẫn nhìn thấy tổng count đúng;
-- partial unique index của `event_id` hoạt động đúng cú pháp PostgreSQL;
+- partial unique index của `event_id` hoạt động đúng và retry không tăng counter;
+- hai `event_id` khác nhau cùng type tăng counter thành 2;
+- hai transaction violation khác type chạy đồng thời vẫn nhìn thấy tổng count đúng và khóa bài;
 - rollback xóa đồng thời event và counter;
-- hai Vercel worker đồng thời chỉ một worker claim được AI queue job.
+- hai worker đồng thời chỉ một worker claim được AI queue job;
+- batch vừa tắt AI grading làm pending job bị hủy thay vì được claim.
 
 Test tạo schema tạm tên `test_violation`, tạo các bảng tối thiểu trong schema đó, rồi `DROP SCHEMA test_violation CASCADE` khi kết thúc. Nó không chạy bộ migration production và không chạm schema `public`, nhưng **không được trỏ vào production**.
 
@@ -95,11 +100,11 @@ notepad .env.test.local
 npm run test:postgres
 ```
 
-Script `test:postgres` tự build backend, đọc `.env.test.local`, từ chối placeholder/URL sai, sau đó chỉ chạy năm PostgreSQL integration test. Kết quả mong đợi:
+Script `test:postgres` tự build backend, đọc `.env.test.local`, từ chối placeholder/URL sai, sau đó chỉ chạy sáu PostgreSQL integration test. Kết quả mong đợi:
 
 ```text
-tests 5
-pass 5
+tests 6
+pass 6
 fail 0
 skipped 0
 ```
@@ -223,6 +228,8 @@ Nếu dùng S3 recording:
 - `AWS_REGION`
 - `S3_RECORDINGS_BUCKET`
 
+IAM principal dùng bởi backend tối thiểu cần `s3:PutObject` cho presigned upload và `s3:GetObject` để `HeadObject` xác minh part đã upload. Bucket phải có CORS cho phép domain thi gọi `PUT` với `Content-Type`, và nên có Lifecycle rule tự xóa `recordings/**` theo chính sách lưu trữ của tổ chức. Không cấp public-read cho bucket.
+
 ## 6. Build và deploy
 
 Project dùng artifact đã build. Trước khi commit/deploy:
@@ -295,28 +302,65 @@ Answer hiện được ghi trực tiếp vào Supabase sau debounce phía fronte
 
 Không còn dựa vào process-local answer buffer cho dữ liệu bài thi. Cách này tạo nhiều request/write hơn nhưng tránh mất dữ liệu khi Vercel scale hoặc freeze instance. Cần theo dõi Vercel invocations và Supabase database load trong kỳ thi thật; không khẳng định `$0/month` nếu chưa đo usage thực tế.
 
-Supabase Free có 500 MB database và có thể pause project ít hoạt động sau khoảng một tuần. Trước ngày thi, mở dashboard và gọi `/api/health` đủ sớm để xác nhận project đã hoạt động lại.
+Supabase Free có thể pause project có ít hoạt động trong khoảng 7 ngày. Trước ngày thi, mở dashboard và gọi `/api/health` đủ sớm để xác nhận project đã hoạt động lại; kiểm tra pricing/quotas hiện hành thay vì xem giới hạn free tier trong tài liệu này là cam kết cố định.
 
 Tài liệu chính thức:
 
 - https://supabase.com/pricing
 - https://supabase.com/docs/guides/platform/free-project-pausing
 
-## 9. Checklist production trước mỗi kỳ thi
+## 9. Triển khai Ubuntu VPS bằng `deploy-vps.sh`
 
-- [ ] Bốn migration đã chạy và verification query đúng.
+Topology này phù hợp khi cần backend/AI queue worker chạy liên tục thay vì phụ thuộc Vercel cron. Script hiện chỉ hỗ trợ **Ubuntu**, phải chạy bằng `root`, và sẽ:
+
+1. cài Docker Engine/Compose, Git, Caddy dependencies và UFW;
+2. chỉ mở SSH, HTTP, HTTPS/HTTP3;
+3. clone repository vào `/opt/e-proc/app`, checkout detached `GIT_REF` (mặc định `main`), rồi `reset --hard`/`clean` deployment checkout đó;
+4. sinh Dockerfile, Compose, Caddyfile và secret env dưới `/opt/e-proc/runtime`;
+5. tùy chọn cập nhật Cloudflare DNS khi có `CF_API_TOKEN` + `CF_ZONE_ID`;
+6. build image, khởi tạo schema, chạy toàn bộ `migrations/*.sql` theo tên tăng dần, kiểm tra/import question bank, rồi chờ `/api/health` ready.
+
+Không lưu file thủ công trong `/opt/e-proc/app`: lần deploy kế tiếp sẽ xóa mọi file không thuộc commit. Với repository private, VPS phải có credential Git đọc được repository.
+
+Chuẩn bị DNS trỏ `APP_DOMAIN` về IPv4 của VPS, sau đó chạy từ bản script đã review:
+
+```bash
+sudo GIT_REF=<commit-or-tag> bash deploy-vps.sh
+```
+
+Script hỏi `REPO_URL`, `APP_DOMAIN`, `DATABASE_URL`. Với VPS IPv4 chạy lâu, dùng Supabase **Session Pooler port 5432**; Transaction Pooler `6543` dành cho Vercel/serverless. Runtime VPS đặt `DB_POOL_MIN=1`, `DB_POOL_MAX=5` và `QUEUE_PROCESS_INTERVAL=10000`, nên worker xử lý queue trong process thay vì chờ cron hằng ngày.
+
+Nếu `question_bank` đang rỗng, phải cung cấp `QUESTION_BANK_CSV_URL`; importer hiện yêu cầu chính xác 599 row/ID. Nếu database đã có câu hỏi, có thể bỏ qua URL này. Các biến AI/S3 và Cloudflare có thể export trước khi chạy script.
+
+> **Cảnh báo bắt buộc:** phiên bản script hiện tại tạo hoặc **reset lại sau mỗi lần chạy** tài khoản `admin / admin321` qua upsert. Phải đổi mật khẩu ngay sau deploy và không chạy script này trên production nếu chưa chấp nhận hành vi reset credential đó. Nên sửa script nhận bootstrap secret từ biến môi trường trước khi dùng cho hệ thống thật.
+
+Sau deploy:
+
+```bash
+cd /opt/e-proc/runtime
+docker compose ps
+docker compose logs --tail=200 webapp proxy
+curl -fsS https://<domain>/api/health
+```
+
+Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nếu VPS bị terminate, tạo VPS mới và chạy lại script; backup/retention của PostgreSQL và S3 vẫn phải được quản lý độc lập.
+
+## 10. Checklist production trước mỗi kỳ thi
+
+- [ ] Sáu migration đã chạy theo đúng thứ tự và verification query đúng.
 - [ ] `/api/health` trả HTTP 200.
-- [ ] `DATABASE_URL` là Transaction Pooler; `DB_POOL_MAX=4`, `DB_POOL_MIN=0`.
+- [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
 - [ ] Import Excel lớn hơn 5 MiB bị từ chối; SheetJS vẫn được pin ở official tarball `0.20.3`, không hạ về npm `0.18.5`.
 - [ ] `CRON_SECRET` đã cấu hình và queue endpoint không trả 401.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm test` có 9 pass/5 skip; `npm run test:postgres` có 5 pass/0 skip trên project test riêng.
-- [ ] Chrome và Edge vật lý đã test fullscreen, recorder và `displaySurface='monitor'`.
+- [ ] `npm test` có 51 pass/6 skip; `npm run test:postgres` có 6 pass/0 skip trên project test riêng.
+- [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
 - [ ] Test một bài submit thật, xác nhận answer, violation event, recording metadata và AI queue row trong Supabase.
+- [ ] Nếu dùng VPS: đã thay `admin321`, kiểm tra certificate Caddy, UFW, Docker restart policy và queue worker.
 
-## 10. Giới hạn còn chấp nhận
+## 11. Giới hạn còn chấp nhận
 
 - Web browser không thể ngăn chắc thiết bị thứ hai, VM, OS accessibility hoặc custom API client.
 - Concurrent-session cùng IP/NAT vẫn là vùng quan sát yếu.

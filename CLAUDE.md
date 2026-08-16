@@ -26,6 +26,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Backend: `npx tsc --noEmit` (from project root)
 - Frontend: `npx tsc --noEmit` (from `client/`)
 
+### Tests and dependency checks
+- SQLite/default regression suite: `npm test`
+- PostgreSQL race/integration suite: copy `.env.test.example` to `.env.test.local`, set a **non-production** `TEST_DATABASE_URL`, then run `npm run test:postgres`
+- Production dependency audits: `npm audit --omit=dev` and `cd client && npm audit --omit=dev`
+
 ## Repository structure
 
 This is a full-stack technical assessment platform with a React/Vite frontend and an Express/TypeScript backend.
@@ -51,7 +56,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `/exam` → active exam page
   - `/submit` → submission complete page
 - Admin flow routes:
-  - `/admin`, `/admin/dashboard`, `/admin/questions`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`
+  - `/admin`, `/admin/setup`, `/admin/dashboard`, `/admin/questions`, `/admin/questions/new`, `/admin/questions/:id/edit`, `/admin/batches`, `/admin/batches/:id/students`, `/admin/batches/:id/results`, `/admin/settings`, `/admin/users`
 - API wrapper: `client/src/services/api.ts`
   - `adminApi` contains admin CRUD/reporting endpoints; attaches admin JWT via request interceptor
   - `studentApi` contains exam lifecycle endpoints and violation reporting; attaches student JWT via request interceptor (see **Student auth** section below)
@@ -94,17 +99,18 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 - **Roles (added 2026-07-29):** `admin_users.role` ∈ `{'admin', 'mod'}` (default `'admin'`; pre-existing users migrate to `'admin'`). `requireAdmin` middleware (`src/server/middleware/auth.ts`) gates admin-only routes with 403.
   - **User management** (`GET/POST/DELETE /api/admin/users`) is `requireAdmin`-only. Frontend page `/admin/users` (`UserManagement.tsx`); the nav link and page are hidden/redirected for mods via `useAuth().isAdmin` — but the **backend `requireAdmin` is the real gate**, the frontend hiding is only UX.
   - **Recording mode per batch** (`batches.record_mode` ∈ `{'none','local','s3'}`, default `'none'`; replaced the old boolean `batches.record_enabled` toggle — 2026-07-30): only `role === 'admin'` may set it to anything other than `'none'`. Enforced server-side in `POST/PUT /api/admin/batches` — on create a mod's requested mode is **forced to `'none'`**; on update a mod's request **keeps the existing DB `record_mode` unchanged** (mod can neither enable nor change it, for `local` OR `s3`). The batch form dropdown is `disabled` for mods (UX only). `record_enabled` is kept in sync (`= record_mode === 's3'`) for backward compat but `record_mode` is the source of truth. The `UserManagement.tsx` role selector labels mod as "cannot enable screen recording".
-- Internal diagnostic endpoints (`/api/test-db`, `/api/queue/*`, `/api/cache/flush`, `/api/stats`) also require admin JWT
+  - **Ownership:** mods may create questions/batches, but can edit/delete only rows whose `uploaded_by`/`created_by` matches their JWT user id. Admins may manage all rows. A mod may clone any visible batch into a new batch they own, but the server still forces the clone's recording mode to `none`.
+- Internal diagnostic endpoints require admin JWT; `/api/queue/process` additionally accepts the exact `CRON_SECRET` bearer used by Vercel Cron
 
 #### Student authentication
 After the security hardening (2026-07), student auth works via a signed JWT rather than an unverified header:
 
 1. Student enters access code → `POST /api/student/verify`
-2. Server validates and returns `student_token` (JWT, `expiresIn: 4h`, payload: `{ studentId, batchId }`)
+2. Server validates and returns `student_token` (JWT, `expiresIn: 4h`, payload: `{ studentId, batchId, jti }`) and stores the fresh `jti` in `students.active_jti`
 3. `StudentLogin.tsx` passes token through React Router state → `StudentConfirm.tsx`
 4. On "Start exam", `StudentConfirm.tsx` stores `studentToken` and `studentId` in `localStorage`
 5. All subsequent student API calls (`getQuestions`, `saveAnswer`, `submit`, `reportViolation`, etc.) attach the token via the axios request interceptor in `api.ts`
-6. Backend `studentAuthMiddleware` verifies the JWT; `req.studentPayload.studentId` is the authoritative source — **`x-student-id` header is no longer used or trusted**
+6. Backend `studentAuthMiddleware` verifies the JWT and checks that its `jti` still equals `students.active_jti`; a later `/verify` revokes the older token. `req.studentPayload.studentId` is authoritative — **`x-student-id` is not trusted**
 7. `POST /exam/disconnect` (sendBeacon) cannot set custom headers, so the token is placed inside the request body (`student_token` field); `studentAuthMiddleware` accepts it from either location
 
 When debugging student exam state, inspect:
@@ -120,16 +126,17 @@ When debugging student exam state, inspect:
 ### Exam lifecycle
 - Student verification and exam start live in `src/server/routes/student.ts`
 - Frontend exam behavior lives mainly in `client/src/pages/StudentExam.tsx`
-- Answers are not written directly on every keystroke:
-  - frontend debounces saves (2-second debounce)
-  - backend buffers answers through `src/server/cache.ts`
-  - buffered answers are flushed periodically or on submit
-- Violations are reported from the frontend through `studentApi.reportViolation(type)` and stored in the `violations` table
-- Accepted violation types (server-enforced whitelist in `src/server/routes/student.ts`, `validTypes`): `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`, `concurrent_session`
+- Answers are persisted directly to `exam_questions` rather than relying on process-local durability:
+  - essay/code answers use a separate 5-second timer per question
+  - quiz answers use a 500ms timer per question
+  - `POST /exam/answers` batches dirty answers; manual submit sends the full current answer set inside the idempotent submission transaction
+  - `cache.ts` still contains legacy answer-buffer helpers and `/exam/flush`, but the active exam save path does not depend on them
+- Violations are reported through `studentApi.reportViolation(type)`; counter-eligible types update `violations`, while every new occurrence is written to `violation_events`
+- Client-reportable types are the whitelist in `src/server/services/violationPolicy.ts`: `tab_switch`, `fullscreen_exit`, `copy_attempt`, `cut_attempt`, `paste_attempt`, `devtools_open`, `view_source`, `extension_panel`, `screenshot_attempt`, `print_attempt`, `suspicious_paste`, `focus_lost`, `recording_stopped`, `rapid_text_insertion`, `multiple_display_detected`. `concurrent_session` is server-owned and a client POST is rejected with 400.
 - Locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`. `focus_lost` remains lockable; `suspicious_paste`, `rapid_text_insertion`, `multiple_display_detected`, and `concurrent_session` are forensic-only in the `violations` table. **`recording_stopped` is a special case: it locks the exam on the FIRST occurrence** — stopping screen share is treated as deliberate evasion.
-- **Backend enforces the lock itself (2026-08-09):** when the `/violation` handler computes `locked`, it now *server-side* auto-submits (`flushAnswers` + `status='submitted'` + `finalizeSubmission`, only if still `in_progress`) instead of merely returning the `locked` flag for the frontend to honor. An automation client that ignores the response can no longer keep working past the threshold.
+- **Backend enforces the lock itself:** `persistViolation()` atomically inserts/idempotently replays the event and counter; `ensureViolationLock()` calls the shared transactional `submitExamAtomically()` with reason `violation` or `recording_stopped`. A replay retries enforcement if the first submit failed, so ignoring the client response cannot keep the attempt writable past the threshold.
 - **`concurrent_session` (2026-08-09) locks via a different path** — not the count thresholds above; it auto-submits when time-overlapping requests from ≥2 IPs are seen. See Concurrent-session detection section.
-- Every violation report is additionally appended to the `violation_events` table (append-only forensic log); `suspicious_paste` events carry a `content_preview` (first 500 chars of the pasted text) — see Anti-Cheat v2 section
+- Every new logical violation occurrence is appended to `violation_events`; transport retries reuse `event_id` and do not append duplicates. `suspicious_paste` carries the first 500 chars as `content_preview`.
 - `rapid_text_insertion` and `multiple_display_detected` are **forensic-only**: they are appended to `violation_events` with `metadata_json`, but are not inserted/incremented in `violations` and never contribute to auto-lock thresholds.
 - Anti-cheat behavior is concentrated in `client/src/pages/StudentExam.tsx`:
   - clipboard attempts (`copy_attempt`, `cut_attempt`, `paste_attempt`) are intercepted inside the Monaco CodeEditor via `addCommand()` and reported as violations
@@ -137,7 +144,7 @@ When debugging student exam state, inspect:
   - tab switching (visibilitychange) reports `tab_switch` violation
   - DevTools/View Source shortcuts cover Windows/Linux modifiers and macOS Command/Option modifiers. DevTools reports `devtools_open`; View Source reports `view_source`.
   - `beforeprint`, Ctrl/Cmd+P report `print_attempt`; PrintScreen and macOS screenshot shortcuts are intercepted on a best-effort basis and report `screenshot_attempt` (OS-reserved shortcuts are not guaranteed to reach browser JavaScript).
-  - multiple-display preflight uses `screen.isExtended` when supported: an extended display blocks Start on `/confirm`; a display that appears during the exam produces forensic-only `multiple_display_detected`. There is deliberately no self-attestation/checklist gate.
+  - multiple-display preflight is fail-closed: `/confirm` blocks both an extended display and a browser that does not expose boolean `screen.isExtended`. This effectively requires a recent desktop Chrome/Edge. A display appearing mid-exam produces forensic-only `multiple_display_detected`. There is no self-attestation/checklist fallback.
   - **Extension side-panel detection (`extension_panel`, added 2026-07)**: detects Chrome side-panel extensions (e.g. Monica AI) that open alongside the exam while remaining fullscreen. See dedicated subsection below — the detection metric matters and is easy to get wrong.
   - locking occurs when `violation_count >= 2` for any single lockable type or `total_violations >= 2`; forensic-only types are excluded
 
@@ -146,11 +153,11 @@ Chrome side-panel extensions (Monica AI and similar "AI sidebar" extensions) ren
 
 **Critical, counter-intuitive measurement finding (confirmed via live testing 2026-07-21):** while fullscreen and a side panel is open, `window.innerWidth`, `window.screen.width`, and `window.outerWidth` all stay **frozen** at their pre-panel values — they do not reflect the shrink at all. Only `document.documentElement.getBoundingClientRect().width` (equivalently `document.body.clientWidth`) reflects the real layout shrink (~465px observed with Monica). An earlier implementation attempt compared `window.screen.width - window.innerWidth` and silently never triggered because of this — do not reintroduce that comparison.
 
-Current implementation in `StudentExam.tsx`:
-- A baseline `document.documentElement.getBoundingClientRect().width` is recorded in the `fullscreenchange` handler whenever `document.fullscreenElement` becomes truthy (stored in `documentWidthBaselineRef`), and re-recorded lazily by the poller if it mounts after fullscreen was already active (resume-after-reload case).
+Current implementation in `sidePanelDetector.ts`, `StudentConfirm.tsx`, and `StudentExam.tsx`:
+- `/confirm` captures `document.documentElement.getBoundingClientRect().width` once, after fullscreen settles, and stores it in `sessionStorage` under `examFullscreenBaselineWidth`. `/exam` only reads this immutable baseline; it never re-baselines to a potentially shrunken width after navigation/F5.
 - A `setInterval` poller (`VIEWPORT_CHECK_INTERVAL_MS` = 1500ms) runs only while `started && !locked && !submitting` and `document.fullscreenElement` is set.
-- Each tick compares `documentWidthBaselineRef.current - currentWidth` against `VIEWPORT_SHRINK_THRESHOLD_PX` (80px).
-- The shrink must persist for `VIEWPORT_SUSTAIN_POLLS` (2) consecutive ticks (~3s) before firing `handleViolation('extension_panel')`, to avoid false positives from transient layout jitter — following the same debounce lesson as the fullscreen-exit and previously-removed devtools window-size heuristic (see comment near `StudentExam.tsx:325-327` in earlier revisions).
+- Each tick compares the stored baseline with the current document width using `SIDE_PANEL_SHRINK_THRESHOLD_PX` (80px).
+- The shrink must persist for `SIDE_PANEL_SUSTAIN_POLLS` (2) consecutive ticks (~3s). The pure detector reserves at most two logical reports (`SIDE_PANEL_MAX_REPORTS=2`), prevents overlapping in-flight reports, and the normal two-violation rule locks the exam.
 - No `resize`/`visualViewport.resize` event is relied on, since side-panel open/close doesn't reliably fire those in all browsers — polling is used instead.
 
 If this detection stops working again, verify in this order before touching the logic: (1) confirm the deployed bundle actually contains the fix (see Vercel deploy note below — this bit twice), (2) re-measure `documentElement`/`innerWidth`/`screen.width` live with a throwaway static HTML page served over `http://localhost` (not `file://` — extensions don't inject into `file://` pages) since browser/extension internals can change behavior across Chrome versions.
@@ -207,8 +214,8 @@ The `violations` table is keyed by `(student_id, type)` and only stores a runnin
 
 - `CodeEditor.tsx` retains the existing single-change `suspicious_paste` threshold (>=300 chars), and additionally aggregates inserted characters in a rolling **2.5-second** window. If total insertion reaches 300 while each individual change remains below 300, it reports `rapid_text_insertion` with `insertedChars`, `changeCount`, `windowMs`, and `maxSingleChange`.
 - `rapid_text_insertion` is forensic-only to avoid auto-lock false positives from Monaco completion/formatting behavior. Calibrate from production evidence before ever making it lockable.
-- `examEnvironment.ts` reads `screen.isExtended` when the browser exposes it. `StudentConfirm` blocks Start when an extended display is detected. `StudentExam` polls every 3 seconds and records forensic-only `multiple_display_detected` if an additional display appears mid-exam.
-- Browser display detection is best-effort and does not prove that Sidecar/external displays are absent when the API is unsupported or unavailable. There is no candidate checkbox/acknowledgement fallback because self-attestation is not a security control.
+- `examEnvironment.ts` reads `screen.isExtended`. `StudentConfirm` blocks Start if it is `true` **or unavailable**; `StudentExam` polls every 3 seconds and records forensic-only `multiple_display_detected` if an additional display appears mid-exam.
+- The API remains a browser signal, not proof against spoofing, but unsupported browsers now fail closed. There is no candidate checkbox/acknowledgement fallback because self-attestation is not a security control.
 
 **7. Concurrent-session / multi-IP detection (`concurrent_session`, added 2026-08-09)**
 
@@ -218,7 +225,7 @@ Addresses the highest-risk attack vector for a technical candidate: driving the 
 - **Tracking:** `sessionTracker` middleware (`src/server/middleware/sessionTracker.ts`) runs **after `studentAuthMiddleware`** on `/exam/questions`, `/exam/answer`, `/violation` (deliberately **not** on `/exam/disconnect` — beacon IP/UA are unreliable). It upserts one `exam_sessions` row per `(student_id, jti, ip)` (`ON CONFLICT ... DO UPDATE last_seen, user_agent` — valid on both PostgreSQL and better-sqlite3), refreshing `last_seen` and storing the User-Agent. `req.ip` is authoritative because `app.set('trust proxy', 1)` is set — verify Vercel forwards `x-forwarded-for` correctly, otherwise all rows collapse to one IP.
 - **Evaluation:** `detectConcurrentSession(studentId)` reads rows with `last_seen` within `SESSION_WINDOW_SECONDS` (60s) and computes four signals: ≥2 distinct IPs, ≥2 distinct User-Agents, ≥2 distinct `jti`s, and **time-overlap** (two rows with *different* IPs whose `last_seen` differ by < `OVERLAP_SECONDS` = 10s). `suspicious` = any signal; **`lockable` = time-overlap only**.
 - **Why only overlap locks:** a candidate legitimately switching wifi→4G changes IP *sequentially*, not overlapping — that is `suspicious` (logged) but **not** locked, avoiding the most common false positive. Two genuinely-concurrent clients produce overlapping requests.
-- **Enforcement:** `enforceConcurrentSession()` in `student.ts` is called from both `/exam/questions` (polled regularly, so it catches a second client even if it never reports a violation) and `/violation`. On `suspicious` it appends a forensic `concurrent_session` row to `violation_events` (`metadata_json` = `{ ips, userAgents, jtis, overlap }`, `content_preview` = the IP list); on `lockable` (still `in_progress`) it additionally auto-submits and returns `410 { reason: 'concurrent_session' }` (questions) / `locked: true` (violation). All detect/log/lock steps are wrapped in try/catch so a missing table on an old DB never breaks the exam.
+- **Enforcement:** the server-owned enforcer from `concurrentSessionEnforcer.ts` is invoked before writes on `/exam/questions`, `/exam/answers`, `/exam/answer`, and `/violation`. Suspicious evidence is deduplicated in-process for 60 seconds and appended as `concurrent_session`; different-IP overlap directly submits with reason `concurrent_session`, independent of counters. Client-supplied `concurrent_session` is rejected. Startup schema readiness requires the session table/index, while tracking/logging failures are treated as non-fatal where explicitly caught.
 - **Reset:** `POST /admin/students/:id/reset` deletes `exam_sessions` rows so a re-attempt does not false-positive against the prior attempt's sessions.
 - **Admin UI:** `Results.tsx` shows a pulsing red `⚠️ Multi-session (N IP) ×count` badge on any student with `concurrent_session` events; the forensic detail popup renders the IP/UA/jti metadata.
 - **Constants** (`SESSION_WINDOW_SECONDS` = 60, `OVERLAP_SECONDS` = 10) live in `sessionTracker.ts` and are the tuning knobs; adjust there if false-positive/negative rates warrant.
@@ -229,7 +236,7 @@ Addresses the highest-risk attack vector for a technical candidate: driving the 
 
 Beyond the anti-cheat layers, several backend guards were added/tightened the same day:
 
-- **`POST /verify` rate-limit:** dedicated `verifyRateLimit` (10 req/min/IP) in `student.ts` on top of the global 200 req/min limiter, to blunt access-code brute-forcing.
+- **Rate limits:** global API limit is 1200 req/min/IP; `/student/verify` is 60 req/min/IP to allow a 25–50 candidate room behind one NAT; admin login is 10 req/min/IP and initial setup is 5 req/hour/IP.
 - **`/exam/answer` status guard:** rejects with `410` when the student is `submitted` or past `exam_deadline` — previously it buffered blindly, so answers could be overwritten after a lock/auto-submit.
 - **`/exam/submit` idempotency:** returns early (`{ already: true }`) if already `submitted`, avoiding duplicate flush + AI re-queue.
 - **Security headers / CSP:** `src/server/index.ts` sets `Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, and (prod) HSTS via a hand-rolled middleware (no `helmet` dependency). **The CSP intentionally allows `'unsafe-eval'` and `blob:` in `script-src`/`worker-src` because Monaco requires it** — do not remove those or the editor breaks. This is a deliberate trade-off, not an oversight.
@@ -262,7 +269,7 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
   - **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; a shared tab/window (`displaySurface !== 'monitor'`) is refused. Requires **Chrome/Edge + HTTPS**; Safari/Firefox blocked at confirm.
   - **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~22 MB per **5-minute part**. In `s3` mode each part asks for a presigned URL then `fetch(url, { method: 'PUT', body: blob })` straight to S3, with a **retry queue** (exponential backoff, max 5 attempts) in the background. In `local` mode each part is zipped+encrypted and written to the chosen folder.
   - **Mode-aware API:** `isSupported(mode)` (local also needs `showDirectoryPicker`), `requestSetup(mode)` (local also prompts the folder picker **before** `getDisplayMedia`, both inside the click gesture), `start({ mode, password })`. `flushPart()` routes to S3 upload or local zip by mode.
-- **Lifecycle:** `requestSetup(recordMode)` is called in `StudentConfirm.tsx#handleStartExam` **in the click gesture, BEFORE `requestFullscreen()`** (fullscreen consumes the user-activation that `getDisplayMedia`/`showDirectoryPicker` need — order matters). `start({ mode, password })` begins recording. `stopAndSave()` at the top of `handleSubmit` in `StudentExam.tsx` covers all three submit paths (manual / cheating auto-submit / timeout); wrapped in try/catch so a recording error never blocks submission. For `local`, `stopAndSave()` **awaits** the final zip write.
+- **Lifecycle:** `requestSetup(recordMode)` runs inside the Start click **before** `requestFullscreen()`; `/confirm` then captures the fullscreen width baseline. On submit, answers are committed first; `stopAndSave()` starts afterward and `/submit` waits on the shared finalization promise. This deliberately avoids extending answer-submit latency. Any S3 submission without a finalized manifest is marked `recording_incomplete=true`; recording URL/complete/finalize calls remain allowed for 15 minutes after submit so the last buffered part can finish. The failure screen tells the candidate to keep the window open/contact an admin.
 - **`recording_stopped` violation:** `track.onended` (candidate clicks "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). Registered via `examRecorder.setOnRecordingStopped()` after `/exam` mounts; if the track already ended before registration, the callback fires immediately. Applies to both `local` and `s3`.
 - **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while running but `examRecorder.isActive()` is false, a blocking modal (`handleResumeRecording`) forces them to re-share the screen. For `local`, the `dirHandle` does **not** survive F5, so the candidate must re-pick the folder; the password is re-read from `localStorage.recordingPassword` (same value the server issued, so pre- and post-reload zip parts share one password).
 - **Env required for `s3` (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM needs `s3:PutObject` for upload plus `s3:GetObject` on `recordings/*` so backend `HeadObject` verification succeeds. `local` mode needs none of these.
@@ -276,22 +283,34 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **DB schema:** `batches.record_mode` (VARCHAR(16)/TEXT default `'none'`), `students.recording_password` (TEXT), `violation_events.metadata_json` and the `recording_parts` table are created/migrated in `src/server/db/postgres.ts` for both PostgreSQL and SQLite. For Supabase, run `migrations/20260808_mac_exam_hardening.sql` manually before deploying; it is idempotent and contains only the new PostgreSQL DDL for `metadata_json` + `recording_parts`.
 - **Reset behavior:** resetting a student deletes `recording_parts` database metadata, but does **not** delete existing S3 objects. A new attempt can overwrite reused part keys; stale higher-numbered objects remain until the configured S3 Lifecycle rule expires them.
 
-### Static runtime path
-- There are **three** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
+### Runtime and deployment paths
+- There are **four** frontend/backend runtime modes in practice — confirm which one is actually being tested before concluding a fix does or doesn't work:
   - Vite dev mode from `client/src/**` (`npm run dev` in `client/`)
   - static/public mode from `public/index.html` + `public/assets/**` (a separate, currently-stale build path — last known update predates the `extension_panel` feature; do not assume it's in sync with `client/dist`)
   - **Vercel production**, per `vercel.json`: builds/serves `dist/server/index.js` (compiled from `src/**` via `npm run build:server` → `tsc`, outDir `dist`) for `/api/*`, and `client/dist/**` (via `npm run build:client`) as static assets for everything else. This is the actual production path — `public/**` and the legacy root `server/**` directory are **not** what Vercel serves, despite both existing in the repo (see "Source of truth" note above).
-- A successful `client/dist` or `dist/server` build does not affect a different runtime path unless that path's artifacts are also rebuilt/synced. All three paths can silently diverge from `src/**`/`client/src/**` at once.
+  - **Ubuntu VPS**, via `deploy-vps.sh`: generates Docker/Caddy/Compose files under `/opt/e-proc/runtime`, rebuilds from a detached checkout under `/opt/e-proc/app`, uses a long-lived DB pool/queue interval, and applies migrations automatically.
+- A successful `client/dist` or `dist/server` build does not affect a different runtime path unless that path's artifacts are also rebuilt/synced. These paths can silently diverge from `src/**`/`client/src/**`.
+- `deploy-vps.sh` currently upserts `admin/admin321` on every run, resetting that account's password. Do not run it on a real production host without accepting/fixing this behavior, and change the credential immediately after bootstrap. The script also hard-resets/cleans only its deployment checkout; never store manual files under `/opt/e-proc/app`.
 - **Vercel build cache gotcha (confirmed 2026-07-21):** a fix was correctly committed to `src/server/routes/student.ts` and `dist/server/routes/student.js` (verified present via `git show <commit>:<path>`), Vercel auto-deployed the correct commit, yet the live deployment still served the old behavior. Redeploying with **"Use existing Build Cache" = OFF** resolved it. If a change appears correctly committed and deployed from the right commit but still doesn't take effect live, try a cache-disabled redeploy before assuming the code itself is wrong.
 
 ### Queue / AI grading
 - AI queue orchestration lives in `src/server/cache.ts`; DB state transitions shared with tests live in `src/server/services/queueStore.ts`
 - AI evaluation provider settings are also read there (`ai_settings` plus env fallback)
+- Essay grading is opt-in per batch through `batches.ai_grading_enabled`; switching it off cancels pending/processing jobs for that batch. `ai_settings.worker_enabled` pauses/resumes claims globally without deleting pending jobs.
+- Quiz batches never enqueue AI jobs. `submitExamAtomically()` scores exact normalized option sets immediately using each question's configured `score` and writes `Correct`/`Incorrect` feedback.
 - Startup readiness initializes/verifies DB schema and loads cache state, but deliberately does **not** call AI. Vercel queue work runs through `/api/queue/process`; process-local intervals are disabled on Vercel.
 - Queue enqueue is awaited before submit returns. Workers atomically claim `pending -> processing` in DB, and stale `processing` jobs are recovered after `AI_QUEUE_STALE_MS`.
 - `vercel.json` registers one daily Hobby-compatible cron. The route accepts either Vercel `CRON_SECRET` or an admin JWT. Hobby cron is not immediate; use the admin endpoint manually when results are needed sooner.
 - Supported AI providers: `gemini`, `openai`, `azure`, `deepseek`, `groq`, `openrouter`, `ollama`
 - AI API keys are stored in the `ai_settings` table in the database
+
+### Question bank and admin read paths
+- Question types are `Coding`, `Conceptual`, `Fill-in`, `Debug`, `SingleChoice`, and `MultipleChoice`; levels are `Easy`, `Medium`, and `Hard`.
+- Questions can be imported from separate essay/quiz Excel formats or created manually at `/admin/questions/new`. Existing questions can be edited at `/admin/questions/:id/edit`; the primary ID is immutable on edit and case-sensitive on create.
+- Manual create/update validation lives in `src/server/services/adminQuestions.ts`. Quiz questions require 2–6 non-empty options keyed A–F, valid correct-answer keys, exactly one correct key for `SingleChoice`, and `score > 0`. Non-quiz writes clear quiz fields and use score `1`.
+- Question/rubric text is stored verbatim. Candidate/admin HTML rendering uses a DOMPurify allowlist; the edit page includes a sanitized live preview matching the exam renderer.
+- `/questions/paged` and `/questions/catalog-summary` replace full-catalog/aggregate request fan-out for the current Question Bank UI. `/batches/:id/results/summary` is paginated and loads per-student question/event/recording detail lazily. Legacy full-result endpoints remain for compatibility/export.
+- `ADMIN_PERF_LOGS=true` logs all admin request timing/DB query metrics; otherwise only requests slower than `ADMIN_SLOW_REQUEST_MS` (default 1000ms) are logged.
 
 ### Blueprint modes
 Batches support two blueprint formats for question assignment:
@@ -304,7 +323,7 @@ Batches support two blueprint formats for question assignment:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `JWT_SECRET` | **Yes** | — | Signs admin and student JWTs. Server exits at startup if missing. Use ≥32 random bytes. |
-| `JWT_EXPIRES_IN` | No | `24h` | Admin token expiry |
+| `JWT_EXPIRES_IN` | Legacy/unread | — | Current admin login hard-codes `24h`; this env variable has no effect unless the code changes. |
 | `DATABASE_URL` | Prod | — | PostgreSQL connection string. Absent = SQLite mode. |
 | `ALLOWED_ORIGINS` | No | `http://localhost:5173` | CORS whitelist, comma-separated |
 | `SESSION_SECRET` | No | `'secret'` | Express session secret. **Set this in production.** |
@@ -316,6 +335,13 @@ Batches support two blueprint formats for question assignment:
 | `AI_QUEUE_STALE_MS` | No | `900000` | Requeues a DB job left in `processing` after a crashed/timed-out worker. Keep this above the maximum grading duration. |
 | `DB_POOL_MAX` | No | `4` | Free-tier/serverless-safe PostgreSQL pool maximum; use the Supabase transaction pooler. |
 | `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
+| `DB_CONNECT_TIMEOUT_MS` | No | `15000` | PostgreSQL connect timeout per attempt. |
+| `DB_CONNECT_ATTEMPTS` | No | `2` | PostgreSQL startup connect attempts, clamped to 1–5. |
+| `STATEMENT_TIMEOUT` | No | `30s` | PostgreSQL session statement timeout applied during initialization. |
+| `ADMIN_PERF_LOGS` | No | — | `true` logs every admin request's wall/DB/query metrics. |
+| `ADMIN_SLOW_REQUEST_MS` | No | `1000` | Slow-admin-request log threshold when full perf logs are off. |
+| `AZURE_OPENAI_ENDPOINT` | Azure only | — | Base URL for Azure OpenAI-compatible calls. |
+| `AZURE_OPENAI_DEPLOYMENT` | Azure only | — | Azure deployment name; overrides the configured model. |
 | `AWS_ACCESS_KEY_ID` | Rec | — | IAM key for S3 recording uploads. Absent → recording endpoint returns 503. |
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
 | `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
@@ -325,7 +351,7 @@ Batches support two blueprint formats for question assignment:
 
 - There is drift between current TypeScript source and legacy/generated JS checked into the repo. Prefer `src/**` and `client/src/**` when reasoning about behavior.
 - The frontend build uses hashed filenames, so any manual static sync to `public/` must update `public/index.html` to the new hash.
-- `npm test` uses Node's default test discovery under `test/`. SQLite regression tests require a working `better-sqlite3` native binding. For PostgreSQL races, copy `.env.test.example` to ignored `.env.test.local`, set a non-production Transaction Pooler URL, and run `npm run test:postgres`; the wrapper requires a real URL and runs only the five PostgreSQL tests.
+- `npm test` uses Node's default discovery under `test/`. SQLite/default tests require a working `better-sqlite3` binding; PostgreSQL integration cases skip without `TEST_DATABASE_URL`. `npm run test:postgres` runs the dedicated PostgreSQL file against a non-production database and currently covers six cases.
 - For frontend changes that affect actual exam behavior, verify against the runtime path being served, not just against source edits or `client/dist` output.
 - Database mode is selected consistently by `DATABASE_URL`: absent means local SQLite; present means PostgreSQL, including local PostgreSQL integration runs.
 - The DB layer auto-converts `?` placeholders to `$1/$2/...` style when running in PostgreSQL mode (see `query()` in `postgres.ts`). Do not mix placeholder styles in a single query string.
@@ -348,7 +374,7 @@ Batches support two blueprint formats for question assignment:
   - network calls to `/api/student/violation` and `/api/student/exam/submit`
   - resulting counts in admin results / violations data
   - on real macOS Chrome/Edge: Command/Option DevTools/View Source/Print shortcuts, screenshot best-effort telemetry, Mission Control, Spaces, Split View, Hot Corners, external display and Sidecar behavior
-  - confirm that `suspicious_paste`, `rapid_text_insertion`, and `multiple_display_detected` remain forensic-only and never cause auto-lock
+  - confirm that `suspicious_paste`, `rapid_text_insertion`, `multiple_display_detected`, and `concurrent_session` remain counter-forensic-only; only a real concurrent-session IP overlap may lock directly through the server-owned enforcer
   - for S3 mode: verify PUT → `/exam/recording-complete` → S3 `HeadObject` → `recording_parts` row, plus the Results evidence summary
 - For student auth changes, verify the full auth flow:
   - `POST /student/verify` returns `student_token`
@@ -359,6 +385,7 @@ Batches support two blueprint formats for question assignment:
 - Before deploying the 2026-08-09 concurrent-session detection to Supabase, run `migrations/20260809_concurrent_session_detection.sql` manually and confirm its verification query returns the `exam_sessions.student_id` row. Also confirm `req.ip` resolves to the real client IP behind Vercel (`trust proxy` is on); if every request shows the same IP, concurrent-session detection is neutralized.
 - Before deploying the free-tier integrity changes, run `migrations/20260810_free_tier_exam_integrity.sql` manually on Supabase. It deliberately aborts only for duplicate access codes or duplicate question orders; resolve those rows rather than deleting them implicitly. Historical duplicate question assignments and AI queue jobs are preserved. Atomic start + the unique question-order index prevent new start races, while deterministic AI queue primary ids and existence checks make new enqueue retries idempotent without forcing destructive cleanup. Confirm the final verification queries return six student columns and two unique indexes.
 - Also run `migrations/20260810_violation_event_idempotency.sql` before deploying the idempotent violation handler. Startup schema readiness verifies the required columns and exact unique-index definitions; a half-migrated database remains unavailable (`503`) instead of serving exam traffic.
+- Apply `migrations/20260813_ai_grading_controls.sql` before enabling per-batch AI/worker switches, then `migrations/20260813_admin_query_performance.sql` in a low-traffic window and verify its two indexes. `DEPLOY.md` is the authoritative six-file production order.
 - Build failures in `StudentExam.tsx` are easy to trigger if old duplicated code blocks are left behind during refactors; if Vite reports a stray `}` or duplicate definitions, inspect the bottom half of the file for leftover blocks from earlier edits.
 
 ## Files worth checking together for exam/anti-cheat work
@@ -380,15 +407,15 @@ Batches support two blueprint formats for question assignment:
 - **Free-tier integrity hardening (2026-08-10):** no periodic heartbeat, Realtime channel, challenge table, or append-only activity stream was added. Existing exam requests remain the only session activity source, avoiding recurring Vercel invocations and Supabase writes.
 - A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.
 - Exam start now runs through a single-connection transaction with a student row lock. The deadline is `min(started_at + duration, batch.end_time)` and resume never extends it. A unique index on `(student_id, question_order)` is supplied by the 2026-08-10 migration; historical duplicate question assignments are not destructively rewritten.
-- Essay answers debounce for 5 seconds with a separate timer per question, so editing another question cannot cancel a pending save. All current answers are flushed before manual submit. The backend persists answers directly with an atomic `status='in_progress' AND exam_deadline > CURRENT_TIMESTAMP` condition; it no longer relies on the process-local answer buffer for exam writes.
+- Essay answers debounce for 5 seconds and quiz answers for 500ms, with a separate timer per question. Dirty answers are batch-saved, and the full current answer map is included in manual submit. Backend writes are guarded by `status='in_progress'` plus deadline checks and do not rely on the process-local buffer.
 - Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome; deterministic AI queue ids avoid duplicate grading jobs on retries.
-- S3 recording remains direct browser-to-S3. `stopAndSave()` serializes/awaits outstanding part uploads, then calls `/exam/recording-finalize` once with the last part index. The backend requires a contiguous `0..finalPartIndex` set before setting `recording_finalized_at`. Manual S3 submit returns `409 recording_incomplete` until finalized; forced/timeout submit proceeds and sets `recording_incomplete=true`. An incomplete forced submission gets a 15-minute recording-only grace window for URL/complete/finalize calls so the browser can upload its last buffered part after the backend lock; answers/questions remain blocked.
+- S3 recording remains direct browser-to-S3. Answer submission completes first; `stopAndSave()` then serializes outstanding uploads and calls `/exam/recording-finalize` while `/submit` waits. The backend requires a contiguous `0..finalPartIndex` manifest. Any submit path with an unfinished S3 manifest sets `recording_incomplete=true` and receives a 15-minute recording-only grace window; answers/questions remain blocked.
 - Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
 
 - Clipboard attempts are counted as violations. Clipboard interception is handled inside the Monaco CodeEditor component (not via DOM events on the wrapper), because Monaco stops DOM event propagation internally.
 - Fullscreen must activate successfully on Confirm before `/exam` is entered. During an active exam, event + watchdog reconciliation records `fullscreen_exit` after 5 seconds outside fullscreen and a second event after another 5 seconds, which reaches the normal two-violation lock threshold and triggers client auto-submit.
 - Chrome side-panel extensions (e.g. Monica AI) opened during a fullscreen exam are detected as `extension_panel` via a `document.documentElement` width-shrink heuristic — see "Extension side-panel detection" above. Do not use `window.innerWidth`/`window.screen.width` for this; they don't change when a side panel is open.
-- Violation locking threshold: `violation_count >= 2` for any single lockable type OR `total_violations >= 2`; `recording_stopped` locks on the first occurrence. `suspicious_paste`, `rapid_text_insertion`, and `multiple_display_detected` are explicit forensic-only exceptions and do not increment `violations`.
+- Violation locking threshold: `violation_count >= 2` for any single lockable type OR `total_violations >= 2`; `recording_stopped` locks on the first occurrence. `suspicious_paste`, `rapid_text_insertion`, `multiple_display_detected`, and `concurrent_session` do not increment `violations`; a real concurrent-session overlap still locks directly through the server-owned enforcer.
 - `suspicious_paste` is detected via Monaco `onDidChangeModelContent` with threshold ≥ **300 chars** per change event (lowered from 1200 on 2026-07-29 to catch Notes-copied answers; see Anti-Cheat v2 section). **Do not raise it back or re-enable large IntelliSense snippets** without pairing the length check with a snippet exclusion — the larger snippets in `useMonacoJavaCompletions.ts` (up to `GlobalExceptionHandler` at 1093 chars) now exceed 300 and would false-positive if typed; they are only safe because they are currently unused.
 - `focus_lost` is detected via `window` `blur`/`focus` events with a **3-second grace timer** (rewritten 2026-07-29, replacing the old 5s×3 polling heartbeat). A `blur` starts the timer; a `focus` before it fires cancels it; if it fires with focus still lost, the violation is reported. Event-based rather than polling to avoid aliasing short focus-losses.
 - Each violation report also appends a row to `violation_events` (timestamp, type, `text_length`, `content_preview` ≤500 chars, `question_id`, optional `metadata_json`). Admins review these via the violation-detail popup on the Results page.
