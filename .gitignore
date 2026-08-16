@@ -5,6 +5,7 @@ data/*.db-shm
 data/*.db-wal
 .env
 .env.test.local
+.env.ai-grade.local
 *.log
 .DS_Store
 

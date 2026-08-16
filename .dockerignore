@@ -1,0 +1,15 @@
+.git
+.vercel
+.claude
+node_modules
+client/node_modules
+dist
+client/dist
+public/assets
+data/*.db
+data/*.db-shm
+data/*.db-wal
+.env
+.env.*.local
+*.log
+

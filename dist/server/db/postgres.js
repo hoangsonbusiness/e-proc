@@ -18,14 +18,17 @@ async function initPostgres() {
     const poolMin = parseInt(process.env.DB_POOL_MIN || '0');
     const connectionTimeoutMs = Math.max(1000, parseInt(process.env.DB_CONNECT_TIMEOUT_MS || '15000') || 15000);
     const connectionAttempts = Math.max(1, Math.min(5, parseInt(process.env.DB_CONNECT_ATTEMPTS || '2') || 2));
-    console.log('[DB] Pool config:', { max: poolMax, min: poolMin, connectionTimeoutMs });
+    const databaseSsl = process.env.DATABASE_SSL?.trim().toLowerCase() === 'false'
+        ? false
+        : { rejectUnauthorized: false };
+    console.log('[DB] Pool config:', { max: poolMax, min: poolMin, connectionTimeoutMs, ssl: databaseSsl !== false });
     pgPool = new Pool({
         connectionString: process.env.DATABASE_URL,
         max: poolMax,
         min: poolMin,
         idleTimeoutMillis: 10000,
         connectionTimeoutMillis: connectionTimeoutMs,
-        ssl: { rejectUnauthorized: false }
+        ssl: databaseSsl
     });
     pgPool.on('error', (err) => console.error('[DB] Pool error:', err.message));
     pgPool.on('connect', () => console.log('[DB] New PG connection'));
@@ -53,6 +56,18 @@ async function initPostgres() {
     try {
         console.log('[DB] PostgreSQL connected!');
         await client.query(`SET statement_timeout = '${process.env.STATEMENT_TIMEOUT || '30s'}'`);
+        // Ownership foreign keys in question_bank and batches reference admin_users,
+        // so a clean database must create this parent table before either child.
+        await client.query(`
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(100) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT DEFAULT 'admin',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
         await client.query(`
     CREATE TABLE IF NOT EXISTS question_bank (
       id VARCHAR(50) PRIMARY KEY,
@@ -229,6 +244,8 @@ async function initPostgres() {
             await client.query('ALTER TABLE exam_questions ADD COLUMN IF NOT EXISTS option_order TEXT');
         }
         catch (_) { /* already exists */ }
+        await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_students_access_code ON students(access_code)');
+        await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_questions_student_order ON exam_questions(student_id, question_order)');
         console.log('[DB] exam_questions ready');
         await client.query(`
     CREATE TABLE IF NOT EXISTS violations (

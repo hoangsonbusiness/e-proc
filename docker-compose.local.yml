@@ -1,0 +1,69 @@
+name: e-proc-local
+
+services:
+  database:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: "5432"
+      POSTGRES_PORT: "5432"
+      PGPASSWORD: eproc_local_password
+      POSTGRES_PASSWORD: eproc_local_password
+      PGDATABASE: postgres
+      POSTGRES_DB: postgres
+      JWT_SECRET: local-supabase-jwt-secret-at-least-thirty-two-characters
+      JWT_EXP: "3600"
+    ports:
+      - "127.0.0.1:54322:5432"
+    volumes:
+      - eproc_supabase_data:/var/lib/postgresql/data
+      - eproc_supabase_config:/etc/postgresql-custom
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "localhost", "-p", "5432"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    restart: unless-stopped
+    init: true
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: "3001"
+      SERVE_STATIC: "true"
+      DATABASE_URL: postgresql://postgres:eproc_local_password@database:5432/postgres
+      DATABASE_SSL: "false"
+      DB_POOL_MIN: "0"
+      DB_POOL_MAX: "4"
+      DB_CONNECT_TIMEOUT_MS: "15000"
+      DB_CONNECT_ATTEMPTS: "5"
+      JWT_SECRET: local-app-jwt-secret-at-least-thirty-two-characters
+      SESSION_SECRET: local-session-secret-at-least-thirty-two-characters
+      CRON_SECRET: local-cron-secret
+      ALLOWED_ORIGINS: http://localhost:3001
+      AI_SETTINGS_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      LEGACY_AI_QUEUE_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3001"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  eproc_supabase_data:
+  eproc_supabase_config:

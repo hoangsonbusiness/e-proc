@@ -29,7 +29,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ### Tests and dependency checks
 - SQLite/default regression suite: `npm test`
 - PostgreSQL race/integration suite: copy `.env.test.example` to `.env.test.local`, set a **non-production** `TEST_DATABASE_URL`, then run `npm run test:postgres`
+- Required local Docker verification: `npm run test:local`
+  - Builds and starts exactly two services from `docker-compose.local.yml`: `app` (built frontend + backend) and `database` (Supabase PostgreSQL).
+  - Verifies `/api/health`, verifies the built React app is actually served, runs the complete default suite inside the app image, then runs PostgreSQL integration tests against the local Supabase database.
+  - `npm run local:up`, `npm run local:logs`, and `npm run local:down` are available for manual investigation.
 - Production dependency audits: `npm audit --omit=dev` and `cd client && npm audit --omit=dev`
+
+### Mandatory completion gate for AI coding tasks
+- After any source-code, test, build, dependency, Docker, or runtime configuration change, the coding agent **must run `npm run test:local`**.
+- The agent may report a task as done only when the command exits successfully, including Docker image build, both service healthchecks, served-frontend check, default tests, and PostgreSQL integration tests.
+- Host-only `npm test`, a TypeScript build, mocked tests, or source inspection do not replace this gate.
+- If Docker is unavailable, the image cannot be pulled, or any verification step fails, the task is **not done**. Report the exact blocker/failure; never claim completion.
+- Documentation-only edits may be checked by reading/diffing the files and do not require rebuilding the application stack unless they change commands or runtime behavior.
 
 ## Repository structure
 
@@ -345,6 +356,7 @@ Batches support two blueprint formats for question assignment:
 | `DB_POOL_MIN` | No | `0` | Do not hold minimum idle connections in Vercel serverless instances. |
 | `DB_CONNECT_TIMEOUT_MS` | No | `15000` | PostgreSQL connect timeout per attempt. |
 | `DB_CONNECT_ATTEMPTS` | No | `2` | PostgreSQL startup connect attempts, clamped to 1–5. |
+| `DATABASE_SSL` | No | enabled | Set to `false` only for the local Docker Supabase PostgreSQL service, which does not expose TLS. Production Supabase connections keep SSL enabled by default. |
 | `STATEMENT_TIMEOUT` | No | `30s` | PostgreSQL session statement timeout applied during initialization. |
 | `ADMIN_PERF_LOGS` | No | — | `true` logs every admin request's wall/DB/query metrics. |
 | `ADMIN_SLOW_REQUEST_MS` | No | `1000` | Slow-admin-request log threshold when full perf logs are off. |

@@ -8,6 +8,9 @@ import studentRoutes from './routes/student.js';
 import { cache } from './cache.js';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware } from './middleware/auth.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 dotenv.config();
 // Validate JWT_SECRET tại startup — không cho phép chạy nếu thiếu
 if (!process.env.JWT_SECRET) {
@@ -187,6 +190,23 @@ app.get('/api/stats', authMiddleware, (req, res) => {
         timestamp: new Date().toISOString(),
     });
 });
+// The local Docker image is deliberately one app service: Express serves both
+// the API and the built React SPA. Vercel keeps using its existing static route
+// because SERVE_STATIC is not enabled there.
+if (process.env.SERVE_STATIC === 'true') {
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const clientDist = path.resolve(moduleDir, '../../client/dist');
+    const clientIndex = path.join(clientDist, 'index.html');
+    if (!fs.existsSync(clientIndex)) {
+        throw new Error(`SERVE_STATIC=true but frontend build is missing: ${clientIndex}`);
+    }
+    app.use(express.static(clientDist, { index: false }));
+    app.get('*', (req, res, next) => {
+        if (req.path.startsWith('/api/'))
+            return next();
+        return res.sendFile(clientIndex);
+    });
+}
 // startupReady (định nghĩa phía trên) đã lo init DB→schema→cache một lần. Không lặp lại
 // ở đây để tránh init hai lần. Server.ts await startupReady trước khi listen().
 export { dbReady, startupReady };
