@@ -187,11 +187,11 @@ try {
   const batch = await pool.query(`
     INSERT INTO batches (
       name, start_time, end_time, duration, blueprint, record_enabled,
-      record_mode, exam_type, created_by, ai_setting_id, ai_grading_status
+      record_mode, exam_type, created_by, ai_grading_status
     ) VALUES ($1, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 hour', 60, $2::jsonb,
-      false, 'none', 'essay', $3, $4, 'idle')
+      false, 'none', 'essay', $3, 'idle')
     RETURNING id
-  `, [`AI Grade integration ${suffix}`, JSON.stringify({}), ownerId, saved.payload.id]);
+  `, [`AI Grade integration ${suffix}`, JSON.stringify({}), ownerId]);
   batchId = Number(batch.rows[0].id);
 
   const students = [];

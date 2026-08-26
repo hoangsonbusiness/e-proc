@@ -28,8 +28,7 @@ export async function reopenExamAttempt(tx, studentId, durationMinutes, now = ne
     }
     const requestedDeadline = new Date(now.getTime() + durationMinutes * 60_000);
     const deadline = requestedDeadline < batchEnd ? requestedDeadline : batchEnd;
-    // Scores and queue jobs from the previous submission are stale once answers can change.
-    await tx.query('DELETE FROM ai_queue WHERE student_id = ?', [studentId]);
+    // Published scores from the previous submission are stale once answers can change.
     await tx.query(`UPDATE exam_questions
      SET ai_score = NULL, ai_feedback = NULL, trainer_score = NULL, trainer_feedback = NULL
      WHERE student_id = ?`, [studentId]);

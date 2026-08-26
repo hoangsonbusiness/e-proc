@@ -236,18 +236,15 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
   return db;
 }
 
-test('manual grading ignores legacy batch AI flag and resolves the creator current setting', async () => {
+test('manual grading resolves the creator current verified setting', async () => {
   const db = gradingGuardDb({
     id: 77,
     created_by: 9,
     exam_type: 'essay',
-    ai_grading_enabled: false,
-    ai_setting_id: null,
     ai_grading_status: 'idle',
   });
 
   await assert.rejects(gradeBatchManually(db, 77, 9), /verified AI setting owned by the batch creator/);
-  assert.doesNotMatch(db.queries[0], /ai_grading_enabled|ai_setting_id/);
 });
 
 test('manual grading rejects a non-creator even when the caller is an admin user', async () => {

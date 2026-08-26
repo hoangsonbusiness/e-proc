@@ -48,10 +48,8 @@ services:
       ALLOW_RUNTIME_SCHEMA_BOOTSTRAP: "true"
       JWT_SECRET: local-app-jwt-secret-at-least-thirty-two-characters
       SESSION_SECRET: local-session-secret-at-least-thirty-two-characters
-      CRON_SECRET: local-cron-secret
       ALLOWED_ORIGINS: http://localhost:3001
       AI_SETTINGS_ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      LEGACY_AI_QUEUE_ENABLED: "false"
     ports:
       - "127.0.0.1:3001:3001"
     healthcheck:

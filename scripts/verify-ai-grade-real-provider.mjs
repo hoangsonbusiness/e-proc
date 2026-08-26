@@ -305,10 +305,10 @@ try {
   const batch = await pool.query(`
     INSERT INTO batches (
       name, start_time, end_time, duration, blueprint, record_enabled,
-      record_mode, exam_type, created_by, ai_setting_id, ai_grading_status
+      record_mode, exam_type, created_by, ai_grading_status
     ) VALUES ($1, NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 hour', 60, '{}'::jsonb,
-      false, 'none', 'essay', $2, $3, 'idle') RETURNING id
-  `, [`Real AI diagnostic ${suffix}`, adminId, saved.payload.id]);
+      false, 'none', 'essay', $2, 'idle') RETURNING id
+  `, [`Real AI diagnostic ${suffix}`, adminId]);
   batchId = Number(batch.rows[0].id);
 
   const studentA = await pool.query(`

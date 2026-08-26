@@ -139,13 +139,6 @@ async function requireDbReady(req: express.Request, res: express.Response, next:
   }
 }
 
-function cronOrAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const cronSecret = process.env.CRON_SECRET;
-  const authorization = req.headers.authorization;
-  if (cronSecret && authorization === `Bearer ${cronSecret}`) return next();
-  return authMiddleware(req, res, next);
-}
-
 app.use('/api/admin', trackAdminRequestStart, requireDbReady, adminRoutes);
 app.use('/api/student', requireDbReady, studentRoutes);
 
@@ -164,7 +157,6 @@ app.get('/api/health', (_req, res) => {
     db: 'ready',
     timestamp: new Date().toISOString(),
     cache: 'active',
-    queue: cache.getQueueStats(),
   });
 });
 
@@ -191,26 +183,6 @@ app.get('/api/test-db', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/queue/process', cronOrAdminAuth, async (req, res) => {
-  try {
-    const requested = parseInt(req.query.limit as string) || 5;
-    const limit = Math.max(1, Math.min(requested, 5));
-    const processed = await cache.processQueue(limit);
-    res.json({ processed, timestamp: new Date().toISOString() });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/queue/stats', authMiddleware, async (req, res) => {
-  try {
-    const stats = cache.getQueueStats();
-    res.json(stats);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 app.post('/api/cache/flush', authMiddleware, async (req, res) => {
   try {
     await cache.flushAnswers();
@@ -218,13 +190,6 @@ app.post('/api/cache/flush', authMiddleware, async (req, res) => {
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
-});
-
-app.get('/api/stats', authMiddleware, (req, res) => {
-  res.json({
-    queue: cache.getQueueStats(),
-    timestamp: new Date().toISOString(),
-  });
 });
 
 // The local Docker image is deliberately one app service: Express serves both

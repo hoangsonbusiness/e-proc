@@ -1298,7 +1298,6 @@ router.post('/students/:studentId/reset', async (req, res) => {
         // Preserve any last edits that are still waiting in the answer buffer.
         await cache.flushStudentAnswers(studentId);
         const result = await db.withTransaction((tx) => reopenExamAttempt(tx, studentId, durationMinutes, new Date(), !USE_SQLITE));
-        cache.discardQueueForStudent(studentId);
         // The transaction also clears the old session/recording metadata.
         res.json({
             success: true,

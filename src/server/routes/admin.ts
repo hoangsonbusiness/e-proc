@@ -1450,7 +1450,6 @@ router.post('/students/:studentId/reset', async (req: Request, res: Response) =>
     const result = await db.withTransaction((tx) =>
       reopenExamAttempt(tx, studentId, durationMinutes, new Date(), !USE_SQLITE)
     );
-    cache.discardQueueForStudent(studentId);
     // The transaction also clears the old session/recording metadata.
     res.json({
       success: true,

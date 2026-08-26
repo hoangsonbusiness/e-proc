@@ -121,7 +121,7 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - Quiz chấm ngay bằng exact-set match, không partial credit; đúng nhận configured score, sai 0.
 - Essay chỉ chấm khi creator có verified setting bấm **AI Grade**. Backend dùng current verified setting của creator, không dùng setting/flag lưu trên batch.
 - Một lần bấm tạo một backend invocation cho batch. Mỗi student `submitted` được gọi LLM độc lập với toàn bộ câu hỏi, answer và rubric của student đó; khi vượt ngưỡng prompt/context hoặc response sai cấu trúc, hệ thống chia nhỏ câu hỏi của chính student đó để retry.
-- Student được xử lý tuần tự, mỗi lần chỉ một student, để tránh custom gateway trả chéo response giữa các request đồng thời. Mỗi student thành công được publish trong transaction riêng.
+- Student được xử lý bằng bounded worker pool mặc định 3 (clamp 1–5). Mỗi request, dữ liệu, correlation token, lease và transaction publish vẫn tách biệt theo student.
 - Mỗi câu nhận 0.00–1.00, cho phép điểm lẻ tối đa hai chữ số; câu không trả lời là 0. Điểm tổng kết: `ROUND(SUM(question_score) / total_questions * 10, 2)`, không dùng trọng số.
 - Mỗi LLM attempt có `request_token` mới và grading key gắn với request. Response thiếu/sai correlation bị từ chối trừ khi toàn bộ item có strong unique identifier hợp lệ; mặc định retry correlation tối đa hai lần với token mới. Output vẫn phải đủ item, không ID lạ/trùng, score hữu hạn trong range, feedback từng câu và summary feedback không rỗng.
 - Batch hết execution budget hoặc có student lỗi chuyển `partial`; creator bấm lại để chấm failed/remaining student, còn student `completed` được bỏ qua.
@@ -129,7 +129,7 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - User nhập Provider, API protocol, Base URL, API Key và Model tại AI Settings. Hỗ trợ OpenAI Chat, OpenAI Responses, Anthropic Messages, Gemini Generate Content và Ollama Generate.
 - Test Connection phải pass cho đúng cấu hình trước khi Save. API key được AES-256-GCM encrypt và không trả plaintext về frontend.
 - Production chặn URL HTTP, localhost/private address, credentials trong URL, redirect và response vượt giới hạn; lỗi provider không echo response body có thể chứa secret.
-- Legacy `ai_queue`/global `ai_settings` không tham gia luồng này và mặc định bị vô hiệu hóa.
+- Per-question queue/global plaintext setting đã bị loại bỏ; manual grading dùng `user_ai_settings` và student-level grading state.
 - Trainer override hiện áp cùng score/feedback cho toàn bộ questions của một student.
 
 ### 3.8 Results and reporting
@@ -196,19 +196,19 @@ Concurrent session:
 | `recording_parts` | S3 part đã verify |
 | `exam_sessions` | Recent jti/IP/UA activity |
 | `user_ai_settings` | Một verified LLM connection/user; API key mã hóa và fingerprint cấu hình đã test |
-| `ai_queue`, `ai_settings` | Compatibility schema của queue/global setting cũ; không dùng bởi manual AI Grade |
 | `admin_users` | Credentials + role |
+| `app_schema_state`, `schema_migrations` | Runtime schema contract và migration ledger cho deploy VPS |
 
 Production PostgreSQL cần migrations; startup readiness kiểm tra required columns và unique-index definitions trước khi phục vụ traffic.
 
-Runtime hiện vẫn thực thi idempotent schema DDL trước readiness; production không được dựa vào cơ chế này thay cho migration có thứ tự vì nhiều serverless cold start có thể chạy đồng thời.
+Production dùng schema-version fast path và không chạy runtime DDL. Full bootstrap chỉ dành cho local/fresh database khi được bật rõ ràng.
 
 ## 5. API surface
 
 - Public admin auth: initialization, setup, login, logout.
 - Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility/manual AI Grade; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; owned AI settings/test/save.
 - Student: verify, start, questions, answer(s), submit, disconnect, violation, recording URL/complete/finalize.
-- Operations: readiness health; authenticated DB/legacy-queue/cache stats. Legacy queue process vẫn nhận admin JWT hoặc exact `CRON_SECRET`, nhưng không có Vercel cron và mặc định không xử lý job.
+- Operations: readiness health, authenticated DB diagnostics và transitional answer-cache flush.
 
 Chi tiết method/path nằm trong `SPEC.md`.
 

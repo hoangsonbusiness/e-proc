@@ -44,7 +44,7 @@ const toGMT7 = (utcDate: Date): Date => {
   return new Date(utcDate.getTime() + 7 * 60 * 60 * 1000);
 };
 
-// Hoàn tất nộp bài: quiz → chấm tự động ngay (bỏ qua ai_queue); essay → đẩy hàng đợi AI.
+// Hoàn tất nộp bài: quiz được chấm tự động ngay; essay chờ creator nhấn AI Grade.
 // Dùng chung cho cả nộp thủ công lẫn auto-submit (timeout / vắng mặt quá lâu).
 // Không tự set status='submitted' — caller đảm nhiệm việc đó.
 async function finalizeSubmission(studentId: number, examType: string): Promise<void> {

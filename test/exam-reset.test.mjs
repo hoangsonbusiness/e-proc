@@ -30,7 +30,6 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
       id INTEGER PRIMARY KEY, student_id INTEGER, question_id TEXT, question_order INTEGER, answer TEXT,
       ai_score REAL, ai_feedback TEXT, trainer_score REAL, trainer_feedback TEXT
     );
-    CREATE TABLE ai_queue (id INTEGER PRIMARY KEY, student_id INTEGER);
     CREATE TABLE exam_sessions (id INTEGER PRIMARY KEY, student_id INTEGER);
     CREATE TABLE recording_parts (id INTEGER PRIMARY KEY, student_id INTEGER);
   `);
@@ -46,7 +45,6 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
      'old-ai-start', 'old-ai-attempt')`).run();
   db.prepare(`INSERT INTO exam_questions VALUES
     (10, 7, 'q1', 1, 'saved answer', 8, 'old ai', 9, 'old trainer')`).run();
-  db.prepare('INSERT INTO ai_queue VALUES (10, 7)').run();
   db.prepare('INSERT INTO exam_sessions VALUES (1, 7)').run();
   db.prepare('INSERT INTO recording_parts VALUES (1, 7)').run();
   return db;
@@ -71,7 +69,6 @@ test('reopens an attempt while preserving questions and answers', async () => {
   assert.equal(student.ai_grading_status, 'pending');
   assert.equal(student.ai_grading_started_at, null);
   assert.equal(student.ai_grading_attempt_token, null);
-  assert.equal(db.prepare('SELECT COUNT(*) count FROM ai_queue').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM exam_sessions').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM recording_parts').get().count, 0);
 });

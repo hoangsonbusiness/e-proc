@@ -51,7 +51,7 @@ npm audit --omit=dev
 cd client && npm audit --omit=dev
 ```
 
-Kết quả đã xác minh ngày 2026-08-16: `npm test` có **72 test, 66 pass, 6 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
+Kết quả đã xác minh ngày 2026-08-16: `npm test` có **73 test, 69 pass, 4 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
 
 ### 2.1. `TEST_DATABASE_URL` dùng để làm gì?
 
@@ -100,7 +100,7 @@ notepad .env.test.local
 npm run test:postgres
 ```
 
-Script `test:postgres` tự build backend, đọc `.env.test.local`, từ chối placeholder/URL sai, sau đó chỉ chạy sáu PostgreSQL integration test. Kết quả mong đợi:
+Script `test:postgres` tự build backend, đọc `.env.test.local`, từ chối placeholder/URL sai, sau đó chỉ chạy bốn PostgreSQL integration test. Kết quả mong đợi:
 
 ```text
 tests 6
@@ -130,7 +130,7 @@ npm run test:local
 - `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:54322`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự sáu bước: build/start stack, đợi PostgreSQL-backed health, xác minh built React app được phục vụ thật, chạy toàn bộ default tests trong app image, chạy sáu PostgreSQL integration tests, rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-16 đã pass: default suite 72 total/66 pass/6 skip; PostgreSQL 6 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, không lẫn prompt/persistence giữa student, một request cho student bình thường, chunk fallback, targeted regrade, giữ kết quả khi regrade lỗi và từ chối response `q1/q2` không có correlation.
+Gate chạy tuần tự bảy bước: build/start stack; chạy cleanup migration hai lần; restart/xác minh schema v2; kiểm tra built React app; chạy default suite; chạy bốn PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-16 đã pass: default suite 73 total/69 pass/4 skip; PostgreSQL 4 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, isolation, chunk fallback, regrade và stale recovery.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 
@@ -154,7 +154,7 @@ Không commit file secret này. Diagnostic gửi request thật tới provider v
 - Chọn thời gian không có học viên đang thi; migration tạo unique index và có thể cần lock bảng ngắn hạn.
 - Xác nhận đang mở đúng **project production**, không phải project test.
 - Nếu dữ liệu quan trọng, tạo backup/export phù hợp với plan trước khi thay đổi. Free Plan không có automatic database backup.
-- Không deploy source mới trước khi toàn bộ migration áp dụng cho đợt phát hành thành công; source mới fail readiness nếu schema bắt buộc chưa đủ.
+- Với migration additive, chạy migration trước source như thông thường. Riêng destructive cleanup `20260819`, deploy release chuyển tiếp hỗ trợ schema 1/2 trước, đợi invocation cũ kết thúc, rồi mới chạy migration để tránh old deployment yêu cầu bảng vừa bị drop.
 
 ### 3.2. Chạy thủ công bằng SQL Editor
 
@@ -195,6 +195,10 @@ Chạy đúng thứ tự:
    - Tạo `app_schema_state` và đánh dấu schema version `1` để Vercel cold start bỏ qua runtime DDL.
    - Phải chạy sau toàn bộ migration phía trên và trước khi deploy source sử dụng startup fast path.
    - Mong đợi verification trả đúng một row với `id = 1`, `version = 1`.
+10. `migrations/20260819_remove_legacy_ai.sql`
+   - Xóa `ai_queue`, global plaintext `ai_settings`, `batches.ai_grading_enabled` và `batches.ai_setting_id`.
+   - Giữ nguyên `user_ai_settings` và toàn bộ manual grading state.
+   - Nâng `app_schema_state.version` lên `2`; chỉ chạy sau khi release chuyển tiếp hỗ trợ cả schema 1 và 2 đã được deploy và invocation cũ đã kết thúc.
 
 Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
@@ -220,7 +224,7 @@ Không xóa row tự động. Đối chiếu email/batch/answer của các ID đ
 
 ### 3.4. Vì sao vẫn phải chạy migration production trước deploy?
 
-Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Nếu version thiếu/sai, production fail readiness và yêu cầu chạy migration. Runtime bootstrap đầy đủ chỉ còn dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
+Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Release cleanup chuyển tiếp chấp nhận version `>=1`, còn fresh bootstrap ghi version `2`; sau khi Supabase đã chạy migration cleanup, có thể nâng minimum runtime lên `2`. Runtime bootstrap đầy đủ chỉ dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
 
 Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema. Phải chạy migration có chủ đích trước deploy; readiness là hàng rào cuối trả `503` nếu schema version hoặc required schema/index chưa đúng. Baseline migration đầy đủ cho database mới vẫn là technical debt; local Docker tạm thời dùng bootstrap rõ ràng qua biến môi trường riêng.
 
@@ -275,7 +279,7 @@ Biến khuyến nghị:
 - `ADMIN_PERF_LOGS=true` — tùy chọn, log timing cho mọi API admin trong giai đoạn lấy baseline; tắt sau khi đo xong.
 - `ADMIN_SLOW_REQUEST_MS=1000` — khi không bật full perf logs, chỉ log API admin chậm hơn ngưỡng này.
 
-Các biến `CRON_SECRET`, `GEMINI_API_KEY`, `QUEUE_PROCESS_INTERVAL`, `AI_QUEUE_STALE_MS` và `LEGACY_AI_QUEUE_ENABLED` chỉ phục vụ queue/global setting cũ. Không cần cấu hình chúng cho manual AI Grade; không bật `LEGACY_AI_QUEUE_ENABLED=true` nếu không chủ đích chạy compatibility worker.
+Legacy queue/global-setting variables đã bị xóa. Manual AI Grade chỉ cần encrypted user-owned setting và các biến `AI_GRADING_*` ở trên.
 
 Nếu dùng S3 recording:
 
@@ -331,7 +335,7 @@ AI grading không chạy khi học viên submit và không dùng Vercel Cron. M�
 Trong invocation đó:
 
 - Chỉ `batches.created_by` được chạy; role `admin` không bypass ownership.
-- Chỉ creator được chấm batch essay của mình. Backend lấy verified LLM setting hiện tại của creator; không phụ thuộc legacy `ai_grading_enabled` hoặc `ai_setting_id`.
+- Chỉ creator được chấm batch essay của mình. Backend lấy verified LLM setting hiện tại của creator từ `user_ai_settings`.
 - Mỗi học viên `submitted` có một LLM request độc lập chứa toàn bộ câu hỏi, answer và rubric; payload lớn hoặc response không hợp lệ có thể tách thành nhiều chunk cho riêng học viên đó.
 - Học viên được xử lý qua bounded worker pool mặc định 3, clamp 1–5. Mỗi worker claim student riêng, đọc theo `student_id`, gọi LLM không giữ DB connection, rồi publish trong transaction có điều kiện theo chính student đó.
 - Mỗi attempt gửi `request_token` và grading key riêng; correlation sai được retry tối đa theo `AI_GRADING_CORRELATION_RETRIES`, luôn với token mới, và không được publish nếu vẫn không xác định được ownership của response.
@@ -344,7 +348,7 @@ Trong invocation đó:
 
 `AI_GRADE_SAFE_BUDGET_MS=270000` chừa khoảng đệm trước ceiling 300 giây. Cần xác nhận deployment thực tế đang có Fluid Compute/max duration phù hợp và benchmark provider/model thật; provider throttling, chunk fallback và correlation retry vẫn có thể làm tăng tổng thời gian dù worker chạy song song. Nếu function bị hard-kill, student đã commit vẫn còn; sau stale threshold, request tiếp theo phục hồi attempt chưa publish thành retryable, giữ nguyên kết quả regrade cũ, và token cũ bị vô hiệu hóa.
 
-`ai_queue`, `ai_settings` và `/api/queue/process` chỉ còn compatibility. `vercel.json` không có cron; endpoint cũ xử lý 0 job theo mặc định vì `LEGACY_AI_QUEUE_ENABLED=false`.
+Manual AI Grade không có queue table/cron endpoint. Batch invocation checkpoint trực tiếp trên trạng thái grading của từng student.
 
 ## 8. Answer persistence và free tier
 
@@ -382,7 +386,7 @@ Chuẩn bị DNS trỏ `APP_DOMAIN` về IPv4 của VPS, sau đó chạy từ b�
 sudo GIT_REF=<commit-or-tag> bash deploy-vps.sh
 ```
 
-Script hỏi `REPO_URL`, `APP_DOMAIN`, `DATABASE_URL`. Với VPS IPv4 chạy lâu, dùng Supabase **Session Pooler port 5432**; Transaction Pooler `6543` dành cho Vercel/serverless. Runtime VPS đặt `DB_POOL_MIN=1`, `DB_POOL_MAX=5`. `QUEUE_PROCESS_INTERVAL=10000` chỉ ảnh hưởng compatibility queue nếu đồng thời bật `LEGACY_AI_QUEUE_ENABLED=true`; manual AI Grade không phụ thuộc interval.
+Script hỏi `REPO_URL`, `APP_DOMAIN`, `DATABASE_URL`. Với VPS IPv4 chạy lâu, dùng Supabase **Session Pooler port 5432**; Transaction Pooler `6543` dành cho Vercel/serverless. Runtime VPS đặt `DB_POOL_MIN=1`, `DB_POOL_MAX=5` và ghi nhận từng migration đã chạy trong `schema_migrations`.
 
 Nếu `question_bank` đang rỗng, phải cung cấp `QUESTION_BANK_CSV_URL`; importer hiện yêu cầu chính xác 599 row/ID. Nếu database đã có câu hỏi, có thể bỏ qua URL này. Các biến AI/S3 và Cloudflare có thể export trước khi chạy script.
 
@@ -401,7 +405,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 
 ## 10. Checklist production trước mỗi kỳ thi
 
-- [ ] Chín migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery chỉ chạy khi không có AI Grade request hoạt động.
+- [ ] Mười migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery/cleanup chỉ chạy khi không có AI Grade request hoạt động.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
@@ -410,7 +414,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
 - [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm run test:local` pass toàn bộ sáu bước; default suite có 66 pass/6 skip, PostgreSQL có 6 pass/0 skip và AI Grade E2E pass các scenario isolation/correlation/regrade.
+- [ ] `npm run test:local` pass toàn bộ bảy bước; default suite có 69 pass/4 skip, PostgreSQL có 4 pass/0 skip, schema cleanup idempotent và AI Grade E2E pass các scenario isolation/correlation/regrade/recovery.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.

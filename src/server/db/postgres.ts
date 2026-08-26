@@ -4,12 +4,11 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { recordDbQuery } from '../observability/dbMetrics.js';
+import { BOOTSTRAP_SCHEMA_VERSION, MINIMUM_SCHEMA_VERSION, isSupportedSchemaVersion } from './schemaVersion.js';
 
 dotenv.config();
 
 const USE_SQLITE = !process.env.DATABASE_URL;
-const CURRENT_SCHEMA_VERSION = 1;
-
 console.log('[DB] Module loading...');
 console.log('[DB] Mode:', USE_SQLITE ? 'SQLite (local dev)' : 'PostgreSQL (production)');
 console.log('[DB] DATABASE_URL:', process.env.DATABASE_URL ? 'present' : 'MISSING');
@@ -81,8 +80,8 @@ async function initPostgres() {
     if (error?.code !== '42P01') throw error;
   }
 
-  if (installedSchemaVersion === CURRENT_SCHEMA_VERSION) {
-    console.log(`[DB] Schema version ${CURRENT_SCHEMA_VERSION} ready; skipping runtime DDL`);
+  if (isSupportedSchemaVersion(installedSchemaVersion)) {
+    console.log(`[DB] Schema version ${installedSchemaVersion} ready; skipping runtime DDL`);
     return;
   }
 
@@ -90,7 +89,7 @@ async function initPostgres() {
     || (!process.env.VERCEL && process.env.NODE_ENV !== 'production');
   if (!allowRuntimeBootstrap) {
     throw new Error(
-      `[schema] expected app_schema_state version ${CURRENT_SCHEMA_VERSION}, got ${installedSchemaVersion ?? '<missing>'}. Run migrations before serving.`
+      `[schema] expected app_schema_state version >= ${MINIMUM_SCHEMA_VERSION}, got ${installedSchemaVersion ?? '<missing>'}. Run migrations before serving.`
     );
   }
   console.log('[DB] Schema fast path unavailable; running explicit local/fresh-database bootstrap');
@@ -194,7 +193,6 @@ await client.query(`
       blueprint JSONB,
       record_enabled BOOLEAN DEFAULT false,
       record_mode VARCHAR(16) DEFAULT 'none',
-      ai_grading_enabled BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -211,10 +209,6 @@ await client.query(`
   // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
   try {
     await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
-  } catch (_) { /* already exists */ }
-  // AI grading is an explicit per-batch decision. API credentials never imply ON/OFF.
-  try {
-    await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_enabled BOOLEAN NOT NULL DEFAULT false');
   } catch (_) { /* already exists */ }
   // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
   try {
@@ -395,34 +389,6 @@ await client.query(`
   console.log('[DB] exam_sessions ready');
 
   await client.query(`
-    CREATE TABLE IF NOT EXISTS ai_queue (
-      id SERIAL PRIMARY KEY,
-      exam_question_id INTEGER NOT NULL,
-      student_id INTEGER NOT NULL,
-      status TEXT DEFAULT 'pending',
-      attempts INTEGER DEFAULT 0,
-      error_message TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  console.log('[DB] ai_queue ready');
-
-  await client.query(`
-    CREATE TABLE IF NOT EXISTS ai_settings (
-      id INTEGER PRIMARY KEY,
-      provider TEXT NOT NULL,
-      apiKey TEXT,
-      model TEXT NOT NULL,
-      temperature REAL DEFAULT 0.3,
-      maxTokens INTEGER DEFAULT 2048,
-      worker_enabled BOOLEAN NOT NULL DEFAULT true
-    )
-  `);
-  await client.query('ALTER TABLE ai_settings ADD COLUMN IF NOT EXISTS worker_enabled BOOLEAN NOT NULL DEFAULT true');
-  console.log('[DB] ai_settings ready');
-  
-  await client.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
@@ -458,7 +424,6 @@ await client.query(`
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_setting_id INTEGER REFERENCES user_ai_settings(id) ON DELETE RESTRICT');
   await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_status VARCHAR(20) NOT NULL DEFAULT 'idle'");
   await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_grading_started_at TIMESTAMP');
   await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS ai_graded_at TIMESTAMP');
@@ -526,7 +491,6 @@ function initSqlite() {
         blueprint TEXT,
         record_enabled INTEGER DEFAULT 0,
         record_mode TEXT DEFAULT 'none',
-        ai_grading_enabled INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -686,35 +650,6 @@ function initSqlite() {
     sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_exam_sessions_student_last_seen ON exam_sessions(student_id, last_seen)');
 
     sqliteDb.exec(`
-      CREATE TABLE IF NOT EXISTS ai_queue (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        exam_question_id INTEGER NOT NULL,
-        student_id INTEGER NOT NULL,
-        status TEXT DEFAULT 'pending',
-        attempts INTEGER DEFAULT 0,
-        error_message TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    sqliteDb.exec(`
-      CREATE TABLE IF NOT EXISTS ai_settings (
-        id INTEGER PRIMARY KEY,
-        provider TEXT NOT NULL,
-        apiKey TEXT,
-        model TEXT NOT NULL,
-        temperature REAL DEFAULT 0.3,
-        maxTokens INTEGER DEFAULT 2048,
-        worker_enabled INTEGER NOT NULL DEFAULT 1
-      )
-    `);
-    const aiSettingsCols = (sqliteDb.prepare("PRAGMA table_info(ai_settings)").all() as { name: string }[]).map(c => c.name);
-    if (!aiSettingsCols.includes('worker_enabled')) {
-      sqliteDb.exec('ALTER TABLE ai_settings ADD COLUMN worker_enabled INTEGER NOT NULL DEFAULT 1');
-    }
-    
-    sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS admin_users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -762,12 +697,6 @@ function initSqlite() {
     }
     if (!batchCols.includes('created_by')) {
       sqliteDb.exec('ALTER TABLE batches ADD COLUMN created_by INTEGER');
-    }
-    if (!batchCols.includes('ai_grading_enabled')) {
-      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_grading_enabled INTEGER NOT NULL DEFAULT 0');
-    }
-    if (!batchCols.includes('ai_setting_id')) {
-      sqliteDb.exec('ALTER TABLE batches ADD COLUMN ai_setting_id INTEGER');
     }
     if (!batchCols.includes('ai_grading_status')) {
       sqliteDb.exec("ALTER TABLE batches ADD COLUMN ai_grading_status TEXT NOT NULL DEFAULT 'idle'");
@@ -858,14 +787,12 @@ export async function verifyRequiredSchema(): Promise<void> {
         'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
         'ai_grading_started_at', 'ai_grading_attempt_token',
       ],
-      batches: ['record_mode', 'exam_type', 'ai_grading_enabled', 'ai_setting_id',
+      batches: ['record_mode', 'exam_type',
         'ai_grading_status', 'ai_grading_started_at', 'ai_graded_at'],
       exam_questions: ['option_order'],
       violation_events: ['metadata_json', 'event_id'],
       recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
       exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
-      ai_queue: ['id', 'status', 'attempts', 'updated_at'],
-      ai_settings: ['worker_enabled'],
       user_ai_settings: ['user_id', 'api_protocol', 'base_url', 'encrypted_api_key',
         'key_iv', 'key_auth_tag', 'key_mask', 'model', 'test_status', 'tested_config_hash'],
     };
@@ -954,8 +881,8 @@ async function markBootstrappedSchemaReady(): Promise<void> {
     INSERT INTO app_schema_state (id, version, updated_at)
     VALUES (1, $1, CURRENT_TIMESTAMP)
     ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version, updated_at = CURRENT_TIMESTAMP
-  `, [CURRENT_SCHEMA_VERSION]);
-  console.log(`[DB] Recorded verified schema version ${CURRENT_SCHEMA_VERSION}`);
+  `, [BOOTSTRAP_SCHEMA_VERSION]);
+  console.log(`[DB] Recorded verified schema version ${BOOTSTRAP_SCHEMA_VERSION}`);
 }
 
 export const dbReady: Promise<void> = initDatabase()

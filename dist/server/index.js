@@ -120,13 +120,6 @@ async function requireDbReady(req, res, next) {
         res.status(503).json({ error: 'Service not ready: startup failed' });
     }
 }
-function cronOrAdminAuth(req, res, next) {
-    const cronSecret = process.env.CRON_SECRET;
-    const authorization = req.headers.authorization;
-    if (cronSecret && authorization === `Bearer ${cronSecret}`)
-        return next();
-    return authMiddleware(req, res, next);
-}
 app.use('/api/admin', trackAdminRequestStart, requireDbReady, adminRoutes);
 app.use('/api/student', requireDbReady, studentRoutes);
 app.get('/api/health', (_req, res) => {
@@ -144,7 +137,6 @@ app.get('/api/health', (_req, res) => {
         db: 'ready',
         timestamp: new Date().toISOString(),
         cache: 'active',
-        queue: cache.getQueueStats(),
     });
 });
 // Operational endpoints bên dưới cũng chạm DB/cache; serverless phải chờ readiness như routers.
@@ -168,26 +160,6 @@ app.get('/api/test-db', authMiddleware, async (req, res) => {
         res.status(500).json({ error: 'Database connection test failed' });
     }
 });
-app.get('/api/queue/process', cronOrAdminAuth, async (req, res) => {
-    try {
-        const requested = parseInt(req.query.limit) || 5;
-        const limit = Math.max(1, Math.min(requested, 5));
-        const processed = await cache.processQueue(limit);
-        res.json({ processed, timestamp: new Date().toISOString() });
-    }
-    catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-app.get('/api/queue/stats', authMiddleware, async (req, res) => {
-    try {
-        const stats = cache.getQueueStats();
-        res.json(stats);
-    }
-    catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
 app.post('/api/cache/flush', authMiddleware, async (req, res) => {
     try {
         await cache.flushAnswers();
@@ -196,12 +168,6 @@ app.post('/api/cache/flush', authMiddleware, async (req, res) => {
     catch (error) {
         res.status(500).json({ error: error.message });
     }
-});
-app.get('/api/stats', authMiddleware, (req, res) => {
-    res.json({
-        queue: cache.getQueueStats(),
-        timestamp: new Date().toISOString(),
-    });
 });
 // The local Docker image is deliberately one app service: Express serves both
 // the API and the built React SPA. Vercel keeps using its existing static route

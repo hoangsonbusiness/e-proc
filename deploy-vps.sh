@@ -118,7 +118,6 @@ clone_or_update_app() {
 generate_secrets() {
   JWT_SECRET="${JWT_SECRET:-$(openssl rand -base64 48 | tr -d '\n')}"
   SESSION_SECRET="${SESSION_SECRET:-$(openssl rand -base64 48 | tr -d '\n')}"
-  CRON_SECRET="${CRON_SECRET:-$(openssl rand -base64 48 | tr -d '\n')}"
 }
 
 write_runtime_files() {
@@ -263,13 +262,9 @@ EOF
     printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
     printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
     printf 'SESSION_SECRET=%s\n' "$SESSION_SECRET"
-    printf 'CRON_SECRET=%s\n' "$CRON_SECRET"
     printf 'ALLOWED_ORIGINS=https://%s\n' "$APP_DOMAIN"
     printf 'DB_POOL_MIN=1\nDB_POOL_MAX=5\nSTATEMENT_TIMEOUT=30s\n'
-    printf 'ANSWER_FLUSH_INTERVAL=5000\nQUEUE_PROCESS_INTERVAL=10000\nAI_QUEUE_STALE_MS=900000\n'
-    printf 'GEMINI_API_KEY=%s\n' "${GEMINI_API_KEY:-}"
-    printf 'AZURE_OPENAI_ENDPOINT=%s\n' "${AZURE_OPENAI_ENDPOINT:-}"
-    printf 'AZURE_OPENAI_DEPLOYMENT=%s\n' "${AZURE_OPENAI_DEPLOYMENT:-}"
+    printf 'ANSWER_FLUSH_INTERVAL=5000\n'
     printf 'AWS_ACCESS_KEY_ID=%s\n' "${AWS_ACCESS_KEY_ID:-}"
     printf 'AWS_SECRET_ACCESS_KEY=%s\n' "${AWS_SECRET_ACCESS_KEY:-}"
     printf 'AWS_REGION=%s\n' "${AWS_REGION:-}"
@@ -317,18 +312,27 @@ db_psql() {
 
 initialize_schema_and_migrations() {
   log "Initializing base schema through the existing application DB layer"
-  compose run --rm --no-deps --entrypoint node webapp -e \
+  compose run --rm --no-deps -e ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true --entrypoint node webapp -e \
     "import('./dist/server/db/postgres.js').then(m=>m.dbReady).catch(e=>{console.error('[bootstrap]',e.message);process.exit(0)})"
 
-  log "Applying repository migrations in order (they are designed to be idempotent)"
-  local migration
+  log "Applying repository migrations that have not been recorded yet"
+  db_psql -c "CREATE TABLE IF NOT EXISTS public.schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+  local migration migration_name applied
   while IFS= read -r migration; do
-    log "Migration: $(basename "$migration")"
+    migration_name="$(basename "$migration")"
+    [[ "$migration_name" =~ ^[0-9A-Za-z._-]+$ ]] || die "Unsafe migration filename: $migration_name"
+    applied="$(db_psql -tAc "SELECT 1 FROM public.schema_migrations WHERE name = '$migration_name'" | tr -d '[:space:]')"
+    if [[ "$applied" == "1" ]]; then
+      log "Migration already applied: $migration_name"
+      continue
+    fi
+    log "Migration: $migration_name"
     docker run --rm \
       -e DATABASE_URL="$DATABASE_URL" \
       -v "${APP_DIR}/migrations:/migrations:ro" \
       postgres:16-alpine \
-      sh -c 'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$1"' _ "/migrations/$(basename "$migration")"
+      sh -c 'psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$1"' _ "/migrations/$migration_name"
+    db_psql -c "INSERT INTO public.schema_migrations (name) VALUES ('$migration_name') ON CONFLICT (name) DO NOTHING"
   done < <(find "${APP_DIR}/migrations" -maxdepth 1 -type f -name '*.sql' | sort)
 }
 

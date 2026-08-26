@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS public.app_schema_state (
 INSERT INTO public.app_schema_state (id, version, updated_at)
 VALUES (1, 1, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE
-SET version = EXCLUDED.version, updated_at = CURRENT_TIMESTAMP;
+SET version = GREATEST(app_schema_state.version, EXCLUDED.version),
+    updated_at = CURRENT_TIMESTAMP;
 
 COMMIT;
 
