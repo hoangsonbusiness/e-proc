@@ -77,6 +77,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
 - Express app setup: `src/server/index.ts`
   - mounts `/api/admin` and `/api/student`
   - exposes readiness health (`/api/health`) and authenticated DB/cache diagnostics
+  - startup readiness is single-flight; transient DB/network failures close the failed pool and retry with bounded backoff, while schema/auth/config failures remain blocked
 - Admin routes: `src/server/routes/admin.ts`
 - Student routes: `src/server/routes/student.ts`
 - Middleware:

@@ -70,10 +70,10 @@ There is no lint script. Backend/frontend type-checks are `npx tsc --noEmit` in 
 - absent → SQLite at `data/eaudit.db`, WAL mode;
 - present → PostgreSQL with SSL, default pool min 0/max 4.
 
-`dbReady` performs initialize + `verifyRequiredSchema()`. `startupReady` then initializes cache/queue state. Local server does not listen until ready; serverless routes await the same promise. `/api/health` returns:
+`ensureDatabaseReady()` performs initialize + `verifyRequiredSchema()` through a single-flight readiness controller; `ensureStartupReady()` then initializes cache state. A transient connection/network timeout closes the failed pool, waits with bounded exponential backoff, and can recover on a later request in the same Vercel instance. Schema/auth/config failures remain blocked. Local server retries transient failures before listening; serverless routes share the current attempt. `/api/health` returns:
 
-- `503 not_ready` while pending;
-- `503 degraded` on startup/schema error;
+- `503 not_ready` while initializing or waiting to retry;
+- `503 degraded` on permanent schema/auth/config error;
 - `200 {status:'ok',db:'ready'}` only when DB/schema/cache are ready.
 
 PostgreSQL readiness checks required columns and the actual definitions of unique indexes, including partial predicate correctness.

@@ -5,6 +5,10 @@ import path from 'path';
 import fs from 'fs';
 import { recordDbQuery } from '../observability/dbMetrics.js';
 import { BOOTSTRAP_SCHEMA_VERSION, MINIMUM_SCHEMA_VERSION, isSupportedSchemaVersion } from './schemaVersion.js';
+import {
+  ReadinessController,
+  isPermanentDatabaseStartupError,
+} from './readiness.js';
 
 dotenv.config();
 
@@ -870,11 +874,6 @@ export async function verifyRequiredSchema(): Promise<void> {
   console.log('[DB] Required schema verified (definition-checked)');
 }
 
-/**
- * Shared readiness promise. initDatabase → verifyRequiredSchema. Local server await trước
- * listen(); request middleware (serverless) await trước khi chạm DB. Reject ⇒ server không
- * phục vụ request thi thay vì trả 500 âm thầm.
- */
 async function markBootstrappedSchemaReady(): Promise<void> {
   if (!schemaBootstrapPerformed || !pgPool) return;
   await pgPool.query(`
@@ -885,9 +884,56 @@ async function markBootstrappedSchemaReady(): Promise<void> {
   console.log(`[DB] Recorded verified schema version ${BOOTSTRAP_SCHEMA_VERSION}`);
 }
 
-export const dbReady: Promise<void> = initDatabase()
-  .then(verifyRequiredSchema)
-  .then(markBootstrappedSchemaReady);
+async function disposeDatabaseAfterFailedStartup(): Promise<void> {
+  if (USE_SQLITE) {
+    if (sqliteDb?.open) sqliteDb.close();
+    sqliteDb = null;
+    return;
+  }
+
+  const failedPool = pgPool;
+  pgPool = null;
+  if (failedPool) await failedPool.end();
+}
+
+const retryBaseDelayMs = Math.max(250, parseInt(process.env.DB_READY_RETRY_BASE_MS || '1000') || 1000);
+const retryMaxDelayMs = Math.max(
+  retryBaseDelayMs,
+  parseInt(process.env.DB_READY_RETRY_MAX_MS || '30000') || 30000,
+);
+
+const databaseReadiness = new ReadinessController({
+  initialize: async () => {
+    schemaBootstrapPerformed = false;
+    await initDatabase();
+    await verifyRequiredSchema();
+    await markBootstrappedSchemaReady();
+  },
+  cleanup: disposeDatabaseAfterFailedStartup,
+  isPermanentError: (error) => USE_SQLITE || isPermanentDatabaseStartupError(error),
+  baseRetryDelayMs: retryBaseDelayMs,
+  maxRetryDelayMs: retryMaxDelayMs,
+  onFailure: (error, snapshot) => {
+    if (snapshot.state === 'permanent_failure') {
+      console.error('[DB] Startup failed permanently:', error.message);
+      return;
+    }
+    console.error(`[DB] Startup failed transiently; retry in ${snapshot.retryAfterMs}ms:`, error.message);
+  },
+});
+
+/**
+ * Retryable, single-flight readiness gate. Network/connection failures can be
+ * retried by a later request after cooldown; schema/auth/config failures remain
+ * blocked until the deployment or configuration is replaced.
+ */
+export function ensureDatabaseReady(): Promise<void> {
+  return databaseReadiness.ensureReady();
+}
+
+export function getDatabaseReadinessSnapshot() {
+  return databaseReadiness.getSnapshot();
+}
 
 interface DbResult {
   rows: any[];
@@ -982,4 +1028,12 @@ export function getPool() {
   return pgPool;
 }
 
-export default { initDatabase, query, withTransaction, getPool, verifyRequiredSchema, dbReady };
+export default {
+  initDatabase,
+  query,
+  withTransaction,
+  getPool,
+  verifyRequiredSchema,
+  ensureDatabaseReady,
+  getDatabaseReadinessSnapshot,
+};

@@ -15,7 +15,7 @@ services:
       JWT_SECRET: local-supabase-jwt-secret-at-least-thirty-two-characters
       JWT_EXP: "3600"
     ports:
-      - "127.0.0.1:54322:5432"
+      - "127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}:5432"
     volumes:
       - eproc_supabase_data:/var/lib/postgresql/data
       - eproc_supabase_config:/etc/postgresql-custom

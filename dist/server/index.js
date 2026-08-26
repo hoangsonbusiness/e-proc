@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import session from 'express-session';
 import dotenv from 'dotenv';
-import { dbReady } from './db/postgres.js';
+import { ensureDatabaseReady, getDatabaseReadinessSnapshot } from './db/postgres.js';
+import { ReadinessRetryPendingError } from './db/readiness.js';
 import adminRoutes from './routes/admin.js';
 import studentRoutes from './routes/student.js';
 import { cache } from './cache.js';
@@ -81,19 +82,42 @@ app.use(session({
     saveUninitialized: false,
     cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 24 * 60 * 60 * 1000 }
 }));
-// [P1-review] Readiness gate. dbReady = initDatabase → verifyRequiredSchema. Trên serverless
-// (Vercel), một cold-start instance có thể nhận request TRƯỚC khi init xong; các route thi phụ
-// thuộc cứng vào schema mới (/violation đã bỏ fallback). Middleware await dbReady và trả 503
-// nếu chưa/không sẵn sàng, thay vì để /violation trả 500 âm thầm rồi mất telemetry.
-// [P2-review] startupReady = DB init → schema verify → cache init. Health/gate/listen đều dựa
-// vào promise CHUNG này để không báo ready trước khi cả cache sẵn sàng.
-const startupReady = dbReady
-    .then(() => console.log('Database initialized and schema verified'))
-    .then(() => cache.init())
-    .then(() => { console.log('Cache initialized'); });
 let startupResolved = false;
-let startupError = null;
-startupReady.then(() => { startupResolved = true; }, (err) => { startupError = err instanceof Error ? err : new Error(String(err)); console.error('[startup] FAILED:', startupError.message); });
+let startupInFlight = null;
+/**
+ * Shares one startup attempt across concurrent requests. Unlike the old
+ * one-shot Promise, a transient database failure does not poison this Vercel
+ * instance forever: after the DB cooldown, a later request can try again.
+ */
+export function ensureStartupReady() {
+    if (startupResolved)
+        return Promise.resolve();
+    if (startupInFlight)
+        return startupInFlight;
+    const attempt = (async () => {
+        await ensureDatabaseReady();
+        await cache.init();
+        startupResolved = true;
+        console.log('[startup] READY: database schema verified and cache initialized');
+    })();
+    startupInFlight = attempt;
+    void attempt.then(() => {
+        if (startupInFlight === attempt)
+            startupInFlight = null;
+    }, (rawError) => {
+        if (startupInFlight === attempt)
+            startupInFlight = null;
+        if (rawError instanceof ReadinessRetryPendingError)
+            return;
+        const error = rawError instanceof Error ? rawError : new Error(String(rawError));
+        const snapshot = getDatabaseReadinessSnapshot();
+        const kind = snapshot.state === 'permanent_failure' ? 'PERMANENT' : 'RETRYABLE';
+        console.error(`[startup] ${kind} failure:`, error.message);
+    });
+    return attempt;
+}
+// Start eagerly on cold start, while keeping failures recoverable by later requests.
+void ensureStartupReady().catch(() => undefined);
 function trackAdminRequestStart(_req, res, next) {
     res.locals.adminRequestStartedAt = performance.now();
     res.locals.instanceUptimeAtStart = Math.round(process.uptime() * 1000);
@@ -103,11 +127,9 @@ function trackAdminRequestStart(_req, res, next) {
 async function requireDbReady(req, res, next) {
     if (startupResolved)
         return next();
-    if (startupError)
-        return res.status(503).json({ error: 'Service not ready: startup failed' });
     const waitStartedAt = performance.now();
     try {
-        await startupReady;
+        await ensureStartupReady();
         if (req.originalUrl.startsWith('/api/admin')) {
             res.locals.startupWaitMs = performance.now() - waitStartedAt;
         }
@@ -117,20 +139,31 @@ async function requireDbReady(req, res, next) {
         if (req.originalUrl.startsWith('/api/admin')) {
             res.locals.startupWaitMs = performance.now() - waitStartedAt;
         }
+        const snapshot = getDatabaseReadinessSnapshot();
+        if (snapshot.retryAfterMs > 0) {
+            res.setHeader('Retry-After', Math.max(1, Math.ceil(snapshot.retryAfterMs / 1000)));
+        }
         res.status(503).json({ error: 'Service not ready: startup failed' });
     }
 }
 app.use('/api/admin', trackAdminRequestStart, requireDbReady, adminRoutes);
 app.use('/api/student', requireDbReady, studentRoutes);
-app.get('/api/health', (_req, res) => {
-    // [P2-review] Readiness probe: CHỈ trả 200 khi startup thực sự xong. Pending → 503 not_ready,
-    // lỗi → 503 degraded. Trước đây pending trả 200 + status:ok khiến probe coi instance sẵn sàng
-    // quá sớm (và cache có thể chưa init).
-    if (startupError) {
-        return res.status(503).json({ status: 'degraded', db: 'error', timestamp: new Date().toISOString() });
+app.get('/api/health', async (_req, res) => {
+    try {
+        await ensureStartupReady();
     }
-    if (!startupResolved) {
-        return res.status(503).json({ status: 'not_ready', db: 'initializing', timestamp: new Date().toISOString() });
+    catch {
+        const snapshot = getDatabaseReadinessSnapshot();
+        const permanent = snapshot.state === 'permanent_failure';
+        if (snapshot.retryAfterMs > 0) {
+            res.setHeader('Retry-After', Math.max(1, Math.ceil(snapshot.retryAfterMs / 1000)));
+        }
+        return res.status(503).json({
+            status: permanent ? 'degraded' : 'not_ready',
+            db: permanent ? 'error' : snapshot.state === 'retry_wait' ? 'retrying' : 'initializing',
+            timestamp: new Date().toISOString(),
+            ...(snapshot.retryAfterMs > 0 ? { retryAfterMs: snapshot.retryAfterMs } : {}),
+        });
     }
     return res.status(200).json({
         status: 'ok',
@@ -186,7 +219,4 @@ if (process.env.SERVE_STATIC === 'true') {
         return res.sendFile(clientIndex);
     });
 }
-// startupReady (định nghĩa phía trên) đã lo init DB→schema→cache một lần. Không lặp lại
-// ở đây để tránh init hai lần. Server.ts await startupReady trước khi listen().
-export { dbReady, startupReady };
 export default app;

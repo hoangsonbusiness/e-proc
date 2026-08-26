@@ -89,7 +89,8 @@ try {
     'app', 'node', 'scripts/verify-ai-grade-local.mjs',
   ]);
 
-  console.log('\nLocal Docker verification passed. App: http://localhost:3001, PostgreSQL: localhost:54322');
+  const localDbPort = process.env.EPROC_LOCAL_DB_PORT || '54323';
+  console.log(`\nLocal Docker verification passed. App: http://localhost:3001, PostgreSQL: localhost:${localDbPort}`);
 } catch (error) {
   console.error(`\nLocal Docker verification failed: ${error instanceof Error ? error.message : String(error)}`);
   diagnostics();

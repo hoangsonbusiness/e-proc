@@ -225,7 +225,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 ### Reliability and performance
 
 - SQLite WAL local; PostgreSQL pool mặc định min 0/max 4.
-- Readiness 503 khi DB/schema/cache chưa sẵn sàng.
+- Readiness 503 khi DB/schema/cache chưa sẵn sàng; timeout/network startup được retry single-flight trong cùng instance, còn schema/auth/config error bị chặn lâu dài.
 - Direct DB answer writes, transactional/idempotent submit.
 - Paginated/lazy admin read paths và request/DB query metrics.
 - Manual AI Grade chạy trong chính request do creator kích hoạt, checkpoint theo từng student và dừng nhận student mới trước execution budget. `vercel.json` không có cron.

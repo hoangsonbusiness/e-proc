@@ -127,10 +127,10 @@ npm run test:local
 
 `docker-compose.local.yml` chạy đúng hai service:
 
-- `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:54322`, dùng named volume và healthcheck.
+- `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự bảy bước: build/start stack; chạy cleanup migration hai lần; restart/xác minh schema v2; kiểm tra built React app; chạy default suite; chạy bốn PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-16 đã pass: default suite 73 total/69 pass/4 skip; PostgreSQL 4 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, isolation, chunk fallback, regrade và stale recovery.
+Gate chạy tuần tự bảy bước: build/start stack; chạy cleanup migration hai lần; restart/xác minh schema v2; kiểm tra built React app; chạy default suite; chạy bốn PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-26 đã pass: default suite 76 total/72 pass/4 skip; PostgreSQL 4 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, isolation, chunk fallback, regrade và stale recovery.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 
@@ -236,7 +236,7 @@ Trong Supabase Dashboard → Connect, copy đúng **Transaction Pooler** URL (po
 
 Tài liệu chính thức: https://supabase.com/docs/guides/database/connecting-to-postgres
 
-Backend có startup readiness kiểm tra các column/index bắt buộc. Thiếu hoặc sai unique index làm `/api/health` trả `503`, không cho route thi chạy trên schema nửa-migrate.
+Backend có startup readiness kiểm tra các column/index bắt buộc. Timeout/network tạm thời được retry single-flight với backoff và không còn khóa vĩnh viễn một Vercel instance; thiếu/sai schema hoặc lỗi auth/config vẫn trả `503` và không retry liên tục.
 
 ## 5. Environment variables trên Vercel
 
@@ -270,6 +270,8 @@ Biến khuyến nghị:
 - `DB_POOL_MIN=0`
 - `DB_CONNECT_TIMEOUT_MS=15000` — thời gian chờ mỗi lần kết nối PostgreSQL; hữu ích khi Supabase vừa cold-start.
 - `DB_CONNECT_ATTEMPTS=2` — retry giới hạn khi lỗi kết nối tạm thời; không khắc phục URL/credential sai.
+- `DB_READY_RETRY_BASE_MS=1000` — cooldown ban đầu sau khi toàn bộ connect attempts thất bại.
+- `DB_READY_RETRY_MAX_MS=30000` — cooldown tối đa giữa các vòng startup retry; request đồng thời dùng chung một attempt.
 - `AI_GRADING_CONCURRENCY=3` — số học viên chấm đồng thời trong một batch invocation, code clamp 1–5; đặt `1` để fallback tuần tự.
 - `AI_GRADING_CORRELATION_RETRIES=2` — số lần retry riêng cho lỗi response correlation, code clamp 0–3; mỗi attempt dùng request token mới.
 - `AI_GRADING_LLM_TIMEOUT_MS=60000` — timeout mỗi LLM request, code clamp 1–120 giây.

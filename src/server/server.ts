@@ -1,18 +1,32 @@
-import app, { startupReady } from './index.js';
+import app, { ensureStartupReady } from './index.js';
 import { cache } from './cache.js';
+import { getDatabaseReadinessSnapshot } from './db/postgres.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const PORT = parseInt(process.env.PORT || '3001');
 
-// [P2-review] KHÔNG mở socket trước khi schema verification thành công. Trước đây listen() gọi
-// ngay, chỉ đóng server SAU khi dbReady fail — trong lúc dbReady còn pending, các operational
-// endpoint (/api/test-db, /api/queue/*, /api/cache/flush, /api/stats, /api/health) đã có thể nhận
-// request và chạm DB/cache khi init chưa xong. Giờ await dbReady TRƯỚC listen().
+async function waitForStartup(): Promise<void> {
+  while (true) {
+    try {
+      await ensureStartupReady();
+      return;
+    } catch (error) {
+      const snapshot = getDatabaseReadinessSnapshot();
+      if (snapshot.state === 'permanent_failure') throw error;
+      const retryDelayMs = Math.max(250, snapshot.retryAfterMs || 1_000);
+      console.error(`[startup] Waiting ${retryDelayMs}ms before retrying initialization`);
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+}
+
+// Persistent/local runtimes wait and retry transient DB failures before opening
+// the socket. Vercel invokes ensureStartupReady() through the request gate instead.
 async function main() {
   try {
-    await startupReady;
+    await waitForStartup();
 
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
