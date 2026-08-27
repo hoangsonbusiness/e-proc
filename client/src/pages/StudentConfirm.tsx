@@ -26,6 +26,7 @@ function StudentConfirm() {
   const duration = location.state?.duration;
   const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
   const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
+  const recordingNextPartIndex = Number(location.state?.recordingNextPartIndex) || 0;
 
   useEffect(() => {
     // Redirect to login if no state or missing token
@@ -82,7 +83,11 @@ function StudentConfirm() {
         setLoading(false);
         return;
       }
-      examRecorder.start({ mode: recordMode, password: recordingPassword });
+      examRecorder.start({
+        mode: recordMode,
+        password: recordingPassword,
+        initialPartIndex: recordMode === 's3' ? recordingNextPartIndex : 0,
+      });
     }
 
     // A new attempt must never inherit a baseline from an older attempt in the same tab.
@@ -93,7 +98,7 @@ function StudentConfirm() {
       await document.documentElement.requestFullscreen();
       if (!document.fullscreenElement) throw new Error('Fullscreen was not activated');
     } catch (e) {
-      if (recordMode !== 'none') await examRecorder.stopAndSave().catch(() => undefined);
+      if (recordMode !== 'none') await examRecorder.stopAndDiscard().catch(() => undefined);
       setError('Fullscreen is required. Allow fullscreen access to start the exam.');
       setLoading(false);
       return;
@@ -106,7 +111,7 @@ function StudentConfirm() {
     await waitForNextPaint();
     const fullscreenBaselineWidth = document.documentElement.getBoundingClientRect().width;
     if (!storeFullscreenBaselineWidth(fullscreenBaselineWidth)) {
-      if (recordMode !== 'none') await examRecorder.stopAndSave().catch(() => undefined);
+      if (recordMode !== 'none') await examRecorder.stopAndDiscard().catch(() => undefined);
       await document.exitFullscreen().catch(() => undefined);
       setError('Could not initialize the secure fullscreen session. Please allow session storage and try again.');
       setLoading(false);

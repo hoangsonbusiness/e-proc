@@ -4,7 +4,12 @@ import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
-import { getBlockReasonMessage, normalizeBlockReason, type BlockReason } from '../services/examBlockReason';
+import {
+  hasServerConfirmedTerminalSubmission,
+  shouldSuppressClientViolation,
+} from '../services/violationLifecycle';
+import { submitAnswersWithRecovery } from '../services/submissionRecovery';
+import { getBlockReasonMessage, normalizeBlockReason } from '../services/examBlockReason';
 import {
   clearFullscreenBaselineWidth,
   completeSidePanelReport,
@@ -74,10 +79,10 @@ function StudentExam() {
   const [violationWarningModal, setViolationWarningModal] = useState('');
   // Thông báo khi học viên reconnect sau khi tắt trình duyệt
   const [resumeInfo, setResumeInfo] = useState<{ timeLeft: number } | null>(null);
-  // Thông báo khi bài thi bị block (timeout / vắng mặt quá lâu)
-  const [blockedReason, setBlockedReason] = useState<BlockReason | null>(null);
   // Modal yêu cầu bật lại ghi màn hình (khi recorder mất state sau reload/F5)
   const [recordingLost, setRecordingLost] = useState(false);
+  const [initializationError, setInitializationError] = useState('');
+  const [initializationRetry, setInitializationRetry] = useState(0);
   const editorRef = useRef<CodeEditorHandle>(null);
   // Mỗi câu một timer: dùng chung một debounce khiến sửa câu B hủy lần lưu đang chờ của câu A.
   const debounceRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
@@ -95,6 +100,15 @@ function StudentExam() {
   const startedRef = useRef(false);
   const lockedRef = useRef(false);
   const submittingRef = useRef(false);
+  // `submitting` starts before the request commits. Keep the terminal state
+  // separate so a native Stop sharing event is not lost if submit later fails.
+  const submitCommittedRef = useRef(false);
+  const submissionFinishedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const recordingResumeInFlightRef = useRef(false);
+  const recordingSetupGenerationRef = useRef(0);
+  const pendingRecordingStoppedRef = useRef(false);
+  const recordingNextPartIndexRef = useRef(0);
   // [#3] cooldown riêng cho từng type
   const violationCooldownByTypeRef = useRef<Record<string, number>>({});
   const currentQuestionIdRef = useRef<string | undefined>(undefined);
@@ -112,11 +126,61 @@ function StudentExam() {
   const recordMode = (localStorage.getItem('recordMode') || 'none') as 'none' | 'local' | 's3';
   const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
 
+  const finishSubmittedAttempt = useCallback((submissionNotice?: string) => {
+    if (submissionFinishedRef.current) return;
+    submissionFinishedRef.current = true;
+    recordingSetupGenerationRef.current += 1;
+    submitCommittedRef.current = true;
+
+    // Capture cleanup starts synchronously; S3/local I/O continues on /submit.
+    // Do this before any user-facing notice: a blocking dialog must never keep the
+    // browser's native screen-sharing indicator alive after terminal submission.
+    const recordingFinalization = recordEnabled ? examRecorder.stopAndSave() : null;
+    const submitHandoff = recordingFinalization
+      ? examRecorder.getSubmitHandoffPromise()
+      : null;
+    recordingFinalization?.catch((recErr) => {
+      console.error('[exam] stopAndSave failed:', recErr);
+    });
+    clearFullscreenBaselineWidth();
+    document.exitFullscreen().catch(() => { });
+    const navigateToSubmit = () => {
+      navigate('/submit', {
+        state: {
+          recordingFinalizing: Boolean(recordingFinalization),
+          ...(submissionNotice ? { submissionNotice } : {}),
+        },
+      });
+    };
+
+    if (submitHandoff) {
+      // Do not expose /submit to refresh until the final chunk is captured and
+      // the S3 seal request has succeeded or failed. Full upload/finalize remains
+      // attached to the singleton Promise and continues after this navigation.
+      // Both branches navigate so a seal failure can never strand the candidate.
+      void submitHandoff.then(navigateToSubmit, navigateToSubmit);
+    } else {
+      navigateToSubmit();
+    }
+  }, [navigate, recordEnabled]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      recordingSetupGenerationRef.current += 1;
+    };
+  }, []);
+
   useEffect(() => {
     if (!studentId || !studentToken || documentWidthBaseline === null) {
       clearFullscreenBaselineWidth();
-      document.exitFullscreen().catch(() => { });
-      navigate('/');
+      void examRecorder.stopAndDiscard()
+        .catch((error) => console.error('[exam] could not release pre-exam recording:', error))
+        .finally(() => {
+          document.exitFullscreen().catch(() => { });
+          navigate('/');
+        });
       return;
     }
 
@@ -137,7 +201,7 @@ function StudentExam() {
         if (existingQuestions.length > 0) {
           console.log('[Exam] Found questions, loading (resume)...');
           setStarted(true);
-          loadQuestions(data);
+          await loadQuestions(data);
           return;
         }
 
@@ -150,7 +214,7 @@ function StudentExam() {
           setStarted(true);
           // Sau khi start, gọi getQuestions để lấy time_remaining
           const qRes = await studentApi.getQuestions();
-          loadQuestions(qRes.data);
+          await loadQuestions(qRes.data);
         }
       } catch (error: any) {
         console.error('[Exam] Error:', error);
@@ -158,21 +222,20 @@ function StudentExam() {
         if (error.response?.status === 410) {
           startedRef.current = false;
           setStarted(false);
-          setBlockedReason(normalizeBlockReason(error.response.data?.reason));
-          setLoading(false);
-          clearFullscreenBaselineWidth();
-          document.exitFullscreen().catch(() => { });
+          const reason = normalizeBlockReason(error.response.data?.reason);
+          finishSubmittedAttempt(getBlockReasonMessage(reason).message);
           return;
         }
-        alert('Error: ' + (error.response?.data?.error || error.message));
-        clearFullscreenBaselineWidth();
-        document.exitFullscreen().catch(() => { });
-        navigate('/');
+        // A transient initialization failure is not terminal. Stay on /exam with
+        // capture intact and offer an explicit retry instead of navigating away
+        // while native screen sharing continues in the background.
+        setInitializationError(error.response?.data?.error || error.message || 'Could not initialize the exam.');
+        setLoading(false);
       }
     };
 
     initExam();
-  }, [documentWidthBaseline, navigate, studentId, studentToken]);
+  }, [documentWidthBaseline, finishSubmittedAttempt, initializationRetry, navigate, studentId, studentToken]);
 
 
   useEffect(() => {
@@ -239,6 +302,7 @@ function StudentExam() {
     // recorder.onstop khiến một Promise không bao giờ resolve (treo submit). Đặt ref ngay đây
     // đóng cửa sổ race đó. (Nếu user bấm Cancel ở confirm() phía trên thì đã return, không tới đây.)
     submittingRef.current = true;
+    if (!lockedRef.current) submitCommittedRef.current = false;
     setSubmitting(true);
 
     Object.values(debounceRef.current).forEach(clearTimeout);
@@ -249,23 +313,30 @@ function StudentExam() {
         question_order: Number(order),
         answer,
       }));
-      await studentApi.submit(finalAnswers);
-
-      // Answers are now durable. Finalize evidence in the browser without extending submit latency.
-      const recordingFinalization = recordEnabled ? examRecorder.stopAndSave() : null;
-      recordingFinalization?.catch((recErr) => {
-        console.error('[exam] stopAndSave failed:', recErr);
+      await submitAnswersWithRecovery(finalAnswers, {
+        submit: (answers) => studentApi.submit(answers),
+        probeExam: () => studentApi.getQuestions(),
       });
-      clearFullscreenBaselineWidth();
-      document.exitFullscreen().catch(() => { });
-      navigate('/submit', { state: { recordingFinalizing: Boolean(recordingFinalization) } });
+      submitCommittedRef.current = true;
+      finishSubmittedAttempt();
     } catch (error) {
       console.error(error);
+      // A concurrent violation response may already have atomically submitted the
+      // attempt. In that race, a failed/lost manual-submit response must still
+      // close capture and enter the recording finalization screen.
+      if (hasServerConfirmedTerminalSubmission({
+        locked: lockedRef.current,
+        submitCommitted: submitCommittedRef.current,
+      })) {
+        finishSubmittedAttempt();
+        return;
+      }
       alert('Error submitting exam. Please contact support.');
+      submitCommittedRef.current = false;
       submittingRef.current = false;
       setSubmitting(false);
     }
-  }, [navigate, recordEnabled]);
+  }, [finishSubmittedAttempt]);
 
   // [#3][#7] Gửi báo cáo vi phạm + xử lý kết quả lock. Tách riêng khỏi cooldown gate
   // để retry có thể tái sử dụng. Trả về true nếu bài đã bị khóa.
@@ -274,6 +345,10 @@ function StudentExam() {
     meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number>; eventId?: string }
   ): Promise<boolean> => {
     const res = await studentApi.reportViolation(type, meta); // [C-4] token tự động
+    // The backend is authoritative for the attempt lifecycle. A report that lost
+    // the race with submit is acknowledged but must not reset counters or show a
+    // misleading post-submit warning in the client.
+    if (res.data.ignored) return false;
     setViolationCount(res.data.total_violations);
     if (res.data.forensic_only) return false;
     if (res.data.locked) {
@@ -282,11 +357,11 @@ function StudentExam() {
       // handleSubmit và chạy stopAndSave() hai lần (đua nhau thay recorder.onstop → treo).
       if (lockedRef.current) return true; // đã có luồng khác xử lý lock rồi
       lockedRef.current = true;
+      // A locked response is returned only after backend auto-submit succeeds.
+      submitCommittedRef.current = true;
       setLocked(true);
       clearFullscreenExitTimeout();
-      document.exitFullscreen().catch(() => { });
-      alert('You have violated the exam rules. Your exam has been locked.');
-      await handleSubmit(true);
+      finishSubmittedAttempt('The assessment was locked and submitted because the server confirmed an exam-rule violation.');
       return true;
     }
     const warningByType: Record<string, string> = {
@@ -313,12 +388,24 @@ function StudentExam() {
       setViolationWarningModal('');
     }, 5000);
     return false;
-  }, [clearFullscreenExitTimeout, handleSubmit]);
+  }, [clearFullscreenExitTimeout, finishSubmittedAttempt]);
 
   const handleViolation = useCallback(async (
     type: string,
     meta?: { contentPreview?: string; textLength?: number; questionId?: string; metadata?: Record<string, number> }
   ): Promise<boolean> => {
+    // A native Stop sharing event remains reportable while manual submit is only
+    // pending: the request may still fail. Once commit is confirmed, the client
+    // suppresses it and the backend independently rejects any in-flight race.
+    if (shouldSuppressClientViolation(type, {
+      started: startedRef.current,
+      locked: lockedRef.current,
+      submitting: submittingRef.current,
+      submitCommitted: submitCommittedRef.current,
+    })) {
+      return false;
+    }
+
     const now = Date.now();
     // [#3] Cooldown TÁCH THEO TYPE (không còn global). Các type critical được miễn
     // hoàn toàn để một sự kiện thường không thể "nuốt" mất recording_stopped.
@@ -352,7 +439,12 @@ function StudentExam() {
         for (let attempt = 1; attempt <= VIOLATION_RETRY_MAX; attempt++) {
           const delay = VIOLATION_RETRY_BASE_MS * Math.pow(2, attempt - 1);
           await new Promise((r) => setTimeout(r, delay));
-          if (lockedRef.current || submittingRef.current) return; // đã kết thúc, thôi retry
+          if (shouldSuppressClientViolation(type, {
+            started: startedRef.current,
+            locked: lockedRef.current,
+            submitting: submittingRef.current,
+            submitCommitted: submitCommittedRef.current,
+          })) return; // đã kết thúc, thôi retry
           try {
             await sendViolationReport(type, metaWithId);
             return; // gửi lại thành công
@@ -527,10 +619,22 @@ function StudentExam() {
   // Nếu track đã ended trước khi effect này chạy, setOnRecordingStopped gọi lại ngay.
   useEffect(() => {
     if (!recordEnabled) return; // batch không ghi màn hình → bỏ qua
-    examRecorder.setOnRecordingStopped(() => {
+    return examRecorder.setOnRecordingStopped(() => {
+      if (!startedRef.current) {
+        pendingRecordingStoppedRef.current = true;
+        return;
+      }
       void handleViolation('recording_stopped');
     });
   }, [handleViolation, recordEnabled]);
+
+  // The track can end during async exam initialization. Defer the report until
+  // the backend has transitioned the attempt to `in_progress`.
+  useEffect(() => {
+    if (!recordEnabled || !started || !pendingRecordingStoppedRef.current) return;
+    pendingRecordingStoppedRef.current = false;
+    void handleViolation('recording_stopped');
+  }, [handleViolation, recordEnabled, started]);
 
   // Resume-after-reload guard: nếu vào /exam khi bài đang chạy nhưng recorder KHÔNG
   // còn active (thí sinh F5/reload làm mất singleton), yêu cầu bật lại ghi màn hình.
@@ -722,6 +826,16 @@ function StudentExam() {
       // Server trả về { questions, time_remaining } hoặc array (compat cũ)
       const q: Question[] = data.questions ?? data;
       const serverTimeRemaining: number | null = data.time_remaining ?? null;
+      const serverNextPartIndex = Number(data.recording_next_part_index);
+      if (recordMode === 's3') {
+        if (Number.isInteger(serverNextPartIndex) && serverNextPartIndex >= 0) {
+          recordingNextPartIndexRef.current = serverNextPartIndex;
+          if (!examRecorder.setNextPartIndex(serverNextPartIndex) && examRecorder.isActive()) {
+            console.error('[exam] Could not reconcile the server recording part cursor');
+          }
+        }
+        examRecorder.activateS3ReservationTracking();
+      }
 
       setQuestions(q);
       const savedAnswers: { [key: number]: string } = {};
@@ -757,13 +871,12 @@ function StudentExam() {
       if (error.response?.status === 410) {
         startedRef.current = false;
         setStarted(false);
-        setBlockedReason(normalizeBlockReason(error.response.data?.reason));
-        setLoading(false);
-        clearFullscreenBaselineWidth();
-        document.exitFullscreen().catch(() => { });
+        const reason = normalizeBlockReason(error.response.data?.reason);
+        finishSubmittedAttempt(getBlockReasonMessage(reason).message);
         return;
       }
       console.error(error);
+      throw error;
     }
   };
 
@@ -831,15 +944,39 @@ function StudentExam() {
   // Bật lại ghi màn hình sau khi recorder mất state (reload/F5). Chia sẻ lại
   // toàn màn hình; đạt → tiếp tục thi, không đạt → giữ modal chặn.
   const handleResumeRecording = useCallback(async () => {
+    if (recordingResumeInFlightRef.current || submissionFinishedRef.current) return;
+    recordingResumeInFlightRef.current = true;
+    const setupGeneration = ++recordingSetupGenerationRef.current;
     // Resume sau F5: dirHandle (local) không sống qua reload → phải chọn lại thư mục.
     // Password lấy lại từ localStorage (server đã cấp lúc verify, tái dùng đúng pass cũ).
-    const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
-    if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
-    const password = localStorage.getItem('recordingPassword');
-    examRecorder.start({ mode: recordMode === 'none' ? 's3' : recordMode, password });
-    examRecorder.setOnRecordingStopped(() => { void handleViolation('recording_stopped'); });
-    setRecordingLost(false);
-  }, [handleViolation, recordMode]);
+    try {
+      const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
+      if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
+
+      // The picker may resolve after a timer/violation has already submitted and
+      // navigated away. Release that newly acquired stream; never start a stale
+      // recorder on /submit or after this component unmounts.
+      if (
+        !mountedRef.current
+        || submissionFinishedRef.current
+        || setupGeneration !== recordingSetupGenerationRef.current
+      ) {
+        await examRecorder.stopAndDiscard();
+        return;
+      }
+
+      const password = localStorage.getItem('recordingPassword');
+      examRecorder.start({
+        mode: recordMode === 'none' ? 's3' : recordMode,
+        password,
+        initialPartIndex: recordMode === 's3' ? recordingNextPartIndexRef.current : 0,
+      });
+      if (recordMode === 's3') examRecorder.activateS3ReservationTracking();
+      setRecordingLost(false);
+    } finally {
+      recordingResumeInFlightRef.current = false;
+    }
+  }, [recordMode]);
 
   const saveAnswer = useCallback((order: number, text: string) => {
     setAnswers(prev => ({ ...prev, [order]: text }));
@@ -907,6 +1044,36 @@ function StudentExam() {
     );
   }
 
+  if (initializationError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="bg-white rounded-2xl shadow-xl border border-amber-200 p-8 max-w-md w-full text-center">
+          <div className="text-4xl mb-4">⚠️</div>
+          <h2 className="text-xl font-bold text-slate-900 mb-3">Could not load the assessment</h2>
+          <p className="text-slate-600 mb-6 leading-relaxed">{initializationError}</p>
+          <p className="text-sm text-slate-500 mb-6">
+            {recordEnabled
+              ? examRecorder.isActive()
+                ? 'Screen recording remains active while you retry. Do not close this tab.'
+                : 'Screen recording is not active. Retry loading, then restart screen sharing before continuing.'
+              : 'Retry loading the assessment. Do not close this tab.'}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setInitializationError('');
+              setLoading(true);
+              setInitializationRetry((value) => value + 1);
+            }}
+            className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700"
+          >
+            Retry loading
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (locked) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
@@ -923,22 +1090,6 @@ function StudentExam() {
           <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 text-sm text-slate-500">
             Please contact your administrator for assistance.
           </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (blockedReason) {
-    // getBlockReasonMessage normalizes again so rendering remains safe even if
-    // this state is ever hydrated from untyped external data in the future.
-    const { icon, title, message } = getBlockReasonMessage(blockedReason);
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
-        <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-lg w-full text-center">
-          <div className="text-6xl mb-6">{icon}</div>
-          <h2 className="text-2xl font-bold text-slate-900 mb-3">{title}</h2>
-          <p className="text-slate-600 mb-8 leading-relaxed text-lg">{message}</p>
-          <p className="text-sm text-slate-400">Please contact your administrator if you believe this is an error.</p>
         </div>
       </div>
     );

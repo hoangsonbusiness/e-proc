@@ -121,7 +121,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | Lifecycle | `status`, `exam_started_at`, `exam_deadline`, `disconnected_at` |
 | Session | `active_jti` |
 | Submit | `submitted_at`, `submit_reason` |
-| Recording | `recording_password`, `recording_finalized_at`, `recording_final_part_index`, `recording_incomplete` |
+| Recording | `recording_password`, `attempt_record_mode`, `recording_finalized_at`, `recording_final_part_index`, `recording_incomplete`, `recording_manifest_sealed_at`, `recording_expected_part_count` |
 | AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at`, `ai_grading_started_at`, `ai_grading_attempt_token` |
 | AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at` |
 | Audit | `created_at` |
@@ -137,13 +137,14 @@ Required unique key: `(student_id, question_order)`.
 - `violations`: unique `(student_id,type)`, running `count`.
 - `violation_events`: one occurrence with `batch_id`, type, `text_length`, preview ≤500, `question_id`, `metadata_json` ≤2000, client `event_id` ≤64, timestamp. Partial unique `(student_id,event_id) WHERE event_id IS NOT NULL`.
 - `recording_parts`: unique `(student_id,part_index)`, object key, bytes, uploaded time, `is_final`.
+- `recording_upload_reservations`: stable logical `upload_id`, server-assigned part/key and completion marker; unique `(student_id,upload_id)` and `(student_id,part_index)`.
 - `exam_sessions`: unique `(student_id,jti,ip)`, batch, UA, first/last seen; indexes by student and `(student,last_seen)`.
 
 ### AI/admin tables
 
 - `user_ai_settings`: one row per `user_id`; provider label, `api_protocol`, Base URL, AES-256-GCM encrypted API key/IV/auth tag/version/mask, model, test status/config hash/timestamps. Plaintext secret is never returned by API.
 - `admin_users`: username unique, bcrypt hash, role (`admin|mod`), timestamps.
-- `app_schema_state`: aggregate runtime schema contract version; cleanup schema is version 2.
+- `app_schema_state`: aggregate runtime schema contract version; current recording-manifest schema is version 4.
 - `schema_migrations`: deploy-vps ledger keyed by migration filename.
 
 ## 5. Authentication and authorization
@@ -253,6 +254,9 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | POST | `/student/violation` | idempotent forensic/counter transaction |
 | POST | `/student/exam/recording-url` | presigned S3 PUT URL |
 | POST | `/student/exam/recording-complete` | HeadObject + metadata insert |
+| POST | `/student/exam/recording-seal` | persist the exact logical upload manifest after answer submission |
+| GET | `/student/exam/recording-status` | return durable finalization state and part counts |
+| POST | `/student/exam/recording-reconcile` | HeadObject sealed pending keys and finalize when complete |
 | POST | `/student/exam/recording-finalize` | contiguous manifest validation |
 
 Common terminal responses use HTTP 410 with `reason` such as `submitted`, `timeout`, `absent_too_long`, or `concurrent_session`.
@@ -329,12 +333,14 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 - Recorder singleton survives `/confirm -> /exam`, but not F5.
 - Whole-monitor only; Chrome/Edge desktop; `local` additionally requires directory picker.
 - Part interval 5 minutes; timeslice 1 second; VP9/VP8; 5 fps; 600 kbps.
-- S3 retry: initial attempt plus up to 5 retries with exponential backoff.
+- S3 retry: up to 5 total attempts per stage with exponential backoff.
 - Presigned URL expiry: 15 minutes.
-- Object key: `recordings/{batchId}/{studentId}/partNNN.webm`.
+- Object key: `recordings/{batchId}/{studentId}/session-{hash(activeJti)}/partNNN.webm`.
 - Completion ignores client byte claim and uses S3 ContentLength.
-- Finalize accepts index 0–1000 and requires every part from zero.
-- Submitted/incomplete attempts get 15-minute recording-only grace.
+- Submit releases capture, then seals the exact upload-ID manifest before SPA handoff; upload/finalize continues on `/submit`.
+- Finalize derives the authoritative highest index from the sealed durable manifest and requires every part from zero.
+- Lost PUT/complete/finalize responses are reconciled from S3 `HeadObject` plus server metadata instead of being classified from browser Promise state.
+- Submitted/incomplete attempts get 60-minute recording-only grace.
 - Local file: `exam_{timestamp}_partNNN.zip`, AES-256, compression level 0.
 
 ## 10. Manual AI grading specification

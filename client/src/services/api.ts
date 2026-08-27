@@ -1,6 +1,33 @@
 import axios from 'axios';
 
 const API_BASE = '/api';
+const RECORDING_CONTROL_TIMEOUT_MS = 20_000;
+const EXAM_SUBMIT_TIMEOUT_MS = 30_000;
+
+export type RecordingServerState =
+  | 'not_required'
+  | 'awaiting_seal'
+  | 'processing'
+  | 'finalized'
+  | 'incomplete';
+
+export interface RecordingStatusResponse {
+  state: RecordingServerState;
+  recordMode: 'none' | 'local' | 's3';
+  expectedPartCount: number;
+  completedPartCount: number;
+  finalPartIndex?: number;
+}
+
+export interface RecordingManifestPart {
+  uploadId: string;
+  partIndex: number;
+}
+
+export interface RecordingSealResponse extends RecordingStatusResponse {
+  success: true;
+  parts: Array<RecordingManifestPart & { completed: boolean }>;
+}
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -201,7 +228,7 @@ export const studentApi = {
 
   // [C-4] Không còn truyền studentId - token tự động gắn qua interceptor
   getQuestions: () =>
-    api.get('/student/exam/questions'),
+    api.get('/student/exam/questions', { timeout: EXAM_SUBMIT_TIMEOUT_MS }),
 
   saveAnswer: (questionOrder: number, answer: string) =>
     api.post('/student/exam/answer', { question_order: questionOrder, answer }),
@@ -210,7 +237,7 @@ export const studentApi = {
     api.post('/student/exam/answers', { answers }),
 
   submit: (answers: Array<{ question_order: number; answer: string }>) =>
-    api.post('/student/exam/submit', { answers }),
+    api.post('/student/exam/submit', { answers }, { timeout: EXAM_SUBMIT_TIMEOUT_MS }),
 
   reportViolation: (
     type: string,
@@ -229,14 +256,42 @@ export const studentApi = {
     }),
 
   // Xin presigned PUT URL để upload 1 phần video record thẳng lên S3
-  getRecordingUploadUrl: (partIndex: number, contentType: string) =>
-    api.post('/student/exam/recording-url', { partIndex, contentType }),
+  getRecordingUploadUrl: (partIndex: number, contentType: string, uploadId: string) =>
+    api.post(
+      '/student/exam/recording-url',
+      { partIndex, contentType, uploadId },
+      { timeout: RECORDING_CONTROL_TIMEOUT_MS }
+    ),
 
-  completeRecordingPart: (partIndex: number, byteSize: number) =>
-    api.post('/student/exam/recording-complete', { partIndex, byteSize }),
+  completeRecordingPart: (partIndex: number, byteSize: number, uploadId: string) =>
+    api.post(
+      '/student/exam/recording-complete',
+      { partIndex, byteSize, uploadId },
+      { timeout: RECORDING_CONTROL_TIMEOUT_MS }
+    ),
 
-  finalizeRecording: (finalPartIndex: number) =>
-    api.post('/student/exam/recording-finalize', { finalPartIndex }),
+  sealRecordingManifest: (parts: RecordingManifestPart[]) =>
+    api.post<RecordingSealResponse>(
+      '/student/exam/recording-seal',
+      { parts },
+      { timeout: RECORDING_CONTROL_TIMEOUT_MS }
+    ),
+
+  finalizeRecording: () =>
+    api.post('/student/exam/recording-finalize', {}, { timeout: RECORDING_CONTROL_TIMEOUT_MS }),
+
+  getRecordingStatus: () =>
+    api.get<RecordingStatusResponse>(
+      '/student/exam/recording-status',
+      { timeout: RECORDING_CONTROL_TIMEOUT_MS }
+    ),
+
+  reconcileRecording: () =>
+    api.post<RecordingStatusResponse>(
+      '/student/exam/recording-reconcile',
+      {},
+      { timeout: RECORDING_CONTROL_TIMEOUT_MS }
+    ),
 
   // [C-4] sendBeacon không hỗ trợ custom headers:
   // gửi student_token trong body để studentAuthMiddleware xử lý

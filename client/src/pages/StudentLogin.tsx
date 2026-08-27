@@ -35,7 +35,8 @@ function StudentLogin() {
             email: res.data.emails[0],
             duration: res.data.duration,
             recordMode: res.data.record_mode || (res.data.record_enabled ? 's3' : 'none'), // 'none' | 'local' | 's3'
-            recordingPassword: res.data.recording_password // chỉ có khi mode 'local' (server cấp, HV không thấy)
+            recordingPassword: res.data.recording_password, // chỉ có khi mode 'local' (server cấp, HV không thấy)
+            recordingNextPartIndex: res.data.recording_next_part_index,
           }
         });
       }

@@ -90,7 +90,7 @@ Video tự xóa sau N ngày để không phình dung lượng và giảm rủi r
 
 ## Bước 4 — Tạo IAM user với quyền tối thiểu
 
-Tạo một tài khoản riêng chỉ có quyền **ghi** vào thư mục `recordings/` — nếu access key này lộ, kẻ tấn công cũng không xóa/đọc được dữ liệu khác.
+Tạo một tài khoản riêng chỉ có quyền **ghi và kiểm tra metadata** trong thư mục `recordings/`. Backend cần `HeadObject` để xác nhận chính blob S3 đã upload; quyền này dùng `s3:GetObject`. `s3:ListBucket` được giới hạn theo prefix để S3 trả đúng trạng thái “object chưa tồn tại” khi reconciliation kiểm tra một reservation còn thiếu. Không cấp quyền xóa.
 
 ### 4.1 — Tạo Policy
 
@@ -103,8 +103,18 @@ Tạo một tài khoản riêng chỉ có quyền **ghi** vào thư mục `recor
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": "s3:PutObject",
+      "Action": ["s3:PutObject", "s3:GetObject"],
       "Resource": "arn:aws:s3:::TEN-BUCKET/recordings/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::TEN-BUCKET",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["recordings/*"]
+        }
+      }
     }
   ]
 }
@@ -112,7 +122,7 @@ Tạo một tài khoản riêng chỉ có quyền **ghi** vào thư mục `recor
 
 3. **Next** → đặt tên policy: `eproc-recording-put-only` → **Create policy**.
 
-> Chỉ có `s3:PutObject` (ghi). Không có quyền đọc, xóa, liệt kê — đủ để backend cấp URL upload, không hơn.
+> Policy chỉ cho phép PUT/HeadObject đối với `recordings/*` và kiểm tra sự tồn tại trong đúng prefix đó. Không có `s3:DeleteObject`, không truy cập object ngoài prefix.
 
 ### 4.2 — Tạo User và gắn Policy
 
@@ -160,8 +170,9 @@ Tạo một tài khoản riêng chỉ có quyền **ghi** vào thư mục `recor
 ## Bước 6 — Kiểm tra
 
 1. Vào một bài thi (hoặc đề thi thử), chia sẻ **toàn bộ màn hình**, làm bài **hơn 5 phút**.
-2. Mở **AWS Console → S3 → bucket** → kiểm tra có thư mục:
-   `recordings/{batchId}/{studentId}/part000.webm`
+2. Mở **AWS Console → S3 → bucket** → kiểm tra có đường dẫn:
+   `recordings/{batchId}/{studentId}/session-{hash}/part000.webm`
+   (`session-{hash}` do backend sinh từ phiên thi và sẽ khác sau khi reset/đăng nhập lại.)
    xuất hiện sau ~5 phút.
 3. Nộp bài → kiểm tra có thêm **part cuối** được tải lên.
 4. (Kiểm tra chống gian lận) Trong lúc thi bấm **"Stop sharing"** của trình duyệt → bài phải **bị khóa ngay**.

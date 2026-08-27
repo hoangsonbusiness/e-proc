@@ -221,6 +221,9 @@ async function initPostgres() {
       recording_finalized_at TIMESTAMP,
       recording_final_part_index INTEGER,
       recording_incomplete BOOLEAN DEFAULT FALSE,
+      recording_manifest_sealed_at TIMESTAMP,
+      recording_expected_part_count INTEGER,
+      attempt_record_mode VARCHAR(16),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -236,6 +239,9 @@ async function initPostgres() {
             { col: 'recording_finalized_at', def: 'TIMESTAMP' },
             { col: 'recording_final_part_index', def: 'INTEGER' },
             { col: 'recording_incomplete', def: 'BOOLEAN DEFAULT FALSE' },
+            { col: 'recording_manifest_sealed_at', def: 'TIMESTAMP' },
+            { col: 'recording_expected_part_count', def: 'INTEGER' },
+            { col: 'attempt_record_mode', def: 'VARCHAR(16)' },
         ];
         for (const { col, def } of colChecks) {
             try {
@@ -243,6 +249,15 @@ async function initPostgres() {
             }
             catch (_) { /* already exists */ }
         }
+        await client.query(`
+    UPDATE students s
+    SET attempt_record_mode = COALESCE(NULLIF(b.record_mode, ''),
+      CASE WHEN b.record_enabled THEN 's3' ELSE 'none' END)
+    FROM batches b
+    WHERE b.id = s.batch_id
+      AND s.attempt_record_mode IS NULL
+      AND s.status IN ('in_progress', 'submitted')
+  `);
         console.log('[DB] students ready');
         await client.query(`
     CREATE TABLE IF NOT EXISTS exam_questions (
@@ -346,6 +361,26 @@ async function initPostgres() {
     )
   `);
         await client.query('ALTER TABLE recording_parts ADD COLUMN IF NOT EXISTS is_final BOOLEAN DEFAULT FALSE');
+        // Durable logical-upload reservations prevent a resumed recorder from
+        // overwriting an older in-flight part that won the same numeric cursor.
+        // upload_id is generated once by the client and remains stable across every
+        // presign/PUT/complete retry.
+        await client.query(`
+    CREATE TABLE IF NOT EXISTS recording_upload_reservations (
+      id SERIAL PRIMARY KEY,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL,
+      upload_id VARCHAR(64) NOT NULL CHECK (length(upload_id) BETWEEN 1 AND 64),
+      part_index INTEGER NOT NULL CHECK (part_index >= 0),
+      object_key TEXT NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TIMESTAMP
+    )
+  `);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ux_recording_upload_reservations_student_upload
+    ON recording_upload_reservations(student_id, upload_id)`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS ux_recording_upload_reservations_student_part
+    ON recording_upload_reservations(student_id, part_index)`);
         // Anti-Cheat: theo dõi phiên thi để phát hiện dùng đồng thời nhiều client/IP.
         // Mỗi cặp (student × jti × ip) một dòng; đổi IP tạo dòng mới. last_seen cập nhật mỗi request.
         await client.query(`
@@ -484,6 +519,9 @@ function initSqlite() {
         recording_finalized_at DATETIME,
         recording_final_part_index INTEGER,
         recording_incomplete INTEGER DEFAULT 0,
+        recording_manifest_sealed_at DATETIME,
+        recording_expected_part_count INTEGER,
+        attempt_record_mode TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -507,11 +545,23 @@ function initSqlite() {
             ['submitted_at', 'DATETIME'], ['submit_reason', 'TEXT'], ['active_jti', 'TEXT'],
             ['recording_finalized_at', 'DATETIME'], ['recording_final_part_index', 'INTEGER'],
             ['recording_incomplete', 'INTEGER DEFAULT 0'],
+            ['recording_manifest_sealed_at', 'DATETIME'],
+            ['recording_expected_part_count', 'INTEGER'],
+            ['attempt_record_mode', 'TEXT'],
         ];
         for (const [name, def] of studentAdds) {
             if (!colNames.includes(name))
                 sqliteDb.exec(`ALTER TABLE students ADD COLUMN ${name} ${def}`);
         }
+        sqliteDb.exec(`
+      UPDATE students
+      SET attempt_record_mode = COALESCE(
+        (SELECT NULLIF(record_mode, '') FROM batches WHERE batches.id = students.batch_id),
+        CASE WHEN (SELECT record_enabled FROM batches WHERE batches.id = students.batch_id) = 1
+          THEN 's3' ELSE 'none' END
+      )
+      WHERE attempt_record_mode IS NULL AND status IN ('in_progress', 'submitted')
+    `);
         sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_students_batch_id ON students(batch_id)');
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_questions (
@@ -598,6 +648,23 @@ function initSqlite() {
         const recordingPartCols = sqliteDb.prepare("PRAGMA table_info(recording_parts)").all().map(c => c.name);
         if (!recordingPartCols.includes('is_final'))
             sqliteDb.exec('ALTER TABLE recording_parts ADD COLUMN is_final INTEGER DEFAULT 0');
+        sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS recording_upload_reservations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        upload_id TEXT NOT NULL CHECK (length(upload_id) BETWEEN 1 AND 64),
+        part_index INTEGER NOT NULL CHECK (part_index >= 0),
+        object_key TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        completed_at DATETIME,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
+      )
+    `);
+        sqliteDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_recording_upload_reservations_student_upload
+      ON recording_upload_reservations(student_id, upload_id)`);
+        sqliteDb.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_recording_upload_reservations_student_part
+      ON recording_upload_reservations(student_id, part_index)`);
         sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS exam_sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -715,8 +782,9 @@ export async function initDatabase() {
     }
 }
 /**
- * [P1-review][P2-review] Xác minh hai index BẮT BUỘC không chỉ TỒN TẠI mà đúng ĐỊNH NGHĨA —
- * /violation phụ thuộc cứng vào chúng (ON CONFLICT). Chỉ khớp tên là chưa đủ: một index cùng
+ * Xác minh các index BẮT BUỘC không chỉ TỒN TẠI mà đúng ĐỊNH NGHĨA —
+ * violation idempotency và recording reservations phụ thuộc cứng vào chúng (ON CONFLICT).
+ * Chỉ khớp tên là chưa đủ: một index cùng
  * tên nhưng không unique / sai cột / thiếu predicate `WHERE event_id IS NOT NULL` sẽ khiến
  * ON CONFLICT lỗi runtime dù readiness báo ready. Ta kiểm định nghĩa thật:
  *  - PostgreSQL: pg_index.indisunique/indisvalid/indisready + pg_get_indexdef (chứa cột, UNIQUE,
@@ -750,6 +818,21 @@ export async function verifyRequiredSchema() {
         };
         checkSqlite('violations', 'ux_violations_student_type', ['student_id', 'type'], null);
         checkSqlite('violation_events', 'ux_violation_events_student_event', ['student_id', 'event_id'], 'event_id is not null');
+        const studentColumnRows = sqliteDb.prepare('PRAGMA table_info(students)').all();
+        const studentColumns = studentColumnRows.map((column) => column.name);
+        for (const column of ['recording_manifest_sealed_at', 'recording_expected_part_count', 'attempt_record_mode']) {
+            if (!studentColumns.includes(column))
+                fail(`required column students.${column} missing`);
+        }
+        const reservationColumnRows = sqliteDb.prepare('PRAGMA table_info(recording_upload_reservations)').all();
+        const reservationColumns = reservationColumnRows.map((column) => column.name);
+        for (const column of ['student_id', 'batch_id', 'upload_id', 'part_index', 'object_key', 'created_at', 'completed_at']) {
+            if (!reservationColumns.includes(column)) {
+                fail(`required column recording_upload_reservations.${column} missing`);
+            }
+        }
+        checkSqlite('recording_upload_reservations', 'ux_recording_upload_reservations_student_upload', ['student_id', 'upload_id'], null);
+        checkSqlite('recording_upload_reservations', 'ux_recording_upload_reservations_student_part', ['student_id', 'part_index'], null);
     }
     else {
         if (!pgPool)
@@ -758,7 +841,9 @@ export async function verifyRequiredSchema() {
             students: [
                 'exam_started_at', 'exam_deadline', 'disconnected_at', 'recording_password',
                 'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
-                'recording_final_part_index', 'recording_incomplete', 'ai_final_score',
+                'recording_final_part_index', 'recording_incomplete',
+                'recording_manifest_sealed_at', 'recording_expected_part_count', 'ai_final_score',
+                'attempt_record_mode',
                 'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
                 'ai_grading_started_at', 'ai_grading_attempt_token',
             ],
@@ -767,6 +852,10 @@ export async function verifyRequiredSchema() {
             exam_questions: ['option_order'],
             violation_events: ['metadata_json', 'event_id'],
             recording_parts: ['student_id', 'part_index', 'object_key', 'byte_size', 'is_final'],
+            recording_upload_reservations: [
+                'student_id', 'batch_id', 'upload_id', 'part_index', 'object_key',
+                'created_at', 'completed_at',
+            ],
             exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
             user_ai_settings: ['user_id', 'api_protocol', 'base_url', 'encrypted_api_key',
                 'key_iv', 'key_auth_tag', 'key_mask', 'model', 'test_status', 'tested_config_hash'],
@@ -796,7 +885,10 @@ export async function verifyRequiredSchema() {
        JOIN pg_class t ON t.oid = i.indrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE n.nspname = current_schema()
-         AND t.relname = ANY($1)`, [['violations', 'violation_events', 'students', 'exam_questions', 'recording_parts', 'exam_sessions']]);
+         AND t.relname = ANY($1)`, [[
+                'violations', 'violation_events', 'students', 'exam_questions',
+                'recording_parts', 'recording_upload_reservations', 'exam_sessions',
+            ]]);
         const normalizePredicate = (value) => value == null
             ? null
             : String(value).toLowerCase().replace(/[()]/g, '').replace(/\s+/g, ' ').trim();
@@ -834,6 +926,8 @@ export async function verifyRequiredSchema() {
         checkPgUniqueColumns('students', ['access_code']);
         checkPgUniqueColumns('exam_questions', ['student_id', 'question_order']);
         checkPgUniqueColumns('recording_parts', ['student_id', 'part_index']);
+        checkPg('ux_recording_upload_reservations_student_upload', 'recording_upload_reservations', ['student_id', 'upload_id'], null);
+        checkPg('ux_recording_upload_reservations_student_part', 'recording_upload_reservations', ['student_id', 'part_index'], null);
         checkPgUniqueColumns('exam_sessions', ['student_id', 'jti', 'ip']);
         for (const performanceIndex of ['idx_students_batch_id', 'idx_violation_events_student_created_at']) {
             if (!indexRows.rows.some((row) => row.index_name === performanceIndex && row.indisvalid && row.indisready)) {

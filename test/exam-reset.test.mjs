@@ -22,6 +22,8 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
       id INTEGER PRIMARY KEY, batch_id INTEGER, status TEXT, exam_started_at TEXT, exam_deadline TEXT,
       disconnected_at TEXT, submitted_at TEXT, submit_reason TEXT, active_jti TEXT,
       recording_finalized_at TEXT, recording_final_part_index INTEGER, recording_incomplete INTEGER,
+      recording_manifest_sealed_at TEXT, recording_expected_part_count INTEGER,
+      attempt_record_mode TEXT,
       ai_final_score REAL, ai_summary_feedback TEXT, ai_grading_status TEXT DEFAULT 'pending',
       ai_grading_error TEXT, ai_graded_at TEXT, ai_grading_started_at TEXT,
       ai_grading_attempt_token TEXT
@@ -31,21 +33,25 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
       ai_score REAL, ai_feedback TEXT, trainer_score REAL, trainer_feedback TEXT
     );
     CREATE TABLE exam_sessions (id INTEGER PRIMARY KEY, student_id INTEGER);
+    CREATE TABLE recording_upload_reservations (id INTEGER PRIMARY KEY, student_id INTEGER);
     CREATE TABLE recording_parts (id INTEGER PRIMARY KEY, student_id INTEGER);
   `);
   db.prepare('INSERT INTO batches (id, end_time) VALUES (1, ?)').run(batchEnd);
   db.prepare(`INSERT INTO students (
     id, batch_id, status, exam_started_at, exam_deadline, disconnected_at, submitted_at,
     submit_reason, active_jti, recording_finalized_at, recording_final_part_index,
-    recording_incomplete, ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at,
+    recording_incomplete, recording_manifest_sealed_at, recording_expected_part_count,
+    attempt_record_mode,
+    ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at,
     ai_grading_started_at, ai_grading_attempt_token
   ) VALUES
     (7, 1, 'submitted', 'old-start', 'old-deadline', 'old-disconnect', 'old-submit', 'manual',
-     'old-jti', 'done', 2, 1, 9.5, 'old summary', 'completed', NULL, 'old-graded',
+     'old-jti', 'done', 2, 1, 'sealed', 3, 's3', 9.5, 'old summary', 'completed', NULL, 'old-graded',
      'old-ai-start', 'old-ai-attempt')`).run();
   db.prepare(`INSERT INTO exam_questions VALUES
     (10, 7, 'q1', 1, 'saved answer', 8, 'old ai', 9, 'old trainer')`).run();
   db.prepare('INSERT INTO exam_sessions VALUES (1, 7)').run();
+  db.prepare('INSERT INTO recording_upload_reservations VALUES (1, 7)').run();
   db.prepare('INSERT INTO recording_parts VALUES (1, 7)').run();
   return db;
 }
@@ -64,12 +70,16 @@ test('reopens an attempt while preserving questions and answers', async () => {
   assert.equal(student.status, 'in_progress');
   assert.equal(student.active_jti, null);
   assert.equal(student.submitted_at, null);
+  assert.equal(student.recording_manifest_sealed_at, null);
+  assert.equal(student.recording_expected_part_count, null);
+  assert.equal(student.attempt_record_mode, null);
   assert.equal(student.ai_final_score, null);
   assert.equal(student.ai_summary_feedback, null);
   assert.equal(student.ai_grading_status, 'pending');
   assert.equal(student.ai_grading_started_at, null);
   assert.equal(student.ai_grading_attempt_token, null);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM exam_sessions').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM recording_upload_reservations').get().count, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM recording_parts').get().count, 0);
 });
 

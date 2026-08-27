@@ -1,7 +1,8 @@
-// Transitional compatibility: release code works against the pre-cleanup schema (v1)
-// and the legacy-free schema (v2). Fresh/local bootstrap always records v2.
-export const MINIMUM_SCHEMA_VERSION = 1;
-export const BOOTSTRAP_SCHEMA_VERSION = 2;
+// Schema v4 seals the exact S3 recording manifest before recovery/finalization.
+// The runtime must not expose status/reconcile against an older schema because
+// it could otherwise mistake a partial set of reservations for a complete exam.
+export const MINIMUM_SCHEMA_VERSION = 4;
+export const BOOTSTRAP_SCHEMA_VERSION = 4;
 
 export function isSupportedSchemaVersion(version: number | null): boolean {
   return version !== null && Number.isInteger(version) && version >= MINIMUM_SCHEMA_VERSION;

@@ -33,12 +33,15 @@ export async function reopenExamAttempt(tx, studentId, durationMinutes, now = ne
      SET ai_score = NULL, ai_feedback = NULL, trainer_score = NULL, trainer_feedback = NULL
      WHERE student_id = ?`, [studentId]);
     await tx.query('DELETE FROM exam_sessions WHERE student_id = ?', [studentId]);
+    await tx.query('DELETE FROM recording_upload_reservations WHERE student_id = ?', [studentId]);
     await tx.query('DELETE FROM recording_parts WHERE student_id = ?', [studentId]);
     await tx.query(`UPDATE students
      SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL,
          submitted_at = NULL, submit_reason = NULL, active_jti = NULL,
          recording_finalized_at = NULL, recording_final_part_index = NULL,
-         recording_incomplete = FALSE, ai_final_score = NULL, ai_summary_feedback = NULL,
+         recording_incomplete = FALSE, recording_manifest_sealed_at = NULL,
+         recording_expected_part_count = NULL, attempt_record_mode = NULL,
+         ai_final_score = NULL, ai_summary_feedback = NULL,
          ai_grading_status = 'pending', ai_grading_error = NULL, ai_graded_at = NULL,
          ai_grading_started_at = NULL, ai_grading_attempt_token = NULL
      WHERE id = ?`, [now.toISOString(), deadline.toISOString(), studentId]);

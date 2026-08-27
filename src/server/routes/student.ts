@@ -11,9 +11,22 @@ import rateLimit from 'express-rate-limit';
 import { sessionTracker, detectConcurrentSession } from '../middleware/sessionTracker.js';
 import { getExamContext, assertCanStart, computeExamDeadline, sendExamGuardError, ExamGuardError } from '../services/examGuard.js';
 import { parseBlueprintCompat } from '../services/blueprint.js';
-import { persistViolation, computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
+import { computeViolationLock, isForensicOnlyViolation } from '../services/violationStore.js';
 import { isClientReportableViolation, isServerOwnedViolation } from '../services/violationPolicy.js';
 import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEnforcer.js';
+import { persistViolationIfInProgress } from '../services/violationRequestStore.js';
+import {
+  commitInspectedReservedRecordingPart,
+  effectiveAttemptRecordMode,
+  finalizeRecordingManifest,
+  findNextRecordingPartIndex,
+  findRecordingUploadReservation,
+  getRecordingRecoveryStatus,
+  listPendingRecordingReservations,
+  reserveRecordingUpload,
+  sealRecordingManifest,
+  timestampWithoutTimezoneUtcMs,
+} from '../services/recordingPersistence.js';
 
 let s3ServicePromise: Promise<typeof import('../services/s3.js')> | null = null;
 
@@ -22,11 +35,79 @@ function loadS3Service() {
   return s3ServicePromise;
 }
 
+type RecordingOperationStage = 'presign' | 'complete' | 'seal' | 'status' | 'reconcile' | 'finalize';
+
+function safeRecordingErrorCode(error: any): string | undefined {
+  for (const candidate of [error?.code, error?.name]) {
+    if (typeof candidate === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function logRecordingOperation(input: {
+  stage: RecordingOperationStage;
+  outcome: string;
+  startedAt: number;
+  statusCode: number;
+  studentId?: number;
+  batchId?: number;
+  partIndex?: number;
+  error?: any;
+}): void {
+  const upstreamStatus = Number(input.error?.$metadata?.httpStatusCode ?? input.error?.statusCode);
+  const event = {
+    event: 'student_recording',
+    stage: input.stage,
+    outcome: input.outcome,
+    status_code: input.statusCode,
+    duration_ms: Date.now() - input.startedAt,
+    student_id: input.studentId,
+    batch_id: input.batchId,
+    part_index: Number.isInteger(input.partIndex) ? input.partIndex : undefined,
+    error_code: safeRecordingErrorCode(input.error),
+    upstream_status: Number.isInteger(upstreamStatus) ? upstreamStatus : undefined,
+  };
+  // Never include JWTs, presigned URLs, object keys, or raw upstream messages.
+  if (input.statusCode >= 500) console.error('[recording]', event);
+  else console.info('[recording]', event);
+}
+
+function recordingUploadId(req: Request, requestedPartIndex: number): string {
+  const supplied = req.body?.uploadId;
+  if (supplied !== undefined && supplied !== null) {
+    return typeof supplied === 'string' ? supplied : '';
+  }
+  // Rolling-deploy compatibility for a page loaded before uploadId support.
+  // The verified JWT jti keeps retries stable, while the reservation still
+  // prevents old and new clients from receiving the same S3 key.
+  return `legacy:${req.studentPayload!.jti}:${requestedPartIndex}`;
+}
+
+function isValidRecordingUploadId(uploadId: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(uploadId);
+}
+
 dotenv.config();
 
 // Phải khớp chính xác với DB layer: có DATABASE_URL => PostgreSQL, không có => SQLite.
 // Dựa vào NODE_ENV làm local PostgreSQL bỏ qua FOR UPDATE và tái tạo race violation.
 const USE_SQLITE = !process.env.DATABASE_URL;
+
+function readRecordingRecoveryStatusLocked(studentId: number, batchId: number) {
+  return db.withTransaction((tx) => getRecordingRecoveryStatus(tx, {
+    studentId,
+    batchId,
+    useSqlite: USE_SQLITE,
+  }));
+}
+
+function readPendingRecordingReservationsLocked(studentId: number, batchId: number) {
+  return db.withTransaction((tx) => listPendingRecordingReservations(tx, {
+    studentId,
+    batchId,
+    useSqlite: USE_SQLITE,
+  }));
+}
 
 const router = Router();
 
@@ -178,7 +259,8 @@ async function submitExamAtomically(
 ): Promise<{ already: boolean; examType: string }> {
   const transition = await db.withTransaction(async (tx) => {
     const lockSql = `
-      SELECT s.status, s.exam_deadline, s.recording_finalized_at, b.record_mode, b.record_enabled,
+      SELECT s.status, s.exam_deadline, s.recording_finalized_at, s.attempt_record_mode,
+             b.record_mode, b.record_enabled,
              b.exam_type
       FROM students s JOIN batches b ON b.id = s.batch_id
       WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE'}
@@ -188,17 +270,19 @@ async function submitExamAtomically(
     if (row.status === 'submitted') return { already: true, examType: row.exam_type || 'essay' };
     if (row.status !== 'in_progress') throw new Error('Exam is not in progress');
 
-    const recordMode = row.record_mode || (row.record_enabled ? 's3' : 'none');
-    const deadlinePassed = row.exam_deadline && new Date() >= new Date(row.exam_deadline);
+    const recordMode = effectiveAttemptRecordMode(row);
+    const deadlinePassed = row.exam_deadline
+      && Date.now() >= timestampWithoutTimezoneUtcMs(row.exam_deadline);
     const finalReason: SubmitReason = deadlinePassed ? 'timeout' : reason;
     await persistAnswerBatch(tx, studentId, options.answers);
 
     await tx.query(
       `UPDATE students
        SET status = 'submitted', submitted_at = ?, submit_reason = ?,
+           attempt_record_mode = COALESCE(attempt_record_mode, ?),
            recording_incomplete = CASE WHEN ? = 's3' AND recording_finalized_at IS NULL THEN TRUE ELSE recording_incomplete END
        WHERE id = ? AND status = 'in_progress'`,
-      [new Date().toISOString(), finalReason, recordMode, studentId]
+      [new Date().toISOString(), finalReason, recordMode, recordMode, studentId]
     );
 
     return { already: false, examType: row.exam_type || 'essay' };
@@ -216,7 +300,8 @@ async function startExamAtomically(studentId: number): Promise<{ success: true; 
     assertCanStart(context, new Date(), USE_SQLITE || process.env.SKIP_TIME_CHECK === 'true');
 
     const locked = (await tx.query(
-      `SELECT s.*, b.duration, b.end_time, b.blueprint, b.exam_type
+      `SELECT s.*, b.duration, b.end_time, b.blueprint, b.exam_type,
+              b.record_mode, b.record_enabled
        FROM students s JOIN batches b ON b.id = s.batch_id
        WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE'}`,
       [studentId]
@@ -224,8 +309,15 @@ async function startExamAtomically(studentId: number): Promise<{ success: true; 
     assertCanStart({ ...context, status: locked.status }, new Date(), USE_SQLITE || process.env.SKIP_TIME_CHECK === 'true');
     const existing = await tx.query('SELECT COUNT(*) AS count FROM exam_questions WHERE student_id = ?', [studentId]);
     const existingCount = Number(existing.rows[0]?.count || 0);
+    const attemptRecordMode = effectiveAttemptRecordMode(locked);
     if (locked.status === 'in_progress' && existingCount > 0) {
-      await tx.query('UPDATE students SET disconnected_at = NULL WHERE id = ?', [studentId]);
+      await tx.query(
+        `UPDATE students
+         SET disconnected_at = NULL,
+             attempt_record_mode = COALESCE(attempt_record_mode, ?)
+         WHERE id = ?`,
+        [attemptRecordMode, studentId],
+      );
       return { success: true, questions_count: existingCount, resume: true };
     }
 
@@ -292,8 +384,10 @@ async function startExamAtomically(studentId: number): Promise<{ success: true; 
     await tx.query(
       `UPDATE students SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?,
        disconnected_at = NULL, recording_finalized_at = NULL, recording_final_part_index = NULL,
-       recording_incomplete = FALSE WHERE id = ?`,
-      [now.toISOString(), deadline.toISOString(), studentId]
+       recording_incomplete = FALSE, recording_manifest_sealed_at = NULL,
+       recording_expected_part_count = NULL,
+       attempt_record_mode = COALESCE(attempt_record_mode, ?) WHERE id = ?`,
+      [now.toISOString(), deadline.toISOString(), attemptRecordMode, studentId]
     );
     return { success: true, questions_count: picked.length };
   });
@@ -337,7 +431,8 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
     }
 
     const result = await db.query(`
-      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration, b.record_enabled, b.record_mode
+      SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration,
+             b.record_enabled, b.record_mode
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.access_code = ?
@@ -348,6 +443,8 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
     if (!student) {
       return res.status(404).json({ error: 'Invalid access code' });
     }
+
+    const recordingNextPartIndex = await findNextRecordingPartIndex(db, Number(student.id));
 
     if (student.status === 'submitted') {
       return res.status(400).json({ error: 'Exam already submitted' });
@@ -376,26 +473,37 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
 
     // [C-4] Cấp student token (JWT ngắn hạn 4h) — không trả raw studentId dạng tin tưởng nữa
     const secret = process.env.JWT_SECRET!;
-    // jti: định danh phiên riêng cho mỗi lần verify — dùng phát hiện dùng đồng thời nhiều client
-    const jti = crypto.randomUUID();
-    await db.query('UPDATE students SET active_jti = ? WHERE id = ?', [jti, student.id]);
+    // Freeze mode, password, and fresh jti under one row lock. Concurrent
+    // verifies must return exactly the mode/password that won persisted state.
+    const frozenAttempt = await db.withTransaction(async (tx) => {
+      const current = (await tx.query(
+        `SELECT s.attempt_record_mode, s.recording_password,
+                b.record_mode, b.record_enabled
+         FROM students s JOIN batches b ON b.id = s.batch_id
+         WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE OF s'}`,
+        [student.id],
+      )).rows[0];
+      if (!current) throw new Error('Student not found');
+      const recordMode = effectiveAttemptRecordMode(current);
+      const jti = crypto.randomUUID();
+      const recordingPassword = recordMode === 'local'
+        ? (current.recording_password || crypto.randomBytes(24).toString('base64url'))
+        : null;
+      await tx.query(
+        `UPDATE students
+         SET active_jti = ?, attempt_record_mode = ?,
+             recording_password = COALESCE(recording_password, ?)
+         WHERE id = ?`,
+        [jti, recordMode, recordingPassword, student.id],
+      );
+      return { jti, recordMode, recordingPassword };
+    });
+    const { jti, recordMode, recordingPassword } = frozenAttempt;
     const studentToken = jwt.sign(
       { studentId: student.id, batchId: student.batch_id, jti } as StudentTokenPayload,
       secret,
       { expiresIn: '4h' }
     );
-
-    // Chế độ ghi màn hình: 'none' | 'local' | 's3'. record_enabled cũ vẫn được suy ra để tương thích.
-    const recordMode: string = student.record_mode || (student.record_enabled ? 's3' : 'none');
-
-    // Với mode 'local': cấp password mã hóa zip (server sinh & giữ, học viên KHÔNG thấy).
-    // Sinh 1 lần rồi tái dùng để resume-after-reload dùng lại đúng pass. Học viên chỉ
-    // dùng ngầm để mã hóa file .zip; muốn xem lại video phải lấy pass từ trang Results.
-    let recordingPassword: string | null = student.recording_password || null;
-    if (recordMode === 'local' && !recordingPassword) {
-      recordingPassword = crypto.randomBytes(24).toString('base64url');
-      await db.query('UPDATE students SET recording_password = ? WHERE id = ?', [recordingPassword, student.id]);
-    }
 
     res.json({
       valid: true,
@@ -407,8 +515,9 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
       dev_mode: isDevMode,
       exam_start: startTime.toISOString(),
       exam_end: endTime.toISOString(),
-      record_enabled: !!student.record_enabled, // giữ để tương thích ngược
+      record_enabled: recordMode === 's3', // giữ để tương thích ngược theo mode đã freeze
       record_mode: recordMode,
+      recording_next_part_index: recordingNextPartIndex,
       // chỉ trả pass khi local — client dùng ngầm để mã hóa, không hiển thị
       recording_password: recordMode === 'local' ? recordingPassword : undefined,
     });
@@ -552,7 +661,14 @@ router.post('/exam/start', studentAuthMiddleware, async (req: Request, res: Resp
     const now = new Date();
     const deadline = computeExamDeadline(now, durationSeconds / 60, new Date(student.end_time));
     await db.query(
-      "UPDATE students SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL WHERE id = ?",
+      `UPDATE students
+       SET status = 'in_progress', exam_started_at = ?, exam_deadline = ?, disconnected_at = NULL,
+           attempt_record_mode = COALESCE(attempt_record_mode, (
+             SELECT COALESCE(NULLIF(b.record_mode, ''),
+               CASE WHEN b.record_enabled THEN 's3' ELSE 'none' END)
+             FROM batches b WHERE b.id = students.batch_id
+           ))
+       WHERE id = ?`,
       [now.toISOString(), deadline.toISOString(), student_id]
     );
 
@@ -573,7 +689,7 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
-      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration
+      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration, b.record_mode
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.id = ?
@@ -584,6 +700,8 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
       return res.status(404).json({ error: 'Student not found' });
     }
 
+    const recordingNextPartIndex = await findNextRecordingPartIndex(db, parseInt(studentId));
+
     if (student.status === 'submitted') {
       return res.status(410).json({ 
         error: 'Exam already submitted',
@@ -591,18 +709,22 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
       });
     }
 
-    const now = new Date();
+    const nowMs = Date.now();
 
     // Nếu học viên mới bắt đầu truy cập bài thi lần đầu (status = pending)
     if (student.status === 'pending') {
-      return res.json({ questions: [], time_remaining: null });
+      return res.json({
+        questions: [],
+        time_remaining: null,
+        recording_next_part_index: recordingNextPartIndex,
+      });
     }
 
 
     // Kiểm tra deadline đã qua chưa
     if (student.exam_deadline) {
-      const deadline = new Date(student.exam_deadline);
-      if (now >= deadline) {
+      const deadlineMs = timestampWithoutTimezoneUtcMs(student.exam_deadline);
+      if (Number.isFinite(deadlineMs) && nowMs >= deadlineMs) {
         console.log('[getQuestions] Deadline passed, auto-submitting student:', studentId);
         await submitExamAtomically(parseInt(studentId), 'timeout');
         return res.status(410).json({
@@ -615,8 +737,8 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
     // Kiểm tra thời gian vắng mặt (disconnected > 2 phút)
     const DISCONNECT_GRACE_SECONDS = 120; // 2 phút
     if (student.disconnected_at) {
-      const disconnectedAt = new Date(student.disconnected_at);
-      const absentSeconds = (now.getTime() - disconnectedAt.getTime()) / 1000;
+      const disconnectedAtMs = timestampWithoutTimezoneUtcMs(student.disconnected_at);
+      const absentSeconds = (nowMs - disconnectedAtMs) / 1000;
       if (absentSeconds > DISCONNECT_GRACE_SECONDS) {
         console.log('[getQuestions] Student absent too long (%ds), auto-submitting:', Math.round(absentSeconds));
         await submitExamAtomically(parseInt(studentId), 'absent_too_long');
@@ -644,8 +766,10 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
     // Tính time_remaining từ server
     let time_remaining: number | null = null;
     if (student.exam_deadline) {
-      const deadline = new Date(student.exam_deadline);
-      time_remaining = Math.max(0, Math.floor((deadline.getTime() - now.getTime()) / 1000));
+      const deadlineMs = timestampWithoutTimezoneUtcMs(student.exam_deadline);
+      time_remaining = Number.isFinite(deadlineMs)
+        ? Math.max(0, Math.floor((deadlineMs - nowMs) / 1000))
+        : 0;
     }
     // === END GUARD ===
 
@@ -685,7 +809,11 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
       };
     });
 
-    res.json({ questions, time_remaining });
+    res.json({
+      questions,
+      time_remaining,
+      recording_next_part_index: recordingNextPartIndex,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -914,13 +1042,13 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req: Req
       ? JSON.stringify(metadata).slice(0, 2000)
       : null;
 
-    // [P1-1] Claim event + upsert counter + đọc total/current TRONG MỘT TRANSACTION, qua module
-    // dùng chung `persistViolation` (route và regression test gọi CHUNG hàm này — test không
-    // sao chép SQL). Nguyên tử: event + counter cùng commit/rollback (không còn half-commit).
+    // [P1-1] Khóa/đọc status rồi claim event + upsert counter + đọc total/current TRONG
+    // MỘT TRANSACTION, qua helper production dùng chung với regression test. Nguyên tử:
+    // submit thắng race => request bị ignore; violation thắng => event + counter cùng commit.
     // KHÔNG có fallback non-idempotent: migration (event_id + 2 unique index) bắt buộc trước
     // deploy; transaction lỗi → propagate ra catch ngoài → 500 → client retry CÙNG event_id.
-    const { replay, total, currentCount } = await db.withTransaction((tx) =>
-      persistViolation(tx, {
+    const { ignored, replay, total, currentCount } = await db.withTransaction((tx) =>
+      persistViolationIfInProgress(tx, {
         studentId: parseInt(studentId),
         batchId,
         type,
@@ -933,6 +1061,17 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req: Req
         lockStudentRow: !USE_SQLITE, // Postgres: khóa row student trong tx; SQLite tự serialize
       })
     );
+
+    if (ignored) {
+      return res.json({
+        violation_count: 0,
+        total_violations: 0,
+        locked: false,
+        forensic_only: forensicOnly,
+        ignored: true,
+        reason: 'exam_not_in_progress',
+      });
+    }
 
     // [P1-2] CẢ event mới lẫn replay đều đi qua CHUNG một đường cưỡng chế lock. Nếu request
     // trước tính locked nhưng submitExamAtomically lỗi tạm thời (student vẫn in_progress),
@@ -952,152 +1091,387 @@ router.post('/violation', studentAuthMiddleware, sessionTracker, async (req: Req
   }
 });
 
+router.post('/exam/recording-seal', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  let outcome = 'rejected';
+  let caughtError: any;
+  try {
+    if (!Array.isArray(req.body?.parts)) {
+      return res.status(400).json({ error: 'Invalid recording manifest', reason: 'invalid_manifest' });
+    }
+    const result = await db.withTransaction((tx) => sealRecordingManifest(tx, {
+      studentId,
+      batchId,
+      sessionId: req.studentPayload!.jti,
+      parts: req.body.parts,
+      useSqlite: USE_SQLITE,
+    }));
+    outcome = result.already ? 'already_sealed' : 'sealed';
+    return res.json({
+      success: true,
+      state: result.state === 'finalized' ? 'finalized' : 'processing',
+      recordMode: result.recordMode,
+      expectedPartCount: result.expectedPartCount,
+      completedPartCount: result.completedPartCount,
+      parts: result.parts,
+    });
+  } catch (error: any) {
+    caughtError = error;
+    outcome = 'error';
+    const status = error?.code === 'INVALID_MANIFEST' ? 400
+      : error?.code === 'BAD_RECORD_MODE' ? 403
+      : error?.code === 'NOT_IN_PROGRESS' ? 409
+      : error?.code === 'MANIFEST_CONFLICT' ? 409
+      : error?.code === 'RECORDING_PART_LIMIT' ? 409
+      : error?.code === 'RECORDING_RESERVATION_CONFLICT' ? 409 : 500;
+    const reason = error?.code === 'INVALID_MANIFEST' ? 'invalid_manifest'
+      : error?.code === 'BAD_RECORD_MODE' ? 'bad_record_mode'
+      : error?.code === 'NOT_IN_PROGRESS' ? 'not_in_progress'
+      : ['MANIFEST_CONFLICT', 'RECORDING_RESERVATION_CONFLICT'].includes(error?.code)
+        ? 'manifest_conflict'
+        : error?.code === 'RECORDING_PART_LIMIT' ? 'manifest_conflict'
+        : 'recording_seal_failed';
+    return res.status(status).json(status < 500
+      ? { error: error.message, reason }
+      : { error: 'Could not seal the recording manifest', reason });
+  } finally {
+    logRecordingOperation({
+      stage: 'seal', outcome, startedAt, statusCode: res.statusCode, studentId, batchId, error: caughtError,
+    });
+  }
+});
+
+router.get('/exam/recording-status', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  let outcome = 'read';
+  let caughtError: any;
+  try {
+    const status = await readRecordingRecoveryStatusLocked(studentId, batchId);
+    return res.json(status);
+  } catch (error: any) {
+    caughtError = error;
+    outcome = 'error';
+    return res.status(500).json({
+      error: 'Could not read the recording status',
+      reason: 'recording_status_failed',
+    });
+  } finally {
+    logRecordingOperation({
+      stage: 'status', outcome, startedAt, statusCode: res.statusCode, studentId, batchId, error: caughtError,
+    });
+  }
+});
+
+router.post('/exam/recording-reconcile', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  let outcome = 'rejected';
+  let caughtError: any;
+  try {
+    let status = await readRecordingRecoveryStatusLocked(studentId, batchId);
+    if (status.state !== 'processing') {
+      outcome = status.state;
+      return res.json(status);
+    }
+
+    const pending = await readPendingRecordingReservationsLocked(studentId, batchId);
+    if (pending.length > 0) {
+      const { inspectRecordingObjectIfExists, isS3Configured } = await loadS3Service();
+      if (!isS3Configured()) {
+        return res.status(503).json({
+          error: 'S3 not configured',
+          reason: 'recording_reconcile_failed',
+        });
+      }
+      // These keys were created from authenticated server reservations. S3 I/O
+      // stays outside transactions; each successful inspection is then committed
+      // idempotently under the same student lock used by finalization.
+      for (const reservation of pending) {
+        const inspected = await inspectRecordingObjectIfExists(reservation.objectKey);
+        if (!inspected || inspected.byteSize <= 0) continue;
+        await db.withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+          studentId,
+          batchId,
+          uploadId: reservation.uploadId,
+          objectKey: reservation.objectKey,
+          byteSize: Math.trunc(inspected.byteSize),
+          uploadedAt: new Date().toISOString(),
+          useSqlite: USE_SQLITE,
+        }));
+      }
+    }
+
+    status = await readRecordingRecoveryStatusLocked(studentId, batchId);
+    if (
+      status.state === 'processing'
+      && status.expectedPartCount > 0
+      && status.completedPartCount === status.expectedPartCount
+    ) {
+      await db.withTransaction((tx) => finalizeRecordingManifest(tx, {
+        studentId,
+        batchId,
+        useSqlite: USE_SQLITE,
+      }));
+      status = await readRecordingRecoveryStatusLocked(studentId, batchId);
+    }
+    outcome = status.state;
+    return res.json(status);
+  } catch (error: any) {
+    caughtError = error;
+    outcome = 'error';
+    const manifestConflict = [
+      'MANIFEST_CONFLICT',
+      'MANIFEST_NOT_SEALED',
+      'RECORDING_RESERVATION_CONFLICT',
+    ].includes(error?.code);
+    if (manifestConflict) {
+      return res.status(409).json({ error: error.message, reason: 'manifest_conflict' });
+    }
+    return res.status(503).json({
+      error: 'Could not reconcile the recording',
+      reason: 'recording_reconcile_failed',
+    });
+  } finally {
+    logRecordingOperation({
+      stage: 'reconcile', outcome, startedAt, statusCode: res.statusCode, studentId, batchId, error: caughtError,
+    });
+  }
+});
+
 // Cấp presigned PUT URL để client upload 1 phần video record thẳng lên S3.
 // batchId/studentId lấy từ JWT — client KHÔNG thể chỉ định để ghi đè video người khác.
 router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  const requestedPartIndex = Number(req.body?.partIndex);
+  const uploadId = recordingUploadId(req, requestedPartIndex);
+  let operationPartIndex = requestedPartIndex;
+  let outcome = 'rejected';
+  let caughtError: any;
   try {
+    if (!Number.isInteger(requestedPartIndex) || requestedPartIndex < 0 || requestedPartIndex > 1000) {
+      return res.status(400).json({ error: 'Invalid partIndex' });
+    }
+    if (!isValidRecordingUploadId(uploadId)) {
+      return res.status(400).json({ error: 'Invalid uploadId' });
+    }
+
+    // Reserve under the student row lock before issuing a URL. The client uploadId
+    // is the idempotency identity; a stale requested cursor can be reassigned, but
+    // two logical blobs can never receive the same part/key.
+    const reservation = await db.withTransaction((tx) => reserveRecordingUpload(tx, {
+      studentId,
+      batchId,
+      uploadId,
+      sessionId: req.studentPayload!.jti,
+      useSqlite: USE_SQLITE,
+    }));
+    operationPartIndex = reservation.partIndex;
+
+    if (reservation.completed) {
+      outcome = 'already_complete';
+      return res.json({
+        success: true,
+        alreadyComplete: true,
+        completed: true,
+        already: true,
+        uploadId: reservation.uploadId,
+        partIndex: reservation.partIndex,
+        key: reservation.objectKey,
+        byteSize: reservation.byteSize,
+      });
+    }
+
     const { createRecordingUploadUrl, isS3Configured } = await loadS3Service();
     if (!isS3Configured()) {
       return res.status(503).json({ error: 'S3 not configured' });
     }
 
-    const studentId = req.studentPayload!.studentId;
-    const batchId = req.studentPayload!.batchId;
-
-    // Chỉ cấp URL khi batch ở mode 's3' (chốt chặn server-side, tránh mod/ai lách).
-    // Mode 'local' ghi ra máy học viên, không dùng S3 → không cấp URL.
-    const batchRes = await db.query(`
-      SELECT b.record_mode, b.record_enabled, s.status, s.exam_deadline, s.submitted_at, s.recording_incomplete
-      FROM batches b JOIN students s ON s.batch_id = b.id
-      WHERE b.id = ? AND s.id = ?
-    `, [batchId, studentId]);
-    const batchMode = batchRes.rows[0]?.record_mode || (batchRes.rows[0]?.record_enabled ? 's3' : 'none');
-    if (batchMode !== 's3') {
-      return res.status(403).json({ error: 'S3 recording not enabled for this batch' });
-    }
-    const submittedRecordingGrace = batchRes.rows[0]?.status === 'submitted'
-      && batchRes.rows[0]?.recording_incomplete
-      && batchRes.rows[0]?.submitted_at
-      && Date.now() - new Date(batchRes.rows[0].submitted_at).getTime() <= 15 * 60_000;
-    if (batchRes.rows[0]?.status !== 'in_progress' && !submittedRecordingGrace) {
-      return res.status(409).json({ error: 'Exam is not in progress' });
-    }
-    if (!submittedRecordingGrace && batchRes.rows[0]?.exam_deadline && new Date() >= new Date(batchRes.rows[0].exam_deadline)) {
-      return res.status(410).json({ error: 'Deadline passed', reason: 'timeout' });
-    }
-
-    const { partIndex, contentType } = req.body;
-
-    const idx = Number(partIndex);
-    if (!Number.isInteger(idx) || idx < 0) {
-      return res.status(400).json({ error: 'Invalid partIndex' });
-    }
-    const existingPart = await db.query(
-      'SELECT id FROM recording_parts WHERE student_id = ? AND part_index = ?',
-      [studentId, idx]
-    );
-    if (existingPart.rows.length > 0) {
-      return res.status(409).json({ error: 'Recording part has already been finalized' });
-    }
-
     const { url, key } = await createRecordingUploadUrl({
       batchId,
       studentId,
-      partIndex: idx,
-      contentType: typeof contentType === 'string' ? contentType : undefined,
+      partIndex: reservation.partIndex,
+      objectKey: reservation.objectKey,
+      contentType: typeof req.body?.contentType === 'string' ? req.body.contentType : undefined,
     });
 
-    res.json({ url, key });
+    outcome = reservation.already ? 'reservation_replayed' : 'issued';
+    res.json({
+      url,
+      key,
+      uploadId: reservation.uploadId,
+      partIndex: reservation.partIndex,
+      already: reservation.already,
+      completed: false,
+    });
   } catch (error: any) {
-    console.error('[recording-url] failed:', error?.message);
-    res.status(500).json({ error: error.message });
+    caughtError = error;
+    outcome = 'error';
+    const status = error?.code === 'INVALID_UPLOAD_ID' ? 400
+      : error?.code === 'BAD_RECORD_MODE' ? 403
+      : error?.code === 'NOT_IN_PROGRESS' ? 409
+      : error?.code === 'RECORDING_PART_LIMIT' ? 409
+      : error?.code === 'MANIFEST_SEALED' ? 409
+      : error?.code === 'RECORDING_RESERVATION_CONFLICT' ? 409 : 500;
+    res.status(status).json(status < 500
+      ? { error: error.message, reason: String(error.code).toLowerCase() }
+      : { error: 'Could not prepare the recording upload', reason: 'recording_presign_failed' });
+  } finally {
+    logRecordingOperation({
+      stage: 'presign',
+      outcome,
+      startedAt,
+      statusCode: res.statusCode,
+      studentId,
+      batchId,
+      partIndex: operationPartIndex,
+      error: caughtError,
+    });
   }
 });
 
 router.post('/exam/recording-complete', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  const requestedPartIndex = Number(req.body?.partIndex);
+  const uploadId = recordingUploadId(req, requestedPartIndex);
+  let operationPartIndex = requestedPartIndex;
+  let outcome = 'rejected';
+  let caughtError: any;
   try {
-    const { inspectRecordingObject } = await loadS3Service();
-    const studentId = req.studentPayload!.studentId;
-    const batchId = req.studentPayload!.batchId;
-    const partIndex = Number(req.body?.partIndex);
-    if (!Number.isInteger(partIndex) || partIndex < 0) {
+    if (!Number.isInteger(requestedPartIndex) || requestedPartIndex < 0 || requestedPartIndex > 1000) {
       return res.status(400).json({ error: 'Invalid recording part metadata' });
     }
-    const exam = (await db.query(`
-      SELECT s.status, s.submitted_at, s.recording_incomplete, b.record_mode, b.record_enabled
-      FROM students s JOIN batches b ON b.id = s.batch_id
-      WHERE s.id = ? AND b.id = ?
-    `, [studentId, batchId])).rows[0];
-    const recordMode = exam?.record_mode || (exam?.record_enabled ? 's3' : 'none');
-    const submittedRecordingGrace = exam?.status === 'submitted' && exam?.recording_incomplete && exam?.submitted_at
-      && Date.now() - new Date(exam.submitted_at).getTime() <= 15 * 60_000;
-    if (!exam || (exam.status !== 'in_progress' && !submittedRecordingGrace)) return res.status(409).json({ error: 'Exam is not accepting recording parts' });
-    if (recordMode !== 's3') return res.status(403).json({ error: 'S3 recording is not enabled' });
-    const objectKey = `recordings/${batchId}/${studentId}/part${String(partIndex).padStart(3, '0')}.webm`;
-    const { byteSize } = await inspectRecordingObject(objectKey);
+    if (!isValidRecordingUploadId(uploadId)) {
+      return res.status(400).json({ error: 'Invalid uploadId' });
+    }
+
+    // Reject non-S3 modes before looking up any stale reservation left by a
+    // previous attempt/deployment. Local recording must never enter S3 recovery.
+    const recordingStatus = await readRecordingRecoveryStatusLocked(studentId, batchId);
+    if (recordingStatus.recordMode !== 's3') {
+      return res.status(403).json({ error: 'S3 recording is not enabled', reason: 'bad_record_mode' });
+    }
+
+    const reservation = await findRecordingUploadReservation(db, studentId, uploadId);
+    if (!reservation || reservation.batchId !== batchId) {
+      return res.status(409).json({
+        error: 'Recording upload reservation was not found',
+        reason: 'reservation_not_found',
+      });
+    }
+    operationPartIndex = reservation.partIndex;
+    if (reservation.completed) {
+      outcome = 'already_complete';
+      return res.json({
+        success: true,
+        already: true,
+        alreadyComplete: true,
+        completed: true,
+        uploadId: reservation.uploadId,
+        partIndex: reservation.partIndex,
+        key: reservation.objectKey,
+        byteSize: reservation.byteSize,
+      });
+    }
+
+    const { inspectRecordingObject } = await loadS3Service();
+    const { byteSize } = await inspectRecordingObject(reservation.objectKey);
     if (byteSize <= 0) return res.status(422).json({ error: 'Uploaded recording part is empty' });
-    await db.query(`
-      INSERT INTO recording_parts (student_id, batch_id, part_index, object_key, byte_size, uploaded_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT (student_id, part_index) DO NOTHING
-    `, [studentId, batchId, partIndex, objectKey, Math.trunc(byteSize), new Date().toISOString()]);
-    res.json({ success: true, key: objectKey });
+    // HeadObject is network I/O, so it happens before opening the transaction.
+    // Lifecycle is then re-checked under the same student lock used by finalize;
+    // a part can no longer be inserted after a manifest has committed.
+    const completion = await db.withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+      studentId,
+      batchId,
+      uploadId,
+      objectKey: reservation.objectKey,
+      byteSize: Math.trunc(byteSize),
+      uploadedAt: new Date().toISOString(),
+      useSqlite: USE_SQLITE,
+    }));
+    outcome = completion.already ? 'already_complete' : 'stored';
+    res.json({
+      success: true,
+      already: completion.already,
+      ...(completion.already ? { alreadyComplete: true } : {}),
+      completed: true,
+      uploadId: completion.uploadId,
+      partIndex: completion.partIndex,
+      key: completion.objectKey,
+      byteSize: completion.byteSize,
+    });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    caughtError = error;
+    outcome = 'error';
+    const status = error?.code === 'NOT_IN_PROGRESS' ? 409
+      : error?.code === 'BAD_RECORD_MODE' ? 403
+      : error?.code === 'RESERVATION_NOT_FOUND' ? 409
+      : error?.code === 'RECORDING_RESERVATION_CONFLICT' ? 409
+      : error?.code === 'INVALID_RECORDING_PART' ? 422 : 500;
+    res.status(status).json(status < 500
+      ? { error: error.message, reason: error.code.toLowerCase() }
+      : { error: 'Could not verify the uploaded recording part', reason: 'recording_complete_failed' });
+  } finally {
+    logRecordingOperation({
+      stage: 'complete',
+      outcome,
+      startedAt,
+      statusCode: res.statusCode,
+      studentId,
+      batchId,
+      partIndex: operationPartIndex,
+      error: caughtError,
+    });
   }
 });
 
 router.post('/exam/recording-finalize', studentAuthMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  const studentId = req.studentPayload!.studentId;
+  const batchId = req.studentPayload!.batchId;
+  let operationPartIndex: number | undefined;
+  let outcome = 'rejected';
+  let caughtError: any;
   try {
-    const studentId = req.studentPayload!.studentId;
-    const batchId = req.studentPayload!.batchId;
-    const finalPartIndex = Number(req.body?.finalPartIndex);
-    if (!Number.isInteger(finalPartIndex) || finalPartIndex < 0 || finalPartIndex > 1000) {
-      return res.status(400).json({ error: 'Invalid finalPartIndex' });
-    }
-
-    await db.withTransaction(async (tx) => {
-      const row = (await tx.query(`
-        SELECT s.status, s.submitted_at, s.recording_incomplete,
-               s.recording_finalized_at, s.recording_final_part_index,
-               b.record_mode, b.record_enabled
-        FROM students s JOIN batches b ON b.id = s.batch_id
-        WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE'}
-      `, [studentId])).rows[0];
-      const submittedRecordingGrace = row?.status === 'submitted' && row?.recording_incomplete && row?.submitted_at
-        && Date.now() - new Date(row.submitted_at).getTime() <= 15 * 60_000;
-      if (!row || (row.status !== 'in_progress' && !submittedRecordingGrace)) {
-        throw Object.assign(new Error('Exam is not accepting recording finalization'), { code: 'NOT_IN_PROGRESS' });
-      }
-      const mode = row.record_mode || (row.record_enabled ? 's3' : 'none');
-      if (mode !== 's3') throw Object.assign(new Error('S3 recording is not enabled'), { code: 'BAD_RECORD_MODE' });
-      if (row.recording_finalized_at) {
-        if (Number(row.recording_final_part_index) !== finalPartIndex) {
-          throw Object.assign(new Error('Recording was already finalized with a different manifest'), { code: 'MANIFEST_CONFLICT' });
-        }
-        return;
-      }
-
-      const parts = await tx.query(
-        'SELECT part_index FROM recording_parts WHERE student_id = ? ORDER BY part_index',
-        [studentId]
-      );
-      if (parts.rows.length !== finalPartIndex + 1 || parts.rows.some((part, index) => Number(part.part_index) !== index)) {
-        throw Object.assign(new Error('Recording parts are incomplete'), { code: 'RECORDING_INCOMPLETE' });
-      }
-      await tx.query('UPDATE recording_parts SET is_final = TRUE WHERE student_id = ? AND part_index = ?', [studentId, finalPartIndex]);
-      await tx.query(
-        'UPDATE students SET recording_finalized_at = ?, recording_final_part_index = ?, recording_incomplete = FALSE WHERE id = ?',
-        [new Date().toISOString(), finalPartIndex, studentId]
-      );
-    });
-    res.json({ success: true, finalPartIndex });
+    const result = await db.withTransaction((tx) => finalizeRecordingManifest(tx, {
+      studentId,
+      batchId,
+      useSqlite: USE_SQLITE,
+    }));
+    operationPartIndex = result.finalPartIndex;
+    outcome = result.already ? 'already_finalized' : 'finalized';
+    res.json({ success: true, already: result.already, finalPartIndex: result.finalPartIndex });
   } catch (error: any) {
+    caughtError = error;
+    outcome = 'error';
     const status = error?.code === 'RECORDING_INCOMPLETE' ? 409
       : error?.code === 'MANIFEST_CONFLICT' ? 409
+      : error?.code === 'MANIFEST_NOT_SEALED' ? 409
+      : error?.code === 'RECORDING_RESERVATION_CONFLICT' ? 409
       : error?.code === 'NOT_IN_PROGRESS' ? 409
       : error?.code === 'BAD_RECORD_MODE' ? 403 : 500;
-    res.status(status).json({ error: error.message, reason: error?.code?.toLowerCase() });
+    res.status(status).json(status < 500
+      ? { error: error.message, reason: error?.code?.toLowerCase() }
+      : { error: 'Could not finalize the recording', reason: 'recording_finalize_failed' });
+  } finally {
+    logRecordingOperation({
+      stage: 'finalize',
+      outcome,
+      startedAt,
+      statusCode: res.statusCode,
+      studentId,
+      batchId,
+      partIndex: operationPartIndex,
+      error: caughtError,
+    });
   }
 });
 

@@ -130,7 +130,7 @@ npm run test:local
 - `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự bảy bước: build/start stack; chạy cleanup migration hai lần; restart/xác minh schema v2; kiểm tra built React app; chạy default suite; chạy bốn PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM. Lần xác minh 2026-08-26 đã pass: default suite 76 total/72 pass/4 skip; PostgreSQL 4 pass/0 skip; AI Grade E2E chấm 25 student × 20 question và kiểm tra ownership, late submitter, isolation, chunk fallback, regrade và stale recovery.
+Gate chạy tuần tự bảy bước: build/start stack; chạy lần lượt migration recording reservation và manifest recovery hai lần; restart/xác minh schema v4; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 
@@ -200,6 +200,19 @@ Chạy đúng thứ tự:
    - Giữ nguyên `user_ai_settings` và toàn bộ manual grading state.
    - Nâng `app_schema_state.version` lên `2`; chỉ chạy sau khi release chuyển tiếp hỗ trợ cả schema 1 và 2 đã được deploy và invocation cũ đã kết thúc.
 
+11. `migrations/20260827_recording_upload_reservations.sql`
+   - Tạo reservation bền vững theo `(student_id, upload_id)` và chặn hai logical blob dùng chung `(student_id, part_index)`.
+   - Backfill mọi `recording_parts` cũ thành reservation đã hoàn tất, sửa marker `completed_at` bị thiếu khi key khớp, và rollback nếu gặp xung đột part/key.
+   - Nâng `app_schema_state.version` lên `3`; chạy migration này trước migration manifest recovery.
+   - Verification phải trả đủ 7 column, 2 unique index được đặt tên và row `app_schema_state.version >= 3`.
+
+12. `migrations/20260827_recording_manifest_recovery.sql`
+   - Thêm `students.recording_manifest_sealed_at`, `students.recording_expected_part_count` và `students.attempt_record_mode`; mode được đóng băng theo lượt thi để admin đổi batch không làm đổi nghĩa evidence đang ghi.
+   - Nâng `app_schema_state.version` lên `4`; chạy migration này **trước** khi deploy source hiện tại vì runtime mới yêu cầu schema v4.
+   - Verification phải trả đủ 3 column recovery và row `app_schema_state.version >= 4`.
+
+> **Điều kiện rollout bắt buộc cho release recording schema-v4:** dừng tạo lượt thi mới và chờ đến khi không còn thí sinh S3 nào đang `in_progress`/không còn tab thi dùng bundle cũ. Client cũ không gửi `/recording-seal`, nên deploy backend mới giữa một lượt thi đang chạy sẽ làm lượt đó không thể finalize. Chỉ chạy hai migration và deploy frontend/backend sau khi đã drain các lượt S3 đang hoạt động.
+
 Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
 
 ### 3.3. Nếu migration thứ ba báo duplicate
@@ -224,7 +237,7 @@ Không xóa row tự động. Đối chiếu email/batch/answer của các ID đ
 
 ### 3.4. Vì sao vẫn phải chạy migration production trước deploy?
 
-Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Release cleanup chuyển tiếp chấp nhận version `>=1`, còn fresh bootstrap ghi version `2`; sau khi Supabase đã chạy migration cleanup, có thể nâng minimum runtime lên `2`. Runtime bootstrap đầy đủ chỉ dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
+Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Runtime hiện tại yêu cầu version `>=4`, và fresh bootstrap ghi version `4`. Vì vậy phải chạy cả hai migration recording 20260827 theo đúng thứ tự trước source mới. Runtime bootstrap đầy đủ chỉ dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
 
 Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema. Phải chạy migration có chủ đích trước deploy; readiness là hàng rào cuối trả `503` nếu schema version hoặc required schema/index chưa đúng. Baseline migration đầy đủ cho database mới vẫn là technical debt; local Docker tạm thời dùng bootstrap rõ ràng qua biến môi trường riêng.
 
@@ -407,7 +420,8 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 
 ## 10. Checklist production trước mỗi kỳ thi
 
-- [ ] Mười migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery/cleanup chỉ chạy khi không có AI Grade request hoạt động.
+- [ ] Đã dừng tạo lượt thi mới và xác nhận không còn lượt S3 `in_progress`/tab thi bundle cũ trước khi rollout recording schema-v4.
+- [ ] Mười hai migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery/cleanup chỉ chạy khi không có AI Grade request hoạt động; hai migration recording 20260827 phải hoàn tất trước source schema-v4.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
@@ -416,7 +430,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
 - [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm run test:local` pass toàn bộ bảy bước; default suite có 69 pass/4 skip, PostgreSQL có 4 pass/0 skip, schema cleanup idempotent và AI Grade E2E pass các scenario isolation/correlation/regrade/recovery.
+- [ ] `npm run test:local` pass toàn bộ bảy bước; default suite hiện có 133 pass/15 skip, PostgreSQL có 15 pass/0 skip, schema v2→v4/backfill idempotent và AI Grade E2E pass các scenario isolation/correlation/regrade/recovery.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.

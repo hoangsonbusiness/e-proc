@@ -47,11 +47,15 @@ export async function createRecordingUploadUrl(params: {
   batchId: number;
   studentId: number;
   partIndex: number;
+  objectKey?: string;
   contentType?: string;
 }): Promise<{ url: string; key: string }> {
-  const { batchId, studentId, partIndex, contentType } = params;
+  const { batchId, studentId, partIndex, objectKey, contentType } = params;
   const part = String(partIndex).padStart(3, '0');
-  const key = `recordings/${batchId}/${studentId}/part${part}.webm`;
+  // Current routes always provide an authenticated, session-namespaced
+  // reservation key. The fallback only supports legacy internal callers; it
+  // does not provide cross-attempt isolation by itself.
+  const key = objectKey || `recordings/${batchId}/${studentId}/part${part}.webm`;
 
   const command = new PutObjectCommand({
     Bucket: BUCKET,
@@ -66,4 +70,21 @@ export async function createRecordingUploadUrl(params: {
 export async function inspectRecordingObject(key: string): Promise<{ byteSize: number }> {
   const result = await getClient().send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
   return { byteSize: Number(result.ContentLength || 0) };
+}
+
+/**
+ * Reconciliation treats a genuine 404 as "not uploaded yet". Authentication,
+ * throttling and transport failures must still propagate so the caller retries
+ * instead of falsely declaring the evidence incomplete.
+ */
+export async function inspectRecordingObjectIfExists(
+  key: string,
+): Promise<{ byteSize: number } | null> {
+  try {
+    return await inspectRecordingObject(key);
+  } catch (error: any) {
+    const status = Number(error?.$metadata?.httpStatusCode ?? error?.statusCode);
+    if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey') return null;
+    throw error;
+  }
 }

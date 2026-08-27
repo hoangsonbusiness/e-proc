@@ -22,20 +22,9 @@ export async function studentAuthMiddleware(req, res, next) {
         console.error('[StudentAuth] JWT_SECRET is not configured!');
         return res.status(500).json({ error: 'Server configuration error' });
     }
+    let payload;
     try {
-        const payload = jwt.verify(rawToken, secret);
-        if (!payload.studentId || !payload.batchId) {
-            return res.status(401).json({ error: 'Unauthorized: Invalid student token payload' });
-        }
-        if (!payload.jti) {
-            return res.status(401).json({ error: 'Unauthorized: Missing session identifier', reason: 'session_revoked' });
-        }
-        const active = await db.query('SELECT active_jti FROM students WHERE id = ?', [payload.studentId]);
-        if (!active.rows[0] || active.rows[0].active_jti !== payload.jti) {
-            return res.status(401).json({ error: 'Unauthorized: This exam session is no longer active', reason: 'session_revoked' });
-        }
-        req.studentPayload = payload;
-        next();
+        payload = jwt.verify(rawToken, secret);
     }
     catch (err) {
         if (err.name === 'TokenExpiredError') {
@@ -43,4 +32,29 @@ export async function studentAuthMiddleware(req, res, next) {
         }
         return res.status(401).json({ error: 'Unauthorized: Invalid student token' });
     }
+    if (!payload.studentId || !payload.batchId) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid student token payload' });
+    }
+    if (!payload.jti) {
+        return res.status(401).json({ error: 'Unauthorized: Missing session identifier', reason: 'session_revoked' });
+    }
+    let active;
+    try {
+        active = await db.query('SELECT active_jti FROM students WHERE id = ?', [payload.studentId]);
+    }
+    catch (err) {
+        // A database outage does not make a valid JWT invalid. Fail closed, but
+        // classify the failure as retryable so recording finalization can recover.
+        console.error('[StudentAuth] Failed to validate the active exam session:', err);
+        res.setHeader('Retry-After', '1');
+        return res.status(503).json({
+            error: 'Student authentication service is temporarily unavailable',
+            reason: 'auth_backend_unavailable',
+        });
+    }
+    if (!active.rows[0] || active.rows[0].active_jti !== payload.jti) {
+        return res.status(401).json({ error: 'Unauthorized: This exam session is no longer active', reason: 'session_revoked' });
+    }
+    req.studentPayload = payload;
+    next();
 }
