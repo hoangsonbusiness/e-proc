@@ -1101,7 +1101,7 @@ function BatchManagement() {
               </>
             )}
 
-              <div className="flex flex-wrap justify-end gap-2">
+              <div className="flex flex-wrap justify-start gap-2">
                 {blueprintMode === 'module' ? (
                   <button
                     type="button"
@@ -1737,7 +1737,7 @@ function BatchManagement() {
                 )
               )}
 
-              <div className="flex flex-wrap justify-end gap-2">
+              <div className="flex flex-wrap justify-start gap-2">
                 {editBlueprintMode === 'module' ? (
                   <button
                     type="button"

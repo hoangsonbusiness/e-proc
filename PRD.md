@@ -36,7 +36,7 @@ Không còn ràng buộc “cố định 10 câu/50 thí sinh”. Blueprint hi�
 
 - Tạo admin đầu tiên qua `/admin/setup` chỉ khi `admin_users` trống.
 - Login trả JWT 24 giờ, `role`, `userId`; client lưu token/expiry/role/user id.
-- `admin` quản lý user role `admin`/`mod` và không được tự xóa chính mình.
+- `admin` quản lý user role `admin`/`mod`, có thể reset password user (tối thiểu 8 ký tự), và không được tự xóa chính mình.
 - Không được xóa admin/mod đang sở hữu batch; nếu không còn batch sở hữu, AI setting của user được xóa cùng account trong transaction.
 - `mod` chỉ sửa/xóa question có `uploaded_by` và batch có `created_by` bằng JWT user id.
 - Chỉ `admin` được đặt `record_mode` khác `none`. Mod clone batch vẫn bị server ép recording về `none`.

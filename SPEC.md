@@ -181,6 +181,7 @@ All paths below are prefixed `/api`. Protected admin routes require admin bearer
 | POST | `/admin/login` | 10/min/IP; returns token/expiry/role/userId |
 | POST | `/admin/logout` | stateless acknowledgement |
 | GET/POST | `/admin/users` | admin-only list/create |
+| PUT | `/admin/users/:id/password` | admin-only reset; new password ≥8 |
 | DELETE | `/admin/users/:id` | admin-only; cannot self-delete |
 | PUT | `/admin/change-password` | current password + new password ≥8 |
 

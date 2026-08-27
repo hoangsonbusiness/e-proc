@@ -91,6 +91,8 @@ export const adminApi = {
   getUsers: () => api.get('/admin/users'),
   createUser: (username: string, password: string, role: 'admin' | 'mod') =>
     api.post('/admin/users', { username, password, role }),
+  resetUserPassword: (id: number, newPassword: string) =>
+    api.put(`/admin/users/${id}/password`, { newPassword }),
   deleteUser: (id: number) => api.delete(`/admin/users/${id}`),
 
   changePassword: (currentPassword: string, newPassword: string) =>

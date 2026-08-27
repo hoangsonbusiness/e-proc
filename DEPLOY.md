@@ -130,7 +130,7 @@ npm run test:local
 - `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự bảy bước: build/start stack; chạy lần lượt migration recording reservation và manifest recovery hai lần; restart/xác minh schema v4; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; rồi chạy manual AI Grade E2E qua mock LLM.
+Gate chạy tuần tự tám bước: build/start stack; chạy lần lượt migration recording reservation và manifest recovery hai lần; restart/xác minh schema v4; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; chạy HTTP/PostgreSQL E2E cho admin reset password; rồi chạy manual AI Grade E2E qua mock LLM.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 

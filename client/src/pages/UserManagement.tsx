@@ -15,6 +15,12 @@ function UserManagement() {
   const [role, setRole] = useState<'admin' | 'mod'>('mod');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [resetTarget, setResetTarget] = useState<{ id: number; username: string } | null>(null);
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
+  const [resetError, setResetError] = useState('');
+  const [resetSuccess, setResetSuccess] = useState('');
+  const [resetSaving, setResetSaving] = useState(false);
 
   // Chặn mod truy cập trang này (backend cũng chặn — đây chỉ là UX).
   useEffect(() => {
@@ -26,6 +32,23 @@ function UserManagement() {
   useEffect(() => {
     if (isAdmin) loadUsers();
   }, [isAdmin]);
+
+  useEffect(() => {
+    if (!resetTarget) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !resetSaving) {
+        setResetTarget(null);
+        setResetPassword('');
+        setResetPasswordConfirm('');
+        setResetError('');
+        setResetSuccess('');
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [resetTarget, resetSaving]);
 
   const loadUsers = async () => {
     try {
@@ -62,6 +85,52 @@ function UserManagement() {
     }
   };
 
+  const openResetPassword = (user: { id: number; username: string }) => {
+    setResetTarget(user);
+    setResetPassword('');
+    setResetPasswordConfirm('');
+    setResetError('');
+    setResetSuccess('');
+    setResetSaving(false);
+  };
+
+  const closeResetPassword = () => {
+    if (resetSaving) return;
+    setResetTarget(null);
+    setResetPassword('');
+    setResetPasswordConfirm('');
+    setResetError('');
+    setResetSuccess('');
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetTarget) return;
+
+    setResetError('');
+    setResetSuccess('');
+    if (resetPassword.length < 8) {
+      setResetError('New password must be at least 8 characters.');
+      return;
+    }
+    if (resetPassword !== resetPasswordConfirm) {
+      setResetError('Password confirmation does not match.');
+      return;
+    }
+
+    setResetSaving(true);
+    try {
+      await adminApi.resetUserPassword(resetTarget.id, resetPassword);
+      setResetPassword('');
+      setResetPasswordConfirm('');
+      setResetSuccess(`Password reset successfully for "${resetTarget.username}".`);
+    } catch (err: any) {
+      setResetError(err.response?.data?.error || 'Failed to reset password.');
+    } finally {
+      setResetSaving(false);
+    }
+  };
+
   if (isLoading || !isAdmin) return null;
 
   return (
@@ -83,6 +152,110 @@ function UserManagement() {
       </div>
 
       <AdminNav />
+
+      {resetTarget && (
+        <div
+          onClick={closeResetPassword}
+          className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-password-title"
+            aria-describedby="reset-password-description"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden"
+          >
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h3 id="reset-password-title" className="font-bold text-lg text-slate-800 m-0 border-none pb-0">
+                Reset Password
+              </h3>
+              <button
+                type="button"
+                aria-label="Close reset password dialog"
+                disabled={resetSaving}
+                className="text-slate-400 hover:text-slate-600 hover:bg-slate-200 p-1 rounded-md transition-colors disabled:opacity-50"
+                onClick={closeResetPassword}
+              >
+                &#10005;
+              </button>
+            </div>
+
+            <form onSubmit={handleResetPassword} aria-busy={resetSaving} className="p-6 space-y-4">
+              <p id="reset-password-description" className="text-sm text-slate-600 m-0">
+                Set a new password for <span className="font-semibold text-slate-900">{resetTarget.username}</span>.
+              </p>
+
+              <div>
+                <label htmlFor="reset-new-password" className="block text-sm font-medium text-slate-700 mb-1.5">
+                  New Password <span className="text-slate-400 font-normal">(min 8 chars)</span>
+                </label>
+                <input
+                  id="reset-new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  autoFocus
+                  value={resetPassword}
+                  onChange={(e) => setResetPassword(e.target.value)}
+                  required
+                  minLength={8}
+                  disabled={resetSaving}
+                  className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-60"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="reset-confirm-password" className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Confirm New Password
+                </label>
+                <input
+                  id="reset-confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={resetPasswordConfirm}
+                  onChange={(e) => setResetPasswordConfirm(e.target.value)}
+                  required
+                  minLength={8}
+                  disabled={resetSaving}
+                  className="block w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-60"
+                />
+              </div>
+
+              <div aria-live="polite">
+                {resetError && (
+                  <div role="alert" className="bg-red-50 text-red-600 px-3 py-2 rounded-lg text-sm font-medium">
+                    {resetError}
+                  </div>
+                )}
+                {resetSuccess && (
+                  <div role="status" className="bg-emerald-50 text-emerald-600 px-3 py-2 rounded-lg text-sm font-medium">
+                    {resetSuccess}
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-2 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={closeResetPassword}
+                  disabled={resetSaving}
+                  className="px-4 py-2.5 bg-white text-slate-700 border border-slate-300 font-medium rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resetSaving}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 transition-colors shadow-sm disabled:opacity-50"
+                >
+                  <KeyRound size={16} />
+                  {resetSaving ? 'Resetting...' : 'Reset Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 xl:grid-cols-4 gap-8">
         <div className="lg:col-span-1">
@@ -207,13 +380,26 @@ function UserManagement() {
                         </div>
                       </td>
                       <td className="px-5 py-3 text-right">
-                        <button 
-                          onClick={() => handleDelete(u.id, u.username)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-600 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
-                        >
-                          <Trash2 size={14} />
-                          <span className="hidden sm:inline">Delete</span>
-                        </button>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openResetPassword({ id: u.id, username: u.username })}
+                            aria-label={`Reset password for ${u.username}`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-blue-600 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                          >
+                            <KeyRound size={14} />
+                            <span className="hidden sm:inline">Reset Password</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(u.id, u.username)}
+                            aria-label={`Delete user ${u.username}`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-red-600 border border-red-200 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors"
+                          >
+                            <Trash2 size={14} />
+                            <span className="hidden sm:inline">Delete</span>
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}

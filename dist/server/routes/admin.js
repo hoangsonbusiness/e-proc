@@ -17,6 +17,7 @@ import { insertQuestion, isDuplicateQuestionIdError, isQuestionIdAvailable, load
 import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
 import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
 import { loadPagedBatches, loadPagedStudents } from '../services/adminLists.js';
+import { AdminUserPasswordError, resetAdminUserPassword } from '../services/adminUsers.js';
 dotenv.config();
 const USE_SQLITE = !process.env.DATABASE_URL;
 const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
@@ -206,6 +207,21 @@ router.post('/users', requireAdmin, async (req, res) => {
     }
     catch (err) {
         return res.status(500).json({ error: err.message });
+    }
+});
+// PUT /api/admin/users/:id/password — admin reset password cho user
+router.put('/users/:id/password', requireAdmin, async (req, res) => {
+    try {
+        const result = await resetAdminUserPassword(db, req.params.id, req.body?.newPassword);
+        console.log('[Auth] Password reset by admin:', req.adminUser?.id, 'target user:', result.userId);
+        return res.json({ success: true, message: 'Password reset successfully' });
+    }
+    catch (err) {
+        if (err instanceof AdminUserPasswordError) {
+            return res.status(err.statusCode).json({ error: err.message });
+        }
+        console.error('[Auth] Reset user password error:', err);
+        return res.status(500).json({ error: 'Failed to reset password' });
     }
 });
 // DELETE /api/admin/users/:id — xóa user (chỉ admin; không cho tự xóa chính mình)

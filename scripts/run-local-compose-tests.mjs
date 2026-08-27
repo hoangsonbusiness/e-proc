@@ -65,10 +65,10 @@ function applySql(label, sql) {
 }
 
 try {
-  console.log('\n[1/7] Building and starting the two-service local stack...');
+  console.log('\n[1/8] Building and starting the two-service local stack...');
   run(['up', '--build', '--detach', '--wait']);
 
-  console.log('\n[2/7] Simulating schema v2, applying migrations twice, and starting on schema v4...');
+  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v4...');
   run(['stop', 'app']);
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
@@ -229,7 +229,7 @@ try {
   `);
   run(['up', '--detach', '--wait', 'app']);
 
-  console.log('\n[3/7] Verifying PostgreSQL-backed application health and legacy-free schema...');
+  console.log('\n[3/8] Verifying PostgreSQL-backed application health and legacy-free schema...');
   run(['exec', '-T', 'app', 'node', '-e', [
     "const r=await fetch('http://127.0.0.1:3001/api/health');",
     "const body=await r.json();",
@@ -243,7 +243,7 @@ try {
     "if(Number(s.version)!==4||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
   ].join('')]);
 
-  console.log('\n[4/7] Verifying the built React frontend is served by the app container...');
+  console.log('\n[4/8] Verifying the built React frontend is served by the app container...');
   run(['exec', '-T', 'app', 'node', '-e', [
     "const r=await fetch('http://127.0.0.1:3001/');",
     "const body=await r.text();",
@@ -251,10 +251,10 @@ try {
     "if(body.includes('monaco-editor')||body.includes('StudentExam'))throw new Error('Admin/student entry eagerly preloads exam code');",
   ].join('')]);
 
-  console.log('\n[5/7] Running the complete default regression suite inside the app image...');
+  console.log('\n[5/8] Running the complete default regression suite inside the app image...');
   run(['exec', '-T', '-e', 'DATABASE_URL=', 'app', 'npm', 'test']);
 
-  console.log('\n[6/7] Running PostgreSQL integration tests against the Supabase database service...');
+  console.log('\n[6/8] Running PostgreSQL integration tests against the Supabase database service...');
   run([
     'exec', '-T',
     '-e', 'DATABASE_URL=',
@@ -262,7 +262,13 @@ try {
     'app', 'npm', 'run', 'test:postgres',
   ]);
 
-  console.log('\n[7/7] Running AI Grade end-to-end tests through HTTP, PostgreSQL, and a mock LLM...');
+  console.log('\n[7/8] Running admin password-reset tests through HTTP and PostgreSQL...');
+  run([
+    'exec', '-T',
+    'app', 'node', 'scripts/verify-admin-password-reset-local.mjs',
+  ]);
+
+  console.log('\n[8/8] Running AI Grade end-to-end tests through HTTP, PostgreSQL, and a mock LLM...');
   run([
     'exec', '-T',
     '-e', 'AI_GRADE_TEST_DATABASE_URL=postgresql://postgres:eproc_local_password@database:5432/postgres',
