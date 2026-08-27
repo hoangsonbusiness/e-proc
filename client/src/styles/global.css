@@ -76,7 +76,7 @@
     @apply bg-slate-50 font-semibold text-slate-700 uppercase tracking-wider text-xs;
   }
 
-  tr:hover td {
+  tbody > tr:hover > td {
     @apply bg-slate-50 transition-colors;
   }
 

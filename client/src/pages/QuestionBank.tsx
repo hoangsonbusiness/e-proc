@@ -3,11 +3,9 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
 import { getQuestionCatalogSummaryCached, invalidateQuestionCatalogSummary } from '../services/adminCatalogCache';
 import { Database, ArrowLeft, Upload, FileSpreadsheet, Trash2, Search, Filter, AlertCircle, FileQuestion, ChevronLeft, ChevronRight, Pencil, Plus } from 'lucide-react';
-
-const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
 function QuestionBank() {
   const { isAdmin, userId } = useAuth();
@@ -341,18 +339,11 @@ function QuestionBank() {
             </select>
           </div>
 
-          <div className="flex items-center gap-2 ml-auto">
-            <label className="text-sm font-medium text-slate-600">Show</label>
-            <select
-              value={pageSize}
-              onChange={e => handlePageSizeChange(Number(e.target.value) as PageSize)}
-              className="block w-24 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-sm focus:ring-2 focus:ring-blue-500"
-            >
-              {PAGE_SIZE_OPTIONS.map(s => (
-                <option key={s} value={s}>{s} / page</option>
-              ))}
-            </select>
-          </div>
+          <PageSizeSelect
+            value={pageSize}
+            onChange={handlePageSizeChange}
+            className="ml-auto"
+          />
         </div>
 
         {/* Table */}

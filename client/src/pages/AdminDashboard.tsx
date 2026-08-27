@@ -3,10 +3,8 @@ import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
 import { LayoutDashboard, Users, Clock, UsersRound, FileBarChart, Key, LogOut } from 'lucide-react';
-
-const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-type PageSize = typeof PAGE_SIZE_OPTIONS[number];
 
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
@@ -194,18 +192,7 @@ function AdminDashboard() {
               {stats.totalBatches} total
             </span>
           </h3>
-          <div className="flex items-center gap-2">
-            <label className="text-sm text-slate-500 font-medium">Show:</label>
-            <select
-              value={pageSize}
-              onChange={e => handlePageSizeChange(Number(e.target.value) as PageSize)}
-              className="pl-3 pr-8 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
-            >
-              {PAGE_SIZE_OPTIONS.map(s => (
-                <option key={s} value={s}>{s} rows</option>
-              ))}
-            </select>
-          </div>
+          <PageSizeSelect value={pageSize} onChange={handlePageSizeChange} />
         </div>
 
         <div className="overflow-x-auto">

@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
 import { getQuestionCatalogSummaryCached } from '../services/adminCatalogCache';
 import {
   ArrowLeft,
@@ -17,9 +18,6 @@ import {
   Trash2,
   Users,
 } from 'lucide-react';
-
-const BATCH_PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
-type BatchPageSize = typeof BATCH_PAGE_SIZE_OPTIONS[number];
 
 // Convert "YYYY-MM-DDTHH:mm" (treated as GMT+7 input) → UTC ISO string
 const localToUTC = (localStr: string): string => {
@@ -140,7 +138,7 @@ function BatchManagement() {
   const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
   // Pagination
-  const [batchPageSize, setBatchPageSize] = useState<BatchPageSize>(10);
+  const [batchPageSize, setBatchPageSize] = useState<PageSize>(10);
   const [batchCurrentPage, setBatchCurrentPage] = useState(1);
   // Create form state
   const [blueprintMode, setBlueprintMode] = useState<BlueprintMode>('module');
@@ -609,9 +607,15 @@ function BatchManagement() {
 
   // ─── Batch pagination derived state ──────────────────────────────────────────
 
-  const handleBatchPageSizeChange = (size: BatchPageSize) => {
+  const handleBatchPageSizeChange = (size: PageSize) => {
     setBatchPageSize(size);
     setBatchCurrentPage(1);
+    setEditingBatch(null);
+  };
+
+  const handleBatchPageChange = (page: number) => {
+    setBatchCurrentPage(page);
+    setEditingBatch(null);
   };
 
   const getBatchPageNumbers = () => {
@@ -953,32 +957,6 @@ function BatchManagement() {
 
                   <BlueprintModeToggle value={blueprintMode} onChange={switchBlueprintMode} />
 
-                  <div className="flex flex-wrap justify-end gap-2">
-                    {blueprintMode === 'module' ? (
-                      <button
-                        type="button"
-                        onClick={addBlueprintRow}
-                        disabled={modules.length === 0}
-                        className="btn btn-secondary gap-2"
-                        title={modules.length === 0 ? 'No modules available' : ''}
-                      >
-                        <Plus size={16} />
-                        Add Module
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={addTypeBlueprintRow}
-                        disabled={!nextAvailableModuleType}
-                        className="btn btn-secondary gap-2"
-                        title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
-                      >
-                        <Plus size={16} />
-                        Add Module / Type
-                      </button>
-                    )}
-                  </div>
-
                   {modules.length === 0 && blueprintMode === 'module' ? (
               <p className={catalogLoading ? 'text-slate-500' : 'error'}>{catalogLoading ? 'Loading question catalog...' : 'Please import questions first to configure the blueprint.'}</p>
             ) : typeStats.length === 0 && blueprintMode === 'type' ? (
@@ -1122,6 +1100,32 @@ function BatchManagement() {
                 </div>
               </>
             )}
+
+              <div className="flex flex-wrap justify-end gap-2">
+                {blueprintMode === 'module' ? (
+                  <button
+                    type="button"
+                    onClick={addBlueprintRow}
+                    disabled={modules.length === 0}
+                    className="btn btn-secondary gap-2"
+                    title={modules.length === 0 ? 'No modules available' : ''}
+                  >
+                    <Plus size={16} />
+                    Add Module
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={addTypeBlueprintRow}
+                    disabled={!nextAvailableModuleType}
+                    className="btn btn-secondary gap-2"
+                    title={!nextAvailableModuleType ? 'All combinations have been added' : ''}
+                  >
+                    <Plus size={16} />
+                    Add Module / Type
+                  </button>
+                )}
+              </div>
 
               {/* Validation errors */}
               {(feasibilityErrors.length > 0 || createBlueprintErrors.length > 0) && (
@@ -1273,18 +1277,7 @@ function BatchManagement() {
           <h3 className="text-lg font-bold text-slate-900 m-0 border-none pb-0">
             Batches List <span className="text-slate-400 font-normal ml-1">({batchTotal} total)</span>
           </h3>
-          <div className="flex items-center gap-3 bg-slate-50 px-4 py-2 rounded-lg border border-slate-200">
-            <span className="text-sm font-medium text-slate-600">Show:</span>
-            <select
-              value={batchPageSize}
-              onChange={e => handleBatchPageSizeChange(Number(e.target.value) as BatchPageSize)}
-              className="bg-transparent text-sm font-bold text-slate-800 outline-none cursor-pointer"
-            >
-              {BATCH_PAGE_SIZE_OPTIONS.map(s => (
-                <option key={s} value={s}>{s} / page</option>
-              ))}
-            </select>
-          </div>
+          <PageSizeSelect value={batchPageSize} onChange={handleBatchPageSizeChange} />
         </div>
 
         <div className="overflow-x-auto">
@@ -1303,7 +1296,8 @@ function BatchManagement() {
               {batches.map(batch => {
                 const editable = canEditBatch(batch);
                 return (
-                  <tr key={batch.id} className="hover:bg-slate-50/50 transition-colors">
+                  <Fragment key={batch.id}>
+                  <tr className="hover:bg-slate-50/50 transition-colors">
                     <td className="px-6 py-4 font-mono font-medium text-slate-500">#{batch.id}</td>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
@@ -1372,6 +1366,14 @@ function BatchManagement() {
                       </div>
                     </td>
                   </tr>
+                  {Number(editingBatch?.id) === Number(batch.id) && (
+                    <tr>
+                      <td colSpan={6} className="p-4 bg-slate-50">
+                        {renderEditBatchForm()}
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
               {batches.length === 0 && (
@@ -1399,7 +1401,7 @@ function BatchManagement() {
             </span>
             <div className="flex gap-1">
               <button
-                onClick={() => setBatchCurrentPage(p => Math.max(1, p - 1))}
+                onClick={() => handleBatchPageChange(Math.max(1, batchCurrentPage - 1))}
                 disabled={batchCurrentPage === 1}
                 className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
@@ -1413,7 +1415,7 @@ function BatchManagement() {
                 ) : (
                   <button
                     key={p}
-                    onClick={() => setBatchCurrentPage(p as number)}
+                    onClick={() => handleBatchPageChange(p as number)}
                     className={`px-3 py-1.5 rounded-md text-sm font-bold transition-colors min-w-[32px] ${
                       batchCurrentPage === p 
                         ? 'bg-blue-600 text-white shadow-sm' 
@@ -1425,7 +1427,7 @@ function BatchManagement() {
                 )
               )}
               <button
-                onClick={() => setBatchCurrentPage(p => Math.min(batchTotalPages, p + 1))}
+                onClick={() => handleBatchPageChange(Math.min(batchTotalPages, batchCurrentPage + 1))}
                 disabled={batchCurrentPage === batchTotalPages}
                 className="px-3 py-1.5 rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
@@ -1437,10 +1439,15 @@ function BatchManagement() {
           </div>
         )}
       </div>
+      </div>
+    </div>
+  );
 
-      {/* ── Edit Batch Form ────────────────────────────────────────────── */}
-      {editingBatch && (
-        <div className="bg-blue-50 rounded-2xl shadow-sm border border-blue-200 overflow-hidden mt-8">
+  function renderEditBatchForm() {
+    if (!editingBatch) return null;
+
+    return (
+        <div className="bg-blue-50 rounded-2xl shadow-sm border border-blue-200 overflow-hidden">
           <div className="p-6 border-b border-blue-100 bg-blue-100/50">
             <h3 className="text-lg font-bold text-blue-800 flex items-center gap-2">
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1540,44 +1547,6 @@ function BatchManagement() {
                 </div>
 
                     <BlueprintModeToggle value={editBlueprintMode} onChange={switchEditBlueprintMode} />
-
-                    <div className="flex flex-wrap justify-end gap-2">
-                      {editBlueprintMode === 'module' ? (
-                        <button
-                          type="button"
-                          onClick={() => setEditingBatch({
-                            ...editingBatch,
-                            blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
-                          })}
-                          disabled={modules.length === 0}
-                          className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          title={modules.length === 0 ? 'No modules available' : ''}
-                        >
-                          <Plus size={16} />
-                          Add Module
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!nextAvailableModuleTypeEdit) return;
-                            setEditingBatch({
-                              ...editingBatch,
-                              blueprintByType: [
-                                ...(editingBatch.blueprintByType || []),
-                                { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
-                              ]
-                            });
-                          }}
-                          disabled={!nextAvailableModuleTypeEdit}
-                          className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
-                        >
-                          <Plus size={16} />
-                          Add Module / Type
-                        </button>
-                      )}
-                    </div>
 
                     {editBlueprintMode === 'module' ? (
                 modules.length === 0 ? (
@@ -1768,6 +1737,44 @@ function BatchManagement() {
                 )
               )}
 
+              <div className="flex flex-wrap justify-end gap-2">
+                {editBlueprintMode === 'module' ? (
+                  <button
+                    type="button"
+                    onClick={() => setEditingBatch({
+                      ...editingBatch,
+                      blueprint: [...(editingBatch.blueprint || []), { module: modules[0], easy: 0, medium: 0, hard: 0 }]
+                    })}
+                    disabled={modules.length === 0}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={modules.length === 0 ? 'No modules available' : ''}
+                  >
+                    <Plus size={16} />
+                    Add Module
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!nextAvailableModuleTypeEdit) return;
+                      setEditingBatch({
+                        ...editingBatch,
+                        blueprintByType: [
+                          ...(editingBatch.blueprintByType || []),
+                          { module: nextAvailableModuleTypeEdit.module, type: nextAvailableModuleTypeEdit.type, easy: 0, medium: 0, hard: 0 }
+                        ]
+                      });
+                    }}
+                    disabled={!nextAvailableModuleTypeEdit}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 rounded-lg font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={!nextAvailableModuleTypeEdit ? 'All combinations have been added' : ''}
+                  >
+                    <Plus size={16} />
+                    Add Module / Type
+                  </button>
+                )}
+              </div>
+
               {/* Edit blueprint validation errors */}
               {editBlueprintErrors.length > 0 && (
                 <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl">
@@ -1835,10 +1842,8 @@ function BatchManagement() {
             </div>
           </div>
         </div>
-      )}
-      </div>
-    </div>
-  );
+    );
+  }
 }
 
 export default BatchManagement;

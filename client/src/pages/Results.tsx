@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
+import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
 import { ArrowLeft, Download, Search, AlertCircle, FileText, CheckCircle2, FileJson, X, Settings2, ShieldAlert, Cpu, KeyRound, RotateCcw, ChevronLeft, ChevronRight, Sparkles } from 'lucide-react';
 import DOMPurify from 'dompurify';
 
@@ -21,7 +22,7 @@ function Results() {
   const [aiSettingsVerified, setAiSettingsVerified] = useState(false);
   const [detailLoadingStudentId, setDetailLoadingStudentId] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState<PageSize>(25);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const detailCacheRef = useRef(new Map<number, any>());
@@ -230,24 +231,19 @@ function Results() {
 
       <AdminNav />
 
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
         <h2 className="text-lg font-bold text-slate-800 m-0 border-none pb-0">Student Results ({total})</h2>
         <div className="flex items-center gap-3">
-          <select
+          <PageSizeSelect
             value={pageSize}
-            onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}
-            className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-700"
-          >
-            <option value={10}>10 / page</option>
-            <option value={25}>25 / page</option>
-            <option value={50}>50 / page</option>
-          </select>
+            onChange={size => { setPageSize(size); setCurrentPage(1); }}
+          />
           <button
             onClick={handleExport}
             disabled={total === 0}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg font-medium text-sm hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
+            className="inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 bg-emerald-600 border border-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 hover:border-emerald-700 transition-colors shadow-sm disabled:opacity-50"
           >
-            <Download size={16} />
+            <Download size={14} />
             Export Excel
           </button>
         </div>

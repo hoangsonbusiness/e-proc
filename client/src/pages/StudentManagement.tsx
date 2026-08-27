@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../services/api';
 import AdminNav from '../components/AdminNav';
+import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
 import { Users, ArrowLeft, Upload, FileDown, Trash2, Mail, Hash, Activity, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 
 function StudentManagement() {
@@ -13,7 +14,7 @@ function StudentManagement() {
   const [message, setMessage] = useState('');
   const [isError, setIsError] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
+  const [pageSize, setPageSize] = useState<PageSize>(25);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [search, setSearch] = useState('');
@@ -157,7 +158,7 @@ function StudentManagement() {
 
         <div className="lg:col-span-2 xl:col-span-3 min-w-0">
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="px-5 py-4 border-b border-slate-100 bg-slate-50/50 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
               <h3 className="font-bold text-slate-900 m-0 border-none pb-0 text-base flex items-center gap-2">
                 <Users size={18} className="text-slate-500" />
                 Students List
@@ -166,29 +167,24 @@ function StudentManagement() {
                 </span>
               </h3>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
+              <div className="flex w-full flex-nowrap items-center gap-2 overflow-x-auto pb-1 xl:w-auto xl:overflow-visible xl:pb-0">
+                <div className="relative min-w-44 flex-1 xl:w-52 xl:flex-none">
                   <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
                     value={search}
                     onChange={(event) => { setSearch(event.target.value); setCurrentPage(1); }}
                     placeholder="Search email"
-                    className="pl-9 pr-3 py-1.5 w-52 bg-white border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
+                    className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
-                <select
+                <PageSizeSelect
                   value={pageSize}
-                  onChange={(event) => { setPageSize(Number(event.target.value)); setCurrentPage(1); }}
-                  className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-700"
-                >
-                  <option value={10}>10 / page</option>
-                  <option value={25}>25 / page</option>
-                  <option value={50}>50 / page</option>
-                </select>
+                  onChange={size => { setPageSize(size); setCurrentPage(1); }}
+                />
                 <button
                   onClick={handleExport}
                   disabled={total === 0}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50"
+                  className="inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 bg-emerald-600 border border-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-700 hover:border-emerald-700 transition-colors shadow-sm disabled:opacity-50"
                 >
                   <FileDown size={14} />
                   Export Codes
