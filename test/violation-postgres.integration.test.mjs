@@ -18,8 +18,7 @@ import pg from 'pg';
 import { persistViolation, computeViolationLock } from '../dist/server/services/violationStore.js';
 import { persistViolationIfInProgress } from '../dist/server/services/violationRequestStore.js';
 import {
-  commitInspectedRecordingPart,
-  commitInspectedReservedRecordingPart,
+  acknowledgeReservedRecordingPart,
   finalizeRecordingManifest,
   reserveRecordingUpload,
   recordCompletedRecordingPart,
@@ -322,20 +321,29 @@ test('reset + jti mới tạo namespace S3 khác trên PostgreSQL', { skip: SKIP
   assert.notEqual(second.objectKey, first.objectKey);
 
   await assert.rejects(
-    withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+    withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
       studentId: 1,
       batchId: 1,
       uploadId: second.uploadId,
-      objectKey: first.objectKey,
       byteSize: 100,
-      uploadedAt: new Date().toISOString(),
       useSqlite: false,
+      sessionId: 'session-a',
     })),
-    (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
+    (error) => error?.code === 'NOT_IN_PROGRESS',
   );
+  const completion = await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
+    studentId: 1,
+    batchId: 1,
+    uploadId: second.uploadId,
+    byteSize: 100,
+    useSqlite: false,
+    sessionId: 'session-b',
+    objectKey: first.objectKey,
+  }));
+  assert.equal(completion.objectKey, second.objectKey);
 });
 
-test('reserved HeadObject completion persists only its canonical PostgreSQL key', { skip: SKIP }, async () => {
+test('reserved PUT acknowledgement persists only its canonical PostgreSQL key', { skip: SKIP }, async () => {
   const reservation = await withTransaction((tx) => reserveRecordingUpload(tx, {
     studentId: 1,
     batchId: 1,
@@ -347,29 +355,33 @@ test('reserved HeadObject completion persists only its canonical PostgreSQL key'
     studentId: 1,
     batchId: 1,
     uploadId: 'upload-a',
-    objectKey: reservation.objectKey,
     byteSize: 2048,
-    uploadedAt: new Date().toISOString(),
     useSqlite: false,
+    sessionId: 'session-a',
+    nowMs: Date.now(),
   };
 
-  const first = await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, input));
-  const replay = await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
-    ...input,
-    byteSize: 9999,
-  }));
+  const first = await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, input));
+  const replay = await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, input));
   assert.equal(first.already, false);
   assert.equal(replay.already, true);
   assert.equal(replay.byteSize, 2048);
   assert.equal(replay.objectKey, reservation.objectKey);
 
   await assert.rejects(
-    withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+    withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
       ...input,
-      objectKey: 'recordings/1/1/part999.webm',
+      byteSize: 9999,
     })),
     (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
   );
+
+  const forgedKeyReplay = await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
+    ...input,
+    objectKey: 'recordings/1/1/part999.webm',
+    uploadedAt: '1999-01-01T00:00:00.000Z',
+  }));
+  assert.equal(forgedKeyReplay.objectKey, reservation.objectKey);
   const rows = (await pool.query(`
     SELECT p.part_index, p.object_key, p.byte_size, r.completed_at
     FROM test_violation.recording_parts p
@@ -419,14 +431,13 @@ test('submitted S3 manifest finalize và same-manifest replay đều thành côn
     useSqlite: false,
     nowMs,
   }));
-  await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+  await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
     studentId: 1,
     batchId: 1,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 2048,
-    uploadedAt: new Date(nowMs).toISOString(),
     useSqlite: false,
+    sessionId: 'session-a',
     nowMs,
   }));
   await pool.query(
@@ -479,14 +490,13 @@ test('manifest hoàn chỉnh vẫn không được finalize trước khi submit'
     useSqlite: false,
     nowMs,
   }));
-  await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+  await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
     studentId: 1,
     batchId: 1,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 2048,
-    uploadedAt: new Date(nowMs).toISOString(),
     useSqlite: false,
+    sessionId: 'session-a',
     nowMs,
   }));
 
@@ -518,14 +528,13 @@ test('submitted recording grace vẫn đúng khi Node chạy timezone UTC+7', { 
     useSqlite: false,
     nowMs: nowMs - 120_000,
   }));
-  await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+  await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
     studentId: 1,
     batchId: 1,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 2048,
-    uploadedAt: new Date(nowMs - 90_000).toISOString(),
     useSqlite: false,
+    sessionId: 'session-a',
     nowMs: nowMs - 90_000,
   }));
   await pool.query(
@@ -560,7 +569,7 @@ test('submitted recording grace vẫn đúng khi Node chạy timezone UTC+7', { 
   }
 });
 
-test('recording-complete không thể chèn part mới sau khi manifest đồng thời đã finalize', { skip: SKIP }, async () => {
+test('reserved PUT acknowledgement và finalize serialize trên PostgreSQL thật', { skip: SKIP }, async () => {
   const nowMs = Date.now();
   const reservation = await withTransaction((tx) => reserveRecordingUpload(tx, {
     studentId: 1,
@@ -570,13 +579,20 @@ test('recording-complete không thể chèn part mới sau khi manifest đồng 
     useSqlite: false,
     nowMs,
   }));
-  await withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+  await withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
     studentId: 1,
     batchId: 1,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 2048,
-    uploadedAt: new Date(nowMs).toISOString(),
+    useSqlite: false,
+    sessionId: 'session-a',
+    nowMs,
+  }));
+  const pendingReservation = await withTransaction((tx) => reserveRecordingUpload(tx, {
+    studentId: 1,
+    batchId: 1,
+    uploadId: 'race-pending-upload',
+    sessionId: 'session-a',
     useSqlite: false,
     nowMs,
   }));
@@ -599,35 +615,38 @@ test('recording-complete không thể chèn part mới sau khi manifest đồng 
     withTransaction((tx) => finalizeRecordingManifest(tx, {
       studentId: 1,
       batchId: 1,
-      finalPartIndex: 0,
+      finalPartIndex: 1,
       useSqlite: false,
       nowMs,
     })),
-    withTransaction((tx) => commitInspectedRecordingPart(tx, {
+    withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
       studentId: 1,
       batchId: 1,
-      partIndex: 1,
-      objectKey: 'recordings/1/1/part001.webm',
+      uploadId: pendingReservation.uploadId,
       byteSize: 1024,
-      uploadedAt: new Date(nowMs).toISOString(),
       useSqlite: false,
+      sessionId: 'session-a',
       nowMs,
     })),
   ]);
 
-  assert.ok(
-    finalizeResult.status === 'fulfilled' || completionResult.status === 'fulfilled',
-    'one transaction must win the shared student-row lock',
-  );
+  assert.equal(completionResult.status, 'fulfilled');
+  if (finalizeResult.status === 'rejected') {
+    assert.equal(finalizeResult.reason?.code, 'RECORDING_INCOMPLETE');
+  }
+  await withTransaction((tx) => finalizeRecordingManifest(tx, {
+    studentId: 1,
+    batchId: 1,
+    finalPartIndex: 1,
+    useSqlite: false,
+    nowMs,
+  }));
   const state = (await pool.query(
     `SELECT recording_finalized_at,
             (SELECT COUNT(*)::int FROM test_violation.recording_parts
-             WHERE student_id = 1 AND part_index = 1) AS late_parts
+             WHERE student_id = 1) AS completed_parts
      FROM test_violation.students WHERE id = 1`,
   )).rows[0];
-  assert.equal(
-    Boolean(state.recording_finalized_at) && state.late_parts > 0,
-    false,
-    'a finalized manifest must never coexist with a later committed part',
-  );
+  assert.ok(state.recording_finalized_at);
+  assert.equal(state.completed_parts, 2);
 });

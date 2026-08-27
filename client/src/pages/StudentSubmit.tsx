@@ -4,10 +4,14 @@ import { AlertTriangle, CheckCircle2, LoaderCircle } from 'lucide-react';
 import * as examRecorder from '../services/examRecorder';
 
 type FinalizationState = 'finalizing' | 'complete' | 'failed';
-const ORPHANED_RECOVERY_DELAYS_MS = [500, 1500];
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+export function shouldWarnBeforeRecordingUnload(
+  finalizationState: FinalizationState,
+  retryAvailable: boolean,
+  hasRecoverableBrowserEvidence: boolean,
+): boolean {
+  return finalizationState === 'finalizing'
+    || (finalizationState === 'failed' && retryAvailable && hasRecoverableBrowserEvidence);
 }
 
 function describeFinalizationFailure(error: unknown): string | null {
@@ -20,6 +24,24 @@ function describeFinalizationFailure(error: unknown): string | null {
   return `Failed stage: ${stage}${partIndex === null ? '' : ` (part ${partIndex})`}.`;
 }
 
+function describeRecordingServiceFailure(error: unknown): string | null {
+  let candidate: unknown = error;
+  const visited = new Set<unknown>();
+  while (candidate && typeof candidate === 'object' && !visited.has(candidate)) {
+    visited.add(candidate);
+    const reason = (candidate as { response?: { data?: { reason?: unknown } } })
+      ?.response?.data?.reason;
+    if (reason === 'recording_storage_not_configured' || reason === 'recording_storage_misconfigured') {
+      return 'The recording storage is not configured correctly. Keep this window open and contact the administrator; retry only after the storage configuration has been fixed.';
+    }
+    if (reason === 'recording_upload_blocked') {
+      return 'The browser could not upload the recording after repeated attempts. Keep this window open and check the internet connection and the S3 bucket CORS policy before retrying.';
+    }
+    candidate = (candidate as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 function StudentSubmit() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -27,8 +49,16 @@ function StudentSubmit() {
     recordingFinalizing?: boolean;
     submissionNotice?: string;
   } | null;
-  const shouldFinalizeRecording = Boolean(locationState?.recordingFinalizing);
   const [recordMode] = useState(() => localStorage.getItem('recordMode') || 'none');
+  // Router state is only a navigation hint and can disappear on refresh or a
+  // copied/restored history entry. Keep every authenticated recording attempt on
+  // the recovery path: S3 may have drained all PUT receipts but lost its final
+  // response, while local mode must fail explicitly if its in-memory file handle
+  // was lost instead of falsely reporting completion.
+  const hasStudentSession = Boolean(localStorage.getItem('studentToken'));
+  const shouldFinalizeRecording = Boolean(locationState?.recordingFinalizing)
+    || (recordMode !== 'none' && hasStudentSession)
+    || (recordMode === 's3' && examRecorder.hasStoredUploadAcknowledgements());
   const submissionNotice = typeof locationState?.submissionNotice === 'string'
     ? locationState.submissionNotice
     : null;
@@ -60,55 +90,49 @@ function StudentSubmit() {
     setFinalizationState('finalizing');
     setRetryAvailable(false);
     try {
-      // Deliberately performs status -> reconcile -> status. A lost S3 PUT or
-      // finalize response must be decided by backend/S3 truth, not browser RAM.
-      let status = await examRecorder.recoverRecordingFinalization();
+      // Recovery replays any persisted PUT-2xx acknowledgement, then reconciles
+      // only durable database state. PutObject-only mode never pretends to read S3.
+      const status = await examRecorder.recoverRecordingFinalization();
       if (observation !== observationRef.current) return;
-      // After a reload there is no in-memory uploader. Give an ambiguous final
-      // PUT a short bounded window to become visible in S3, but do not claim that
-      // recording is “still processing” for the entire one-hour backend grace
-      // when no browser process can upload the missing blob anymore.
-      if (status.state === 'processing' && !examRecorder.canRetryFinalization()) {
-        for (const delayMs of ORPHANED_RECOVERY_DELAYS_MS) {
-          await wait(delayMs);
-          if (observation !== observationRef.current) return;
-          status = await examRecorder.recoverRecordingFinalization();
-          if (observation !== observationRef.current) return;
-          if (status.state !== 'processing') break;
-        }
-      }
       if (status.state === 'finalized' || status.state === 'not_required') {
         completeFinalization(observation);
         return;
       }
 
       if (status.state === 'processing') {
+        const recordingServiceFailure = describeRecordingServiceFailure(originalError);
+        if (recordingServiceFailure) {
+          setFailureDetail(recordingServiceFailure);
+          setRetryAvailable(examRecorder.canRetryFinalization());
+          setFinalizationState('failed');
+          return;
+        }
         if (!examRecorder.canRetryFinalization()) {
           setFailureDetail(
-            `S3 is missing sealed recording evidence (${status.completedPartCount}/${status.expectedPartCount} parts confirmed), and this tab no longer has an uploader that can send it.`,
+            `The backend received ${status.completedPartCount}/${status.expectedPartCount} upload acknowledgements, and this tab no longer has recording data that can send the missing part.`,
           );
           setRetryAvailable(false);
           setFinalizationState('failed');
           return;
         }
         setFailureDetail(
-          `Recording recovery is still processing (${status.completedPartCount}/${status.expectedPartCount} parts confirmed).`,
+          `Recording upload is incomplete (${status.completedPartCount}/${status.expectedPartCount} parts acknowledged).`,
         );
         setRetryAvailable(true);
-        setFinalizationState('finalizing');
+        setFinalizationState('failed');
         return;
       }
 
       if (status.state === 'awaiting_seal' && examRecorder.canRetryFinalization()) {
         setFailureDetail('The recording manifest still needs to be sealed. Retry while this tab remains open.');
         setRetryAvailable(true);
-        setFinalizationState('finalizing');
+        setFinalizationState('failed');
         return;
       }
 
       setFailureDetail(
         status.state === 'incomplete'
-          ? `The server confirmed that recording evidence is incomplete (${status.completedPartCount}/${status.expectedPartCount} parts).`
+          ? `The server confirmed that recording upload acknowledgements are incomplete (${status.completedPartCount}/${status.expectedPartCount} parts).`
           : describeFinalizationFailure(originalError)
             || 'The recording manifest was not sealed before its browser data became unavailable.',
       );
@@ -120,13 +144,18 @@ function StudentSubmit() {
       if (examRecorder.isRetryableFinalizationFailure(recoveryError)) {
         setFailureDetail('Recording status could not be confirmed yet. Keep this window open and retry.');
         setRetryAvailable(true);
-        setFinalizationState('finalizing');
+        setFinalizationState('failed');
         return;
       }
-      setFailureDetail(describeFinalizationFailure(originalError)
+      const recordingServiceFailure = describeRecordingServiceFailure(recoveryError)
+        || describeRecordingServiceFailure(originalError);
+      setFailureDetail(recordingServiceFailure
+        || describeFinalizationFailure(originalError)
         || describeFinalizationFailure(recoveryError)
         || 'The recording status could not be recovered.');
-      setRetryAvailable(false);
+      // This branch is terminal by definition. A stored PUT receipt cannot repair
+      // expired auth or a deterministic lifecycle rejection before replay begins.
+      setRetryAvailable(examRecorder.canRetryFinalization());
       setFinalizationState('failed');
     }
   }, [completeFinalization]);
@@ -192,16 +221,21 @@ function StudentSubmit() {
 
   const isFinalizing = finalizationState === 'finalizing';
   const failed = finalizationState === 'failed';
+  const warnBeforeRecordingUnload = shouldWarnBeforeRecordingUnload(
+    finalizationState,
+    retryAvailable,
+    examRecorder.canRetryFinalization() || examRecorder.hasStoredUploadAcknowledgements(),
+  );
 
   useEffect(() => {
-    if (!isFinalizing) return;
+    if (!warnBeforeRecordingUnload) return;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', warnBeforeUnload);
     return () => window.removeEventListener('beforeunload', warnBeforeUnload);
-  }, [isFinalizing]);
+  }, [warnBeforeRecordingUnload]);
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">

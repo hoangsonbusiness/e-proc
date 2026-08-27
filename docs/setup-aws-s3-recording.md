@@ -28,7 +28,7 @@
 2. Bấm **Create bucket**.
 3. **Bucket name**: đặt tên duy nhất toàn cầu, ví dụ `eproc-exam-recordings` (không trùng với bucket của người khác trên AWS).
 4. **AWS Region**: chọn region gần bạn/thí sinh (ví dụ `Asia Pacific (Singapore) ap-southeast-1` hoặc `US East (N. Virginia) us-east-1`). **Ghi nhớ region này.**
-5. **Block Public Access**: **GIỮ NGUYÊN bật tất cả** (Block all public access = ON). Video không cần public — backend upload bằng quyền riêng, admin tải về bằng credential. Không mở public.
+5. **Block Public Access**: **GIỮ NGUYÊN bật tất cả** (Block all public access = ON). Video không cần public — runtime chỉ ký quyền ghi riêng. Nếu admin cần tải video, dùng tài khoản/operator AWS riêng có quyền đọc qua Console; không thêm quyền đọc vào access key PutObject-only của ứng dụng. Không mở public.
 6. Các mục khác để mặc định → **Create bucket**.
 
 ---
@@ -90,7 +90,7 @@ Video tự xóa sau N ngày để không phình dung lượng và giảm rủi r
 
 ## Bước 4 — Tạo IAM user với quyền tối thiểu
 
-Tạo một tài khoản riêng chỉ có quyền **ghi và kiểm tra metadata** trong thư mục `recordings/`. Backend cần `HeadObject` để xác nhận chính blob S3 đã upload; quyền này dùng `s3:GetObject`. `s3:ListBucket` được giới hạn theo prefix để S3 trả đúng trạng thái “object chưa tồn tại” khi reconciliation kiểm tra một reservation còn thiếu. Không cấp quyền xóa.
+Tạo một tài khoản riêng chỉ có quyền **ghi** trong thư mục `recordings/`. Luồng hiện tại chủ đích chỉ dùng `s3:PutObject`; không yêu cầu `s3:GetObject`, `s3:ListBucket`, `HeadObject` hay quyền xóa.
 
 ### 4.1 — Tạo Policy
 
@@ -103,18 +103,8 @@ Tạo một tài khoản riêng chỉ có quyền **ghi và kiểm tra metadata*
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:GetObject"],
+      "Action": "s3:PutObject",
       "Resource": "arn:aws:s3:::TEN-BUCKET/recordings/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::TEN-BUCKET",
-      "Condition": {
-        "StringLike": {
-          "s3:prefix": ["recordings/*"]
-        }
-      }
     }
   ]
 }
@@ -122,7 +112,11 @@ Tạo một tài khoản riêng chỉ có quyền **ghi và kiểm tra metadata*
 
 3. **Next** → đặt tên policy: `eproc-recording-put-only` → **Create policy**.
 
-> Policy chỉ cho phép PUT/HeadObject đối với `recordings/*` và kiểm tra sự tồn tại trong đúng prefix đó. Không có `s3:DeleteObject`, không truy cập object ngoài prefix.
+> Policy chỉ cho phép PUT đối với `recordings/*`. Sau khi trình duyệt nhận HTTP 2xx từ S3, nó lưu một acknowledgement nhỏ trong `sessionStorage` rồi gọi `/recording-complete`; retry callback hoặc reload không upload lại part video. Backend không đọc/list bucket.
+
+> ⚠️ Giới hạn bảo mật của PutObject-only: trạng thái `finalized` có nghĩa là client hợp lệ đã báo rằng nó quan sát PUT 2xx; backend không thể tự chứng minh object tồn tại nếu không được đọc S3. Nếu cần xác minh độc lập mà vẫn không cấp `GetObject/ListBucket`, hãy cấu hình S3 ObjectCreated Event Notification tới worker/queue tin cậy và dùng event đó làm nguồn xác nhận.
+
+> ⚠️ Khi chuyển từ bundle cũ sang protocol acknowledgement mới, phải deploy trong maintenance window, không có bài thi S3 đang chạy. Backend mới trả HTTP 426 cho callback từ bundle cũ để tránh ghi nhận nhầm một PUT mà browser chưa nhận được 2xx. Deploy backend và frontend asset cùng lần, tắt Vercel build cache, kiểm tra bundle mới rồi mới mở ca thi.
 
 ### 4.2 — Tạo User và gắn Policy
 
@@ -184,9 +178,9 @@ Mở **DevTools (F12) → Console / Network** lúc thi và kiểm tra:
 | Triệu chứng | Nguyên nhân thường gặp |
 |---|---|
 | Lỗi **CORS** khi PUT lên S3 | `AllowedOrigins` trong CORS (Bước 2) chưa khớp domain thật. Sửa lại đúng domain. |
-| Request `/exam/recording-url` trả **503** | 4 biến env chưa đặt đúng hoặc chưa redeploy (Bước 5). |
-| Request `/exam/recording-url` trả **500** | Access key sai, hoặc region/bucket sai. Kiểm tra lại Bước 4–5. |
-| PUT lên S3 trả **403 AccessDenied** | IAM policy chưa đúng `Resource` (Bước 4.1) — kiểm tra tên bucket trong ARN. |
+| Request `/exam/recording-url` trả **424** với `recording_storage_not_configured` | 4 biến env chưa đặt đúng hoặc chưa redeploy (Bước 5). |
+| PUT lên S3 trả **403/404** hoặc UI báo `recording_storage_misconfigured` | Access key, region/bucket hoặc quyền `s3:PutObject`/`Resource` sai. Kiểm tra Bước 4–5. |
+| PUT lên S3 trả **403 AccessDenied** | IAM policy chưa đúng `Resource` hoặc thiếu `s3:PutObject` (Bước 4.1). |
 
 ---
 

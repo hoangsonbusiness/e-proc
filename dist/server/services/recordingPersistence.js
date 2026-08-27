@@ -345,8 +345,13 @@ function statusFromSnapshot(snapshot, nowMs) {
         };
     }
     const writable = acceptsRecordingWrites(snapshot.row, nowMs);
+    // Once every exact sealed reservation was acknowledged within the write
+    // window, a lost finalize response must remain recoverable after that window.
+    // Missing parts still become terminal when writes expire.
+    const completeManifest = integrity.valid
+        && integrity.completedPartCount === expectedPartCount;
     return {
-        state: integrity.valid && writable ? 'processing' : 'incomplete',
+        state: integrity.valid && (writable || completeManifest) ? 'processing' : 'incomplete',
         recordMode: snapshot.recordMode,
         expectedPartCount,
         completedPartCount: integrity.completedPartCount,
@@ -452,7 +457,7 @@ export async function sealRecordingManifest(tx, input) {
         })),
     };
 }
-/** Return only sealed, incomplete, server-owned reservations for S3 inspection. */
+/** Legacy diagnostic helper: return sealed, incomplete server-owned reservations. */
 export async function listPendingRecordingReservations(executor, input) {
     // Same transaction contract as getRecordingRecoveryStatus; routes must not
     // call this against the pool-level executor in PostgreSQL.
@@ -475,9 +480,9 @@ export async function listPendingRecordingReservations(executor, input) {
     }));
 }
 /**
- * Re-check lifecycle and persist a HeadObject-verified part while holding the
- * same student-row lock used by manifest finalization. S3 inspection deliberately
- * happens before this helper so no database lock is held across network I/O.
+ * Legacy non-reservation completion helper. Current HTTP recording flow uses
+ * acknowledgeReservedRecordingPart so object identity comes from a durable
+ * reservation and is serialized with manifest finalization.
  */
 export async function commitInspectedRecordingPart(tx, input) {
     const row = (await tx.query(`SELECT s.status, s.submitted_at, s.recording_incomplete, s.recording_finalized_at,
@@ -502,15 +507,24 @@ export async function commitInspectedRecordingPart(tx, input) {
     return recordCompletedRecordingPart(tx, input);
 }
 /**
- * Persist HeadObject-inspected metadata only for the exact upload reservation
- * that produced the S3 key. The reservation and recording_parts marker commit
+ * Persist a browser-observed PUT-2xx acknowledgement only for the exact upload
+ * reservation that produced the S3 key. The canonical key/index still come
+ * from server state, and the reservation + recording_parts marker commit
  * atomically under the same student row lock as manifest finalization.
+ *
+ * A PutObject-only AWS principal cannot independently inspect object existence;
+ * use an S3 ObjectCreated consumer when server-authoritative proof is required.
  */
-export async function commitInspectedReservedRecordingPart(tx, input) {
-    if (!Number.isFinite(input.byteSize) || input.byteSize <= 0) {
-        throw recordingError('INVALID_RECORDING_PART', 'Uploaded recording part is empty');
+export async function acknowledgeReservedRecordingPart(tx, input) {
+    if (typeof input.sessionId !== 'string' || input.sessionId.length === 0) {
+        throw recordingError('NOT_IN_PROGRESS', 'Exam recording session is not active');
     }
-    const row = (await tx.query(`SELECT s.status, s.submitted_at, s.recording_incomplete, s.recording_finalized_at,
+    if (!Number.isSafeInteger(input.byteSize)
+        || input.byteSize <= 0
+        || input.byteSize > 2_147_483_647) {
+        throw recordingError('INVALID_RECORDING_PART', 'Uploaded recording part size is invalid');
+    }
+    const row = (await tx.query(`SELECT s.status, s.active_jti, s.submitted_at, s.recording_incomplete, s.recording_finalized_at,
             s.attempt_record_mode,
             b.record_mode, b.record_enabled
      FROM students s JOIN batches b ON b.id = s.batch_id
@@ -522,17 +536,21 @@ export async function commitInspectedReservedRecordingPart(tx, input) {
     if (recordMode !== 's3') {
         throw recordingError('BAD_RECORD_MODE', 'S3 recording is not enabled');
     }
+    if (row.active_jti !== input.sessionId) {
+        throw recordingError('NOT_IN_PROGRESS', 'Exam recording session is no longer active');
+    }
     const reservation = await findRecordingUploadReservation(tx, input.studentId, input.uploadId);
     if (!reservation || reservation.batchId !== input.batchId) {
         throw recordingError('RESERVATION_NOT_FOUND', 'Recording upload reservation was not found');
     }
-    if (reservation.objectKey !== input.objectKey) {
-        throw recordingError('RECORDING_RESERVATION_CONFLICT', 'Inspected S3 key does not match the recording upload reservation');
-    }
+    const acknowledgedAt = new Date(input.nowMs ?? Date.now()).toISOString();
     if (reservation.completed) {
+        if (Number(reservation.byteSize) !== input.byteSize) {
+            throw recordingError('RECORDING_RESERVATION_CONFLICT', 'Recording upload acknowledgement conflicts with completed metadata');
+        }
         await tx.query(`UPDATE recording_upload_reservations
        SET completed_at = COALESCE(completed_at, ?)
-       WHERE student_id = ? AND upload_id = ?`, [input.uploadedAt, input.studentId, input.uploadId]);
+       WHERE student_id = ? AND upload_id = ?`, [acknowledgedAt, input.studentId, input.uploadId]);
         return {
             uploadId: reservation.uploadId,
             partIndex: reservation.partIndex,
@@ -550,14 +568,14 @@ export async function commitInspectedReservedRecordingPart(tx, input) {
         partIndex: reservation.partIndex,
         objectKey: reservation.objectKey,
         byteSize: input.byteSize,
-        uploadedAt: input.uploadedAt,
+        uploadedAt: acknowledgedAt,
     });
     if (completion.objectKey !== reservation.objectKey) {
         throw recordingError('RECORDING_RESERVATION_CONFLICT', 'Reserved recording part conflicts with existing completed metadata');
     }
     await tx.query(`UPDATE recording_upload_reservations
      SET completed_at = COALESCE(completed_at, ?)
-     WHERE student_id = ? AND upload_id = ?`, [input.uploadedAt, input.studentId, input.uploadId]);
+     WHERE student_id = ? AND upload_id = ?`, [acknowledgedAt, input.studentId, input.uploadId]);
     return {
         uploadId: reservation.uploadId,
         partIndex: reservation.partIndex,
@@ -611,9 +629,10 @@ export function decideRecordingFinalization(row, finalPartIndex, nowMs) {
         };
     }
     // First-time finalization is legal only after the authoritative answer
-    // submission transaction marked the S3 recording incomplete. Allowing this
-    // while in_progress would let a client seal a truncated manifest early.
-    if (!isWithinSubmittedRecordingGrace(row, nowMs)) {
+    // submission transaction marked the S3 recording incomplete. The write grace
+    // limits new acknowledgements, not DB-only finalization of an already-complete
+    // exact manifest; otherwise a lost finalize response could strand it forever.
+    if (row.status !== 'submitted' || !row.recording_incomplete || !row.submitted_at) {
         return {
             action: 'reject',
             code: 'NOT_IN_PROGRESS',

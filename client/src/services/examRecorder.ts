@@ -48,6 +48,7 @@ interface PendingPart {
   blob: Blob;
   reservationPromise?: Promise<void>;
   serverCompleted?: boolean;
+  putAcknowledgement?: UploadAcknowledgement;
 }
 
 interface BufferedPartIdentity {
@@ -63,6 +64,14 @@ interface UploadTarget {
   url?: string;
 }
 
+interface UploadAcknowledgement {
+  uploadId: string;
+  partIndex: number;
+  byteSize: number;
+}
+
+const UPLOAD_ACK_STORAGE_PREFIX = 'examRecordingPutAcknowledgements:v1';
+
 class HttpStatusError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -74,6 +83,7 @@ class RecordingFinalizationError extends Error {
   readonly stage: RecordingFailureStage;
   readonly partIndex?: number;
   readonly retryable: boolean;
+  readonly cause: unknown;
 
   constructor(stage: RecordingFailureStage, cause: unknown, partIndex?: number, retryable = true) {
     const detail = cause instanceof Error ? cause.message : String(cause);
@@ -82,6 +92,7 @@ class RecordingFinalizationError extends Error {
     this.stage = stage;
     this.partIndex = partIndex;
     this.retryable = retryable;
+    this.cause = cause;
   }
 }
 
@@ -128,6 +139,103 @@ let submitHandoffPromise: Promise<void> | null = null;
 let resolveSubmitHandoff: (() => void) | null = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+function uploadAcknowledgementStorageKey(): string {
+  let scope = 'current';
+  try {
+    // The JWT signature tail changes for every /verify (fresh jti), so receipts
+    // from a reset/next attempt cannot be replayed into the current attempt.
+    const token = localStorage.getItem('studentToken');
+    const tokenTail = token?.slice(-32).replace(/[^A-Za-z0-9_-]/g, '');
+    if (tokenTail) scope = tokenTail;
+  } catch {
+    // Storage can be unavailable in hardened/private browser contexts. In-memory
+    // acknowledgement still prevents a duplicate PUT while this module lives.
+  }
+  return `${UPLOAD_ACK_STORAGE_PREFIX}:${scope}`;
+}
+
+function recordingSessionStorage(): Storage | null {
+  try {
+    return typeof sessionStorage === 'undefined' ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isValidUploadAcknowledgement(value: unknown): value is UploadAcknowledgement {
+  const candidate = value as Partial<UploadAcknowledgement> | null;
+  return Boolean(
+    candidate
+    && typeof candidate.uploadId === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/.test(candidate.uploadId)
+    && Number.isInteger(candidate.partIndex)
+    && Number(candidate.partIndex) >= 0
+    && Number(candidate.partIndex) <= 1000
+    && Number.isSafeInteger(candidate.byteSize)
+    && Number(candidate.byteSize) > 0
+    && Number(candidate.byteSize) <= 2_147_483_647
+  );
+}
+
+function readStoredUploadAcknowledgements(): UploadAcknowledgement[] {
+  const storage = recordingSessionStorage();
+  if (!storage) return [];
+  const key = uploadAcknowledgementStorageKey();
+  try {
+    const raw = storage.getItem(key);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error('Invalid recording PUT acknowledgement store');
+    const valid = parsed.filter(isValidUploadAcknowledgement).slice(0, 1001);
+    if (valid.length !== parsed.length) {
+      if (valid.length === 0) storage.removeItem(key);
+      else storage.setItem(key, JSON.stringify(valid));
+    }
+    return valid;
+  } catch {
+    try {
+      storage.removeItem(key);
+    } catch {
+      // Some hardened browser contexts expose sessionStorage but throw for every
+      // operation. Treat it as unavailable; in-memory state remains usable.
+    }
+    return [];
+  }
+}
+
+function writeStoredUploadAcknowledgements(receipts: UploadAcknowledgement[]): void {
+  const storage = recordingSessionStorage();
+  if (!storage) return;
+  const key = uploadAcknowledgementStorageKey();
+  try {
+    if (receipts.length === 0) storage.removeItem(key);
+    else storage.setItem(key, JSON.stringify(receipts));
+  } catch {
+    // Best effort only. The blob and in-memory receipt remain available.
+  }
+}
+
+function rememberUploadAcknowledgement(receipt: UploadAcknowledgement): void {
+  const receipts = readStoredUploadAcknowledgements()
+    .filter((candidate) => candidate.uploadId !== receipt.uploadId);
+  receipts.push(receipt);
+  writeStoredUploadAcknowledgements(receipts);
+}
+
+function forgetUploadAcknowledgement(uploadId: string): void {
+  writeStoredUploadAcknowledgements(
+    readStoredUploadAcknowledgements().filter((candidate) => candidate.uploadId !== uploadId),
+  );
+}
+
+function clearStoredUploadAcknowledgements(): void {
+  writeStoredUploadAcknowledgements([]);
+}
+
+export function hasStoredUploadAcknowledgements(): boolean {
+  return readStoredUploadAcknowledgements().length > 0;
+}
 
 /**
  * [#6] Chỉ cho phép Chromium desktop (Chrome/Edge). Tài liệu nói chặn Safari/Firefox
@@ -274,9 +382,50 @@ function getHttpStatus(error: unknown): number | undefined {
   return typeof responseStatus === 'number' ? responseStatus : undefined;
 }
 
+const NON_RETRYABLE_RECORDING_REASONS = new Set([
+  'recording_storage_not_configured',
+  'recording_storage_misconfigured',
+  'recording_upload_blocked',
+]);
+
+function getResponseReason(error: unknown): string | undefined {
+  const reason = (error as { response?: { data?: { reason?: unknown } } } | null)
+    ?.response?.data?.reason;
+  return typeof reason === 'string' ? reason : undefined;
+}
+
+function recordingPipelineError(
+  cause: unknown,
+  reason: 'recording_storage_misconfigured' | 'recording_upload_blocked',
+  message: string,
+): Error {
+  return Object.assign(
+    new Error(message),
+    {
+      cause,
+      response: {
+        status: 424,
+        data: { reason },
+      },
+    },
+  );
+}
+
+function requiresRecordingStorageAdminRepair(error: unknown): boolean {
+  let candidate: unknown = error;
+  const visited = new Set<unknown>();
+  while (candidate && typeof candidate === 'object' && !visited.has(candidate)) {
+    visited.add(candidate);
+    if (NON_RETRYABLE_RECORDING_REASONS.has(getResponseReason(candidate) || '')) return true;
+    candidate = (candidate as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 function isRetryable(error: unknown): boolean {
   const explicit = (error as { retryable?: unknown } | null)?.retryable;
   if (typeof explicit === 'boolean') return explicit;
+  if (NON_RETRYABLE_RECORDING_REASONS.has(getResponseReason(error) || '')) return false;
   const status = getHttpStatus(error);
   if (status === undefined) return true; // timeout, offline, DNS, browser/network error
   if (status === 409) {
@@ -347,13 +496,40 @@ async function retryStage<T>(
     }
   }
 
-  // An expired/invalid presigned URL cannot be repaired by retrying the same URL,
-  // but a manual whole-pipeline retry can request a fresh URL and recover safely.
+  // requestUploadTarget() obtains this URL immediately before PUT, so a 403/404
+  // means the freshly signed upload path is rejected (IAM/bucket/region), not a
+  // stale URL. Stop automatic retry, retain the blob, and allow one explicit
+  // whole-pipeline retry after an administrator repairs the configuration.
   const status = getHttpStatus(lastError);
-  const wholePipelineRetryable = stage === 'upload' && (status === 403 || status === 404)
-    ? true
-    : isRetryable(lastError);
-  throw asFinalizationError(stage, lastError, partIndex, wholePipelineRetryable);
+  if (stage === 'upload' && (status === 403 || status === 404)) {
+    throw asFinalizationError(
+      stage,
+      recordingPipelineError(
+        lastError,
+        'recording_storage_misconfigured',
+        'A freshly signed S3 upload URL was rejected by the recording bucket',
+      ),
+      partIndex,
+      false,
+    );
+  }
+  if (stage === 'upload') {
+    // Browsers deliberately hide CORS failures behind a status-less TypeError,
+    // which is indistinguishable from a network outage. After the bounded retry
+    // budget is exhausted, stop the spinner and surface both actionable causes.
+    // The original blob stays in pendingParts for a later explicit retry.
+    throw asFinalizationError(
+      stage,
+      recordingPipelineError(
+        lastError,
+        'recording_upload_blocked',
+        'The browser could not upload the recording after repeated attempts',
+      ),
+      partIndex,
+      false,
+    );
+  }
+  throw asFinalizationError(stage, lastError, partIndex, isRetryable(lastError));
 }
 
 // ── Mode S3: upload phần ───────────────────────────────────────────────────
@@ -413,7 +589,7 @@ async function requestUploadTarget(
   }
 }
 
-async function putPart(url: string, part: PendingPart): Promise<void> {
+async function putPart(url: string, part: PendingPart): Promise<UploadAcknowledgement> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), S3_PUT_TIMEOUT_MS);
   try {
@@ -426,6 +602,11 @@ async function putPart(url: string, part: PendingPart): Promise<void> {
     if (!putRes.ok) {
       throw new HttpStatusError(`S3 PUT returned HTTP ${putRes.status}`, putRes.status);
     }
+    return {
+      uploadId: part.uploadId,
+      partIndex: part.partIndex,
+      byteSize: part.blob.size,
+    };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(`Recording part ${part.partIndex} S3 PUT timed out after ${S3_PUT_TIMEOUT_MS}ms`);
@@ -436,14 +617,15 @@ async function putPart(url: string, part: PendingPart): Promise<void> {
   }
 }
 
-function validateCompletionResponse(part: PendingPart, completion: unknown): void {
+function validateCompletionResponse(receipt: UploadAcknowledgement, completion: unknown): void {
   const data = (completion as {
-    data?: { success?: unknown; uploadId?: unknown; partIndex?: unknown };
+    data?: { success?: unknown; uploadId?: unknown; partIndex?: unknown; byteSize?: unknown };
   } | null)?.data;
   if (
     data?.success !== true
-    || data.uploadId !== part.uploadId
-    || Number(data.partIndex) !== part.partIndex
+    || data.uploadId !== receipt.uploadId
+    || Number(data.partIndex) !== receipt.partIndex
+    || Number(data.byteSize) !== receipt.byteSize
   ) {
     throw Object.assign(
       new Error('Recording completion identity could not be confirmed'),
@@ -452,13 +634,13 @@ function validateCompletionResponse(part: PendingPart, completion: unknown): voi
   }
 }
 
-async function confirmPartCompletion(part: PendingPart): Promise<void> {
+async function confirmPartCompletion(receipt: UploadAcknowledgement): Promise<void> {
   const completion = await withTimeout(
-    studentApi.completeRecordingPart(part.partIndex, part.blob.size, part.uploadId),
+    studentApi.completeRecordingPart(receipt.partIndex, receipt.byteSize, receipt.uploadId),
     API_STAGE_TIMEOUT_MS,
-    `part ${part.partIndex} completion`,
+    `part ${receipt.partIndex} completion`,
   );
-  validateCompletionResponse(part, completion);
+  validateCompletionResponse(receipt, completion);
 }
 
 /** Upload một part theo các stage độc lập. Blob chỉ được bỏ sau complete thành công. */
@@ -468,32 +650,46 @@ async function uploadPart(part: PendingPart): Promise<void> {
   // upload asks for a fresh URL so a queued 5-minute part cannot inherit an
   // expired signature.
   await part.reservationPromise;
-  if (part.serverCompleted) return;
+  if (part.serverCompleted) {
+    forgetUploadAcknowledgement(part.uploadId);
+    return;
+  }
 
-  const target = await retryStage('presign', part.partIndex, () => requestUploadTarget(part));
-  if (target.alreadyComplete) return;
-
-  const url = target.url;
-  if (!url) throw new Error(`Recording part ${part.partIndex} has no upload URL`);
-  let confirmedDuringAmbiguousPut = false;
-  await retryStage('upload', part.partIndex, async () => {
-    try {
-      await putPart(url, part);
-    } catch (uploadError) {
-      // Probe after every ambiguous PUT failure, before uploading the same 22 MB
-      // blob again. HeadObject through the authenticated completion endpoint is
-      // the authority when S3 stored the body but the browser lost the response.
-      try {
-        await confirmPartCompletion(part);
-        confirmedDuringAmbiguousPut = true;
-        return;
-      } catch {
-        throw uploadError;
-      }
+  let acknowledgement = part.putAcknowledgement
+    || readStoredUploadAcknowledgements().find((receipt) => receipt.uploadId === part.uploadId);
+  if (!acknowledgement) {
+    const target = await retryStage('presign', part.partIndex, () => requestUploadTarget(part));
+    if (target.alreadyComplete) {
+      forgetUploadAcknowledgement(part.uploadId);
+      return;
     }
-  });
-  if (confirmedDuringAmbiguousPut) return;
-  await retryStage('complete', part.partIndex, () => confirmPartCompletion(part));
+
+    const url = target.url;
+    if (!url) throw new Error(`Recording part ${part.partIndex} has no upload URL`);
+    // A thrown/aborted fetch is ambiguous and MUST NOT create a completion
+    // acknowledgement. Re-PUT the same blob/key until the browser observes a
+    // 2xx response. This is the only safe rule without HeadObject.
+    acknowledgement = await retryStage('upload', part.partIndex, () => putPart(url, part));
+    part.putAcknowledgement = acknowledgement;
+    // Persist before calling the backend so a reload between PUT 2xx and the
+    // completion response can replay the tiny acknowledgement without the blob.
+    rememberUploadAcknowledgement(acknowledgement);
+  } else {
+    part.partIndex = acknowledgement.partIndex;
+    part.putAcknowledgement = acknowledgement;
+  }
+
+  try {
+    await retryStage('complete', acknowledgement.partIndex, () => confirmPartCompletion(acknowledgement));
+    forgetUploadAcknowledgement(acknowledgement.uploadId);
+    part.putAcknowledgement = undefined;
+  } catch (error) {
+    if (!isRetryable(error)) {
+      forgetUploadAcknowledgement(acknowledgement.uploadId);
+      part.putAcknowledgement = undefined;
+    }
+    throw error;
+  }
 }
 
 function normalizeRecordingStatus(data: unknown): RecordingStatusResponse {
@@ -610,29 +806,108 @@ async function sealRecordingManifest(): Promise<RecordingStatusResponse> {
   return status;
 }
 
+async function replayStoredUploadAcknowledgements(): Promise<void> {
+  for (const receipt of readStoredUploadAcknowledgements()) {
+    try {
+      await retryStage('complete', receipt.partIndex, () => confirmPartCompletion(receipt));
+      forgetUploadAcknowledgement(receipt.uploadId);
+    } catch (error) {
+      // A deterministic rejection (revoked attempt, missing/conflicting
+      // reservation, invalid protocol identity) cannot become valid by clicking
+      // Retry again. Remove only that terminal receipt so the submit page does
+      // not offer an endless no-op retry; transient failures remain replayable.
+      if (!isRetryable(error)) forgetUploadAcknowledgement(receipt.uploadId);
+      throw error;
+    }
+  }
+}
+
 /**
- * Recover server truth after a lost browser Promise/response. A non-terminal
- * state is always reconciled through S3 HeadObject and then read back once more
- * before the UI may classify the recording as incomplete.
+ * Recover durable backend state after a lost browser Promise/response. In a
+ * PutObject-only deployment, the only recoverable post-reload evidence is a
+ * PUT-2xx acknowledgement stored before the completion callback. Reconciliation
+ * is database-only and never claims that it inspected S3.
  */
 export async function recoverRecordingFinalization(): Promise<RecordingStatusResponse> {
-  const initial = normalizeRecordingStatus((await withTimeout(
-    studentApi.getRecordingStatus(),
-    API_STAGE_TIMEOUT_MS,
-    'status check',
-  )).data);
-  if (initial.state === 'finalized' || initial.state === 'not_required') return initial;
+  let initial: RecordingStatusResponse;
+  try {
+    initial = normalizeRecordingStatus((await withTimeout(
+      studentApi.getRecordingStatus(),
+      API_STAGE_TIMEOUT_MS,
+      'status check',
+    )).data);
+  } catch (error) {
+    // Expired/revoked auth and deterministic lifecycle rejections cannot be
+    // repaired by replaying a PUT receipt. Quarantine the attempt-scoped receipt
+    // so refresh/click cannot loop forever on the same terminal status failure.
+    if (!isRetryable(error)) clearStoredUploadAcknowledgements();
+    throw error;
+  }
+  if (initial.state === 'finalized' || initial.state === 'not_required') {
+    clearStoredUploadAcknowledgements();
+    return initial;
+  }
 
-  await withTimeout(
-    studentApi.reconcileRecording(),
-    API_STAGE_TIMEOUT_MS,
-    'reconciliation',
-  );
-  return normalizeRecordingStatus((await withTimeout(
-    studentApi.getRecordingStatus(),
-    API_STAGE_TIMEOUT_MS,
-    'status confirmation',
-  )).data);
+  if (hasStoredUploadAcknowledgements()) {
+    await replayStoredUploadAcknowledgements();
+    initial = normalizeRecordingStatus((await withTimeout(
+      studentApi.getRecordingStatus(),
+      API_STAGE_TIMEOUT_MS,
+      'acknowledgement status check',
+    )).data);
+    if (initial.state === 'finalized' || initial.state === 'not_required') {
+      clearStoredUploadAcknowledgements();
+      return initial;
+    }
+  }
+
+  // awaiting_seal needs the in-memory manifest; incomplete is already terminal.
+  // DB-only finalization has useful work only when every exact sealed-manifest
+  // reservation has already been acknowledged. It cannot recover a missing PUT.
+  if (
+    initial.state !== 'processing'
+    || initial.expectedPartCount <= 0
+    || initial.completedPartCount !== initial.expectedPartCount
+  ) return initial;
+
+  try {
+    // The response is already a transactionally read-back database status. Do
+    // not discard a successful finalize result because a redundant GET is lost.
+    const reconciled = normalizeRecordingStatus((await withTimeout(
+      studentApi.reconcileRecording(),
+      API_STAGE_TIMEOUT_MS,
+      'reconciliation',
+    )).data);
+    if (reconciled.state === 'finalized' || reconciled.state === 'not_required') {
+      clearStoredUploadAcknowledgements();
+    }
+    return reconciled;
+  } catch (reconciliationError) {
+    if (!isRetryable(reconciliationError)) throw reconciliationError;
+    // The reconcile request may have committed/finalized before its response was
+    // lost. One status probe distinguishes that case from a real outage. If this
+    // probe also fails, preserve the original stage error for retry reporting.
+    try {
+      const confirmed = normalizeRecordingStatus((await withTimeout(
+        studentApi.getRecordingStatus(),
+        API_STAGE_TIMEOUT_MS,
+        'status confirmation',
+      )).data);
+      if (
+        confirmed.state === 'processing'
+        && confirmed.expectedPartCount > 0
+        && confirmed.completedPartCount === confirmed.expectedPartCount
+      ) {
+        // The retryable DB-only finalize did not commit. Returning N/N as an
+        // ordinary processing state would make a reloaded tab claim that a part
+        // is missing and hide Retry even though no browser evidence is needed.
+        throw reconciliationError;
+      }
+      return confirmed;
+    } catch {
+      throw reconciliationError;
+    }
+  }
 }
 
 // ── Mode Local: nén + mã hóa AES rồi ghi file .zip ─────────────────────────
@@ -973,7 +1248,10 @@ async function performEvidenceFinalization(): Promise<void> {
     localPassword = null;
   } catch (error) {
     lifecycle = 'failed';
-    lastFailureRetryable = isRetryable(error);
+    // A configuration failure must not spin through automatic backoff, but the
+    // captured blobs remain in this tab and can be retried once an administrator
+    // repairs IAM/env. Keep that explicit manual recovery path available.
+    lastFailureRetryable = isRetryable(error) || requiresRecordingStorageAdminRepair(error);
     throw error;
   }
 }

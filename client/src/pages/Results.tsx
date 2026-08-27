@@ -289,8 +289,8 @@ function Results() {
                         {batch?.record_mode === 's3' && (
                           <div className={`mt-1.5 text-xs font-semibold ${r.recording_part_count ? 'text-emerald-700' : 'text-red-700'}`}>
                             {r.recording_part_count
-                              ? `Recording evidence: ${r.recording_part_count} part(s), ${Number(r.recording_total_bytes || 0).toLocaleString()} bytes`
-                              : 'Recording evidence missing'}
+                              ? `Recording uploads acknowledged: ${r.recording_part_count} part(s), ${Number(r.recording_total_bytes || 0).toLocaleString()} bytes`
+                              : 'Recording upload acknowledgement missing'}
                           </div>
                         )}
                       </td>

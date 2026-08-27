@@ -96,7 +96,7 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `exam_questions`
   - `violations`
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
-  - `recording_parts` (S3 recording-part metadata verified by backend `HeadObject`; unique per student + part index)
+  - `recording_parts` (S3 part metadata acknowledged after the browser observes PUT 2xx; unique per student + part index)
   - `exam_sessions` (anti-cheat session tracking — one row per `(student_id, jti, ip)`; `last_seen` upserted on each exam request; used to detect concurrent multi-client/multi-IP use — see Concurrent-session detection section)
   - `user_ai_settings` (one encrypted, verified LLM connection per admin/mod)
   - `admin_users`
@@ -270,7 +270,8 @@ Architecture (presigned URL — sidesteps Vercel serverless payload/timeout limi
 ```
 Client records → every 5 min cuts a part → asks backend for a presigned PUT URL
   → PUTs the blob straight to S3 → calls recording-complete
-  → backend verifies S3 ContentLength with HeadObject and persists recording_parts metadata
+  → browser persists a small PUT-2xx acknowledgement and calls recording-complete
+  → backend atomically persists canonical reservation metadata
   → retry-queue on failure (does not block the exam)
 S3 key: recordings/{batchId}/{studentId}/session-{hash(activeJti)}/part{NNN}.webm
   (batchId/studentId/jti are authenticated server state, not client-selected)
@@ -278,7 +279,7 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 ```
 
 - **Backend:** `POST /api/student/exam/recording-url` (`studentAuthMiddleware`) returns a presigned PUT URL from `src/server/services/s3.ts` (`createRecordingUploadUrl`). AWS credentials live only in backend env; the URL expires in 15 min. The S3 key is built from `batchId`/`studentId` plus a hash of the backend-issued active `jti`, so stale URLs from a reset/revoked attempt cannot overwrite a later attempt. Returns `503` if S3 env is not configured.
-- **Completion verification:** after a successful PUT, the client calls `POST /api/student/exam/recording-complete`. The backend loads the durable upload reservation, calls S3 `HeadObject` for its exact canonical key, rejects empty/missing/conflicting objects, and atomically inserts `recording_parts(student_id, batch_id, part_index, object_key, byte_size, uploaded_at)` plus the reservation completion marker. The Results page reports part count/total bytes and warns when S3 evidence is missing.
+- **PutObject-only completion:** after observing PUT 2xx, the client persists `{uploadId, partIndex, byteSize}` in attempt-scoped `sessionStorage` and calls `POST /api/student/exam/recording-complete`. The backend derives the key/index from the durable reservation and atomically inserts `recording_parts(...)` plus its completion marker. Lost callback/reload replays the acknowledgement without another video PUT; failed/ambiguous PUT is never acknowledged. `/recording-reconcile` is database-only. This is operational client acknowledgement, not independent S3 proof; use an S3 ObjectCreated consumer if server-authoritative verification is required.
 - **Frontend module** `client/src/services/examRecorder.ts` (singleton **outside React** — survives the `/confirm` → `/exam` navigation; handles **both** `s3` and `local` modes):
   - **Full-screen only:** `getDisplayMedia({ video: { displaySurface: 'monitor' } })`; a shared tab/window (`displaySurface !== 'monitor'`) is refused. Requires **Chrome/Edge + HTTPS**; Safari/Firefox blocked at confirm.
   - **Config:** VP9 (fallback VP8), 5 fps, ~600 kbps → ~22 MB per **5-minute part**. In `s3` mode each part asks for a presigned URL then `fetch(url, { method: 'PUT', body: blob })` straight to S3, with a **retry queue** (exponential backoff, max 5 attempts) in the background. In `local` mode each part is zipped+encrypted and written to the chosen folder.
@@ -286,7 +287,7 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Lifecycle:** `requestSetup(recordMode)` runs inside the Start click **before** `requestFullscreen()`; `/confirm` then captures the fullscreen width baseline. After the server confirms the attempt is running, the current 5-minute interval gets an early durable upload reservation. On submit, answers commit first; `stopAndSave()` captures the final bytes and releases browser sharing before S3 I/O, seals the exact upload-ID manifest, then `/submit` observes upload/finalize and can recover through status/reconcile. Any unfinished S3 manifest is marked `recording_incomplete=true` and receives a 60-minute recording-only grace window while answers/questions stay closed.
 - **`recording_stopped` violation:** `track.onended` (candidate clicks "Stop sharing") → `handleViolation('recording_stopped')`. Backend locks on the **first** occurrence (`type === 'recording_stopped'` short-circuits the `>= 2` rule in `student.ts`). Registered via `examRecorder.setOnRecordingStopped()` after `/exam` mounts; if the track already ended before registration, the callback fires immediately. Applies to both `local` and `s3`.
 - **Resume-after-reload:** F5 resets the singleton, so if the candidate re-enters `/exam` while running but `examRecorder.isActive()` is false, a blocking modal (`handleResumeRecording`) forces them to re-share the screen. For `local`, the `dirHandle` does **not** survive F5, so the candidate must re-pick the folder; the password is re-read from `localStorage.recordingPassword` (same value the server issued, so pre- and post-reload zip parts share one password).
-- **Env required for `s3` (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM needs `s3:PutObject` for upload plus `s3:GetObject` on `recordings/*` so backend `HeadObject` verification succeeds. `local` mode needs none of these.
+- **Env required for `s3` (set on Vercel):** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET`. The bucket needs a **CORS policy** allowing `PUT` from the deployment origin and a **Lifecycle rule** to auto-delete. IAM needs only `s3:PutObject` on `recordings/*`; no `s3:GetObject`/`s3:ListBucket` is required. `local` mode needs none of these.
 - **macOS caveat:** the first `getDisplayMedia` requires granting Screen Recording permission to Chrome in System Settings **and restarting Chrome**. Because exams are time-gated, candidates should do this during a **practice exam** beforehand, not on exam day.
 
 ##### `local` mode specifics (added 2026-07-30)
@@ -401,7 +402,7 @@ Batches support two blueprint formats for question assignment:
   - resulting counts in admin results / violations data
   - on real macOS Chrome/Edge: Command/Option DevTools/View Source/Print shortcuts, screenshot best-effort telemetry, Mission Control, Spaces, Split View, Hot Corners, external display and Sidecar behavior
   - confirm that `suspicious_paste`, `rapid_text_insertion`, `multiple_display_detected`, and counter records for `concurrent_session` remain forensic-only and never cause counter-based auto-lock
-  - for S3 mode: verify PUT → `/exam/recording-complete` → S3 `HeadObject` → `recording_parts` row, plus the Results evidence summary
+  - for S3 mode: verify observed PUT 2xx → persisted acknowledgement → `/exam/recording-complete` → DB-only finalize, including callback/reload replay without another PUT
 - For student auth changes, verify the full auth flow:
   - `POST /student/verify` returns `student_token`
   - `localStorage.studentToken` is set after confirm page
@@ -437,7 +438,7 @@ Batches support two blueprint formats for question assignment:
 - Server-owned timeout/violation/concurrent-session submission can only commit answers already received by the backend. Browser-only dirty text is not attached to those server-side triggers and can still be lost; HTTP autosave cannot guarantee zero-loss before delivery.
 - Assigned attempts reference mutable `question_bank` rows. Manual AI Grade reads current question/rubric values when the button is clicked, and quiz finalization reads current correct answers/score at submit; there is no immutable question version snapshot.
 - Manual submit, timeout, violation, recording-stop, concurrent-session, and long-disconnect paths converge on an idempotent transactional submit. `students.submitted_at` and `submit_reason` record the outcome. Essay grading is a separate creator-owned manual action; batch grading skips completed students, while targeted regrade preserves the old published result unless the replacement fully validates.
-- S3 recording remains direct browser-to-S3 with 5-minute parts. Answer submission completes first; `stopAndSave()` releases screen sharing, seals the exact upload-ID manifest, drains outstanding uploads, and finalizes. `/submit` can recover server truth through status/reconcile; the backend only finalizes when every contiguous sealed reservation has a matching HeadObject-verified part. Any unfinished S3 manifest sets `recording_incomplete=true` and receives a 60-minute recording-only grace window; answers/questions remain blocked.
+- S3 recording remains direct browser-to-S3 with 5-minute parts. Answer submission completes first; `stopAndSave()` releases screen sharing, seals the exact upload-ID manifest, drains outstanding uploads, and finalizes. `/submit` replays persisted PUT-2xx acknowledgements; status/reconcile use only durable database rows and finalize only a contiguous sealed manifest. Any unfinished S3 manifest sets `recording_incomplete=true` and receives a 60-minute recording-only grace window; answers/questions remain blocked.
 - Newly imported students receive an 8-character access code generated with `crypto.randomInt`; the login screen accepts legacy 6-character codes as well as new 8-character codes. Supabase uniqueness is enforced by the 2026-08-10 migration with collision retry in the import route.
 
 - Clipboard attempts are counted as violations. Clipboard interception is handled inside the Monaco CodeEditor component (not via DOM events on the wrapper), because Monaco stops DOM event propagation internally.

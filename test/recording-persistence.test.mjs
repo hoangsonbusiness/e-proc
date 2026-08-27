@@ -202,7 +202,7 @@ test('cursor returns the first gap across completed parts and reservations', asy
   assert.equal(await persistence.findNextRecordingPartIndex(db, 7), 1);
 });
 
-test('reserved HeadObject completion is atomic, idempotent, and cannot change its key', async () => {
+test('reserved PUT acknowledgement is atomic, idempotent, and cannot change metadata', async () => {
   const db = sqliteExecutor(raw);
   const reservation = await persistence.reserveRecordingUpload(db, {
     studentId: 7,
@@ -216,15 +216,14 @@ test('reserved HeadObject completion is atomic, idempotent, and cannot change it
     studentId: 7,
     batchId: 3,
     uploadId: 'upload-a',
-    objectKey: reservation.objectKey,
     byteSize: 1234,
-    uploadedAt: '2026-08-27T01:01:00.000Z',
     useSqlite: true,
+    sessionId: 'session-a',
     nowMs: Date.parse('2026-08-27T01:01:00.000Z'),
   };
 
   assert.deepEqual(
-    await persistence.commitInspectedReservedRecordingPart(db, completionInput),
+    await persistence.acknowledgeReservedRecordingPart(db, completionInput),
     {
       uploadId: 'upload-a',
       partIndex: 0,
@@ -234,9 +233,30 @@ test('reserved HeadObject completion is atomic, idempotent, and cannot change it
     },
   );
   assert.deepEqual(
-    await persistence.commitInspectedReservedRecordingPart(db, {
+    await persistence.acknowledgeReservedRecordingPart(db, completionInput),
+    {
+      uploadId: 'upload-a',
+      partIndex: 0,
+      objectKey: reservation.objectKey,
+      byteSize: 1234,
+      already: true,
+    },
+    'the same browser acknowledgement is idempotent',
+  );
+  await assert.rejects(
+    persistence.acknowledgeReservedRecordingPart(db, {
       ...completionInput,
       byteSize: 9999,
+    }),
+    (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
+  );
+  assert.deepEqual(
+    await persistence.acknowledgeReservedRecordingPart(db, {
+      ...completionInput,
+      // Extra transport fields from an untrusted/internal JS caller cannot
+      // replace reservation-owned metadata or the server acknowledgement time.
+      objectKey: 'recordings/3/7/part999.webm',
+      uploadedAt: '1999-01-01T00:00:00.000Z',
     }),
     {
       uploadId: 'upload-a',
@@ -245,28 +265,52 @@ test('reserved HeadObject completion is atomic, idempotent, and cannot change it
       byteSize: 1234,
       already: true,
     },
-    'a replay returns the canonical HeadObject metadata that was committed first',
-  );
-  await assert.rejects(
-    persistence.commitInspectedReservedRecordingPart(db, {
-      ...completionInput,
-      objectKey: 'recordings/3/7/part999.webm',
-    }),
-    (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
   );
 
   const stored = raw.prepare(`
-    SELECT p.object_key, p.byte_size, r.completed_at
+    SELECT p.object_key, p.byte_size, p.uploaded_at, r.completed_at
     FROM recording_parts p JOIN recording_upload_reservations r
       ON r.student_id = p.student_id AND r.part_index = p.part_index
     WHERE p.student_id = 7
   `).get();
   assert.equal(stored.object_key, reservation.objectKey);
   assert.equal(stored.byte_size, 1234);
-  assert.ok(stored.completed_at);
+  assert.equal(stored.uploaded_at, '2026-08-27T01:01:00.000Z');
+  assert.equal(stored.completed_at, '2026-08-27T01:01:00.000Z');
 });
 
-test('different uploadIds cannot reserve or overwrite the same part index', async () => {
+test('PUT acknowledgement rejects invalid sizes and a revoked recording session', async () => {
+  const db = sqliteExecutor(raw);
+  const reservation = await persistence.reserveRecordingUpload(db, {
+    studentId: 7,
+    batchId: 3,
+    uploadId: 'validated-ack',
+    sessionId: 'session-a',
+    useSqlite: true,
+  });
+  const base = {
+    studentId: 7,
+    batchId: 3,
+    uploadId: reservation.uploadId,
+    useSqlite: true,
+    sessionId: 'session-a',
+  };
+
+  for (const byteSize of [0, 1.5, 2_147_483_648]) {
+    await assert.rejects(
+      persistence.acknowledgeReservedRecordingPart(db, { ...base, byteSize }),
+      (error) => error?.code === 'INVALID_RECORDING_PART',
+    );
+  }
+  raw.prepare("UPDATE students SET active_jti = 'session-b' WHERE id = 7").run();
+  await assert.rejects(
+    persistence.acknowledgeReservedRecordingPart(db, { ...base, byteSize: 1234 }),
+    (error) => error?.code === 'NOT_IN_PROGRESS',
+  );
+  assert.equal(raw.prepare('SELECT COUNT(*) AS count FROM recording_parts').get().count, 0);
+});
+
+test('different uploadIds cannot reserve or overwrite the same part index or key', async () => {
   const db = sqliteExecutor(raw);
   const first = await persistence.reserveRecordingUpload(db, {
     studentId: 7,
@@ -285,19 +329,23 @@ test('different uploadIds cannot reserve or overwrite the same part index', asyn
   assert.notEqual(first.partIndex, second.partIndex);
   assert.notEqual(first.objectKey, second.objectKey);
 
-  await assert.rejects(
-    persistence.commitInspectedReservedRecordingPart(db, {
-      studentId: 7,
-      batchId: 3,
-      uploadId: 'upload-b',
-      objectKey: first.objectKey,
-      byteSize: 100,
-      uploadedAt: new Date().toISOString(),
-      useSqlite: true,
-    }),
-    (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
-  );
-  assert.equal(raw.prepare('SELECT COUNT(*) AS count FROM recording_parts').get().count, 0);
+  const completion = await persistence.acknowledgeReservedRecordingPart(db, {
+    studentId: 7,
+    batchId: 3,
+    uploadId: 'upload-b',
+    byteSize: 100,
+    useSqlite: true,
+    sessionId: 'session-a',
+    // Deliberately ignored: the helper always commits upload-b's reservation.
+    objectKey: first.objectKey,
+  });
+  assert.equal(completion.partIndex, second.partIndex);
+  assert.equal(completion.objectKey, second.objectKey);
+  const stored = raw.prepare(
+    'SELECT part_index, object_key FROM recording_parts WHERE student_id = 7',
+  ).get();
+  assert.equal(stored.part_index, second.partIndex);
+  assert.equal(stored.object_key, second.objectKey);
 });
 
 test('seal atomically reserves pending uploadIds, persists an exact manifest, and blocks new blobs', async () => {
@@ -311,14 +359,13 @@ test('seal atomically reserves pending uploadIds, persists an exact manifest, an
     useSqlite: true,
     nowMs: nowMs - 1000,
   });
-  await persistence.commitInspectedReservedRecordingPart(db, {
+  await persistence.acknowledgeReservedRecordingPart(db, {
     studentId: 7,
     batchId: 3,
     uploadId: first.uploadId,
-    objectKey: first.objectKey,
     byteSize: 100,
-    uploadedAt: new Date(nowMs - 500).toISOString(),
     useSqlite: true,
+    sessionId: 'session-a',
     nowMs: nowMs - 500,
   });
   raw.prepare(`
@@ -550,18 +597,26 @@ test('a reset and new authenticated session cannot reuse a stale S3 object key',
   assert.notEqual(nextAttempt.objectKey, previousAttempt.objectKey);
 
   await assert.rejects(
-    persistence.commitInspectedReservedRecordingPart(db, {
+    persistence.acknowledgeReservedRecordingPart(db, {
       studentId: 7,
       batchId: 3,
       uploadId: nextAttempt.uploadId,
-      objectKey: previousAttempt.objectKey,
       byteSize: 100,
-      uploadedAt: new Date().toISOString(),
       useSqlite: true,
+      sessionId: 'session-a',
     }),
-    (error) => error?.code === 'RECORDING_RESERVATION_CONFLICT',
+    (error) => error?.code === 'NOT_IN_PROGRESS',
   );
-  assert.equal(raw.prepare('SELECT COUNT(*) AS count FROM recording_parts').get().count, 0);
+  const nextCompletion = await persistence.acknowledgeReservedRecordingPart(db, {
+    studentId: 7,
+    batchId: 3,
+    uploadId: nextAttempt.uploadId,
+    byteSize: 100,
+    useSqlite: true,
+    sessionId: 'session-b',
+    objectKey: previousAttempt.objectKey,
+  });
+  assert.equal(nextCompletion.objectKey, nextAttempt.objectKey);
 });
 
 test('one-sided reservation completion metadata fails closed', async () => {
@@ -615,14 +670,13 @@ test('expired in-progress deadline rejects new reservations but keeps completed 
     useSqlite: true,
     nowMs,
   });
-  await persistence.commitInspectedReservedRecordingPart(db, {
+  await persistence.acknowledgeReservedRecordingPart(db, {
     studentId: 7,
     batchId: 3,
     uploadId: 'completed-upload',
-    objectKey: reservation.objectKey,
     byteSize: 100,
-    uploadedAt: '2026-08-27T02:01:00.000Z',
     useSqlite: true,
+    sessionId: 'session-a',
     nowMs: nowMs + 60_000,
   });
   raw.prepare('UPDATE students SET exam_deadline = ? WHERE id = 7')
@@ -664,14 +718,13 @@ test('finalization derives its manifest from completed reservations without trus
     useSqlite: true,
     nowMs,
   });
-  await persistence.commitInspectedReservedRecordingPart(db, {
+  await persistence.acknowledgeReservedRecordingPart(db, {
     studentId: 7,
     batchId: 3,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 512,
-    uploadedAt: new Date(nowMs).toISOString(),
     useSqlite: true,
+    sessionId: 'session-a',
     nowMs,
   });
   raw.prepare(`
@@ -730,14 +783,13 @@ test('a complete manifest cannot be finalized before answer submission', async (
     useSqlite: true,
     nowMs,
   });
-  await persistence.commitInspectedReservedRecordingPart(db, {
+  await persistence.acknowledgeReservedRecordingPart(db, {
     studentId: 7,
     batchId: 3,
     uploadId: reservation.uploadId,
-    objectKey: reservation.objectKey,
     byteSize: 512,
-    uploadedAt: new Date(nowMs).toISOString(),
     useSqlite: true,
+    sessionId: 'session-a',
     nowMs,
   });
 
@@ -796,6 +848,55 @@ test('an orphaned reservation blocks finalization instead of silently omitting e
   );
 });
 
+test('a fully acknowledged sealed manifest can finalize after the write grace expires', async () => {
+  const db = sqliteExecutor(raw);
+  const submittedAt = Date.parse('2026-08-27T03:00:00.000Z');
+  const reservation = await persistence.reserveRecordingUpload(db, {
+    studentId: 7,
+    batchId: 3,
+    uploadId: 'late-db-finalize',
+    sessionId: 'session-a',
+    useSqlite: true,
+    nowMs: submittedAt - 1000,
+  });
+  await persistence.acknowledgeReservedRecordingPart(db, {
+    studentId: 7,
+    batchId: 3,
+    uploadId: reservation.uploadId,
+    byteSize: 512,
+    useSqlite: true,
+    sessionId: 'session-a',
+    nowMs: submittedAt - 500,
+  });
+  raw.prepare(`
+    UPDATE students
+    SET status = 'submitted', submitted_at = ?, recording_incomplete = TRUE
+    WHERE id = 7
+  `).run(new Date(submittedAt).toISOString());
+  await persistence.sealRecordingManifest(db, {
+    studentId: 7,
+    batchId: 3,
+    sessionId: 'session-a',
+    parts: [{ uploadId: reservation.uploadId, partIndex: reservation.partIndex }],
+    useSqlite: true,
+    nowMs: submittedAt + 1000,
+  });
+  const afterGrace = submittedAt + persistence.SUBMITTED_RECORDING_GRACE_MS + 1000;
+
+  assert.equal((await persistence.getRecordingRecoveryStatus(db, {
+    studentId: 7,
+    batchId: 3,
+    useSqlite: true,
+    nowMs: afterGrace,
+  })).state, 'processing');
+  assert.deepEqual(await persistence.finalizeRecordingManifest(db, {
+    studentId: 7,
+    batchId: 3,
+    useSqlite: true,
+    nowMs: afterGrace,
+  }), { already: false, finalPartIndex: 0 });
+});
+
 test('same-manifest finalization replay succeeds even after submission grace has expired', async () => {
   let queries = 0;
   const tx = {
@@ -847,7 +948,7 @@ test('a finalized recording rejects a retry carrying a different manifest', () =
   assert.equal(decision.code, 'MANIFEST_CONFLICT');
 });
 
-test('an incomplete submitted recording is writable only during the bounded grace period', () => {
+test('recording writes expire but DB-only finalization remains eligible after the grace period', () => {
   const submittedAt = Date.parse('2026-08-27T01:00:00.000Z');
   const row = {
     status: 'submitted',
@@ -878,8 +979,7 @@ test('an incomplete submitted recording is writable only during the bounded grac
     0,
     submittedAt + persistence.SUBMITTED_RECORDING_GRACE_MS + 1,
   );
-  assert.equal(expired.action, 'reject');
-  assert.equal(expired.code, 'NOT_IN_PROGRESS');
+  assert.equal(expired.action, 'finalize');
 });
 
 test('PostgreSQL timestamp-without-timezone Date values are interpreted as UTC wall-clock time', () => {

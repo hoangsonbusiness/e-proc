@@ -9,7 +9,7 @@ BEGIN;
 ALTER TABLE public.violation_events
   ADD COLUMN IF NOT EXISTS metadata_json TEXT;
 
--- Tracks S3 recording parts that were verified by the backend with HeadObject.
+-- Tracks canonical S3 recording reservations acknowledged after browser-observed PUT 2xx.
 -- One finalized part index is allowed per student attempt.
 CREATE TABLE IF NOT EXISTS public.recording_parts (
   id SERIAL PRIMARY KEY,

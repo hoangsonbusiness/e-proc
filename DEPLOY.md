@@ -303,7 +303,9 @@ Nếu dùng S3 recording:
 - `AWS_REGION`
 - `S3_RECORDINGS_BUCKET`
 
-IAM principal dùng bởi backend tối thiểu cần `s3:PutObject` cho presigned upload và `s3:GetObject` để `HeadObject` xác minh part đã upload. Bucket phải có CORS cho phép domain thi gọi `PUT` với `Content-Type`, và nên có Lifecycle rule tự xóa `recordings/**` theo chính sách lưu trữ của tổ chức. Không cấp public-read cho bucket.
+IAM principal dùng bởi backend chỉ cần `s3:PutObject` trên `recordings/*`; không cần `s3:GetObject` hoặc `s3:ListBucket`. Bucket phải có CORS cho phép domain thi gọi `PUT` với `Content-Type`. Sau PUT 2xx, browser acknowledgement được persist qua `/recording-complete`; xem policy và giới hạn xác minh PutObject-only trong `docs/setup-aws-s3-recording.md`. Không cấp public-read hoặc `DeleteObject` cho bucket.
+
+> **Cutover bắt buộc:** không deploy bản protocol PutObject-only này khi còn thí sinh đang thi S3 bằng bundle cũ. Backend mới cố ý từ chối `/recording-complete` cũ bằng HTTP 426 vì request cũ có thể được gửi sau một PUT mơ hồ và không chứng minh browser đã thấy 2xx. Hãy đóng lịch thi/đợi mọi attempt S3 đang hoạt động kết thúc, deploy đồng thời backend + asset frontend mới (tắt build cache), rồi mới mở ca thi tiếp theo.
 
 ## 6. Build và deploy
 
@@ -432,7 +434,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
 - [ ] `npm run test:local` pass toàn bộ bảy bước; default suite hiện có 133 pass/15 skip, PostgreSQL có 15 pass/0 skip, schema v2→v4/backfill idempotent và AI Grade E2E pass các scenario isolation/correlation/regrade/recovery.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
-- [ ] Nếu dùng S3: test PUT → recording-complete → HeadObject → finalize và Lifecycle rule.
+- [ ] Nếu dùng S3: test PUT 2xx → recording-complete → DB-only finalize, retry callback/reload và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.
 - [ ] Nếu dùng VPS: đã thay `admin321`, kiểm tra certificate Caddy, UFW và Docker restart policy.
 

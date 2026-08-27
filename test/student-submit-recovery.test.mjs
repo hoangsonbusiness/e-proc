@@ -71,6 +71,7 @@ before(async () => {
             export const canRetryFinalization = (...args) => recorder.canRetryFinalization(...args);
             export const retryFinalization = (...args) => recorder.retryFinalization(...args);
             export const isRetryableFinalizationFailure = (...args) => recorder.isRetryableFinalizationFailure(...args);
+            export const hasStoredUploadAcknowledgements = (...args) => recorder.hasStoredUploadAcknowledgements(...args);
           `,
         }));
       },
@@ -85,6 +86,7 @@ function installFixture(finalizationPromise) {
     ['studentToken', 'signed-student-token'],
   ]);
   const fixture = {
+    storageValues: values,
     stateIndex: 0,
     initialStates: [],
     stateUpdates: [],
@@ -107,6 +109,7 @@ function installFixture(finalizationPromise) {
         };
       },
       canRetryFinalization: () => false,
+      hasStoredUploadAcknowledgements: () => false,
       retryFinalization: () => Promise.reject(new Error('not available')),
       isRetryableFinalizationFailure: () => true,
     },
@@ -134,7 +137,18 @@ async function renderFreshSubmit(fixture) {
   for (let attempt = 0; attempt < 50 && fixture.navigateCalls.length === 0; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
+  return module;
 }
+
+test('unload warning covers recoverable browser evidence but not status-only retries', async () => {
+  const fixture = installFixture(null);
+  const submit = await renderFreshSubmit(fixture);
+
+  assert.equal(submit.shouldWarnBeforeRecordingUnload('finalizing', false, false), true);
+  assert.equal(submit.shouldWarnBeforeRecordingUnload('failed', true, true), true);
+  assert.equal(submit.shouldWarnBeforeRecordingUnload('failed', true, false), false);
+  assert.equal(submit.shouldWarnBeforeRecordingUnload('complete', false, false), false);
+});
 
 test('submit refresh with no in-memory Promise recovers finalized server state', async () => {
   const fixture = installFixture(null);
@@ -150,6 +164,33 @@ test('submit refresh with no in-memory Promise recovers finalized server state',
   );
 });
 
+test('an authenticated S3 attempt recovers when router state is lost after PUT receipts were drained', async () => {
+  const fixture = installFixture(null);
+  fixture.location = { state: null };
+
+  await renderFreshSubmit(fixture);
+
+  assert.equal(fixture.recoveryCalls, 1);
+  assert.equal(fixture.storageCleared, true);
+  assert.equal(fixture.navigateCalls.length, 1);
+});
+
+test('a reloaded local recording attempt fails explicitly instead of reporting false completion', async () => {
+  const fixture = installFixture(null);
+  fixture.location = { state: null };
+  fixture.storageValues.set('recordMode', 'local');
+
+  await renderFreshSubmit(fixture);
+
+  assert.equal(fixture.recoveryCalls, 0);
+  assert.equal(fixture.storageCleared, false);
+  assert.equal(fixture.navigateCalls.length, 0);
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 1 && value === 'failed'));
+  assert.ok(fixture.stateUpdates.some(([index, value]) => (
+    index === 2 && typeof value === 'string' && value.includes('no longer available')
+  )));
+});
+
 test('a rejected in-memory finalization checks server truth before showing failure', async () => {
   const fixture = installFixture(Promise.reject(new Error('finalize response was lost')));
   await renderFreshSubmit(fixture);
@@ -159,7 +200,7 @@ test('a rejected in-memory finalization checks server truth before showing failu
   assert.equal(fixture.navigateCalls.length, 1);
 });
 
-test('a refreshed tab does not claim endless processing when no uploader remains', async () => {
+test('a refreshed tab stops immediately when no uploader or PUT acknowledgement remains', async () => {
   const fixture = installFixture(null);
   fixture.recorder.recoverRecordingFinalization = async () => {
     fixture.recoveryCalls += 1;
@@ -173,14 +214,101 @@ test('a refreshed tab does not claim endless processing when no uploader remains
   };
 
   await renderFreshSubmit(fixture);
-  for (let attempt = 0; attempt < 60 && fixture.recoveryCalls < 3; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-
-  assert.equal(fixture.recoveryCalls, 3, 'recovery must be bounded');
+  assert.equal(fixture.recoveryCalls, 1, 'PutObject-only recovery must not poll S3');
   assert.equal(fixture.navigateCalls.length, 0);
   assert.ok(fixture.stateUpdates.some(([index, value]) => index === 1 && value === 'failed'));
   assert.ok(fixture.stateUpdates.some(([index, value]) => (
-    index === 2 && typeof value === 'string' && value.includes('no longer has an uploader')
+    index === 2 && typeof value === 'string' && value.includes('no longer has recording data')
   )));
+});
+
+test('a permanent storage error without browser evidence does not offer a useless retry', async () => {
+  const fixture = installFixture(null);
+  const storageError = Object.assign(new Error('recording storage is misconfigured'), {
+    response: {
+      status: 424,
+      data: { reason: 'recording_storage_misconfigured' },
+    },
+  });
+  fixture.recorder.recoverRecordingFinalization = async () => {
+    fixture.recoveryCalls += 1;
+    throw storageError;
+  };
+  fixture.recorder.isRetryableFinalizationFailure = () => false;
+
+  await renderFreshSubmit(fixture);
+  for (let attempt = 0; attempt < 50 && fixture.stateUpdates.length < 3; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(fixture.recoveryCalls, 1);
+  assert.equal(fixture.navigateCalls.length, 0);
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 1 && value === 'failed'));
+  assert.ok(fixture.stateUpdates.some(([index, value]) => (
+    index === 2 && typeof value === 'string' && value.includes('contact the administrator')
+  )));
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 3 && value === false));
+});
+
+test('an expired session with a stored PUT receipt does not offer endless retry', async () => {
+  const fixture = installFixture(null);
+  const authError = Object.assign(new Error('student session expired'), {
+    response: { status: 401, data: { reason: 'invalid_student_token' } },
+  });
+  fixture.recorder.hasStoredUploadAcknowledgements = () => true;
+  fixture.recorder.recoverRecordingFinalization = async () => {
+    fixture.recoveryCalls += 1;
+    throw authError;
+  };
+  fixture.recorder.isRetryableFinalizationFailure = () => false;
+
+  await renderFreshSubmit(fixture);
+  for (let attempt = 0; attempt < 50 && fixture.stateUpdates.length < 3; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(fixture.recoveryCalls, 1);
+  assert.equal(fixture.navigateCalls.length, 0);
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 1 && value === 'failed'));
+  assert.equal(fixture.stateUpdates.some(([index, value]) => index === 3 && value === true), false);
+});
+
+test('a CORS-blocked browser PUT is explicit even while server state remains processing', async () => {
+  const storageCause = Object.assign(new Error('browser upload was blocked'), {
+    response: {
+      status: 424,
+      data: { reason: 'recording_upload_blocked' },
+    },
+  });
+  const finalizationError = Object.assign(new Error('recording upload failed'), {
+    stage: 'upload',
+    partIndex: 0,
+    retryable: false,
+    cause: storageCause,
+  });
+  const fixture = installFixture(Promise.reject(finalizationError));
+  fixture.recorder.recoverRecordingFinalization = async () => {
+    fixture.recoveryCalls += 1;
+    return {
+      state: 'processing',
+      recordMode: 's3',
+      expectedPartCount: 1,
+      completedPartCount: 0,
+    };
+  };
+  fixture.recorder.canRetryFinalization = () => true;
+  fixture.recorder.isRetryableFinalizationFailure = () => false;
+
+  await renderFreshSubmit(fixture);
+  for (let attempt = 0; attempt < 50 && fixture.stateUpdates.length < 3; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(fixture.recoveryCalls, 1);
+  assert.equal(fixture.navigateCalls.length, 0);
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 1 && value === 'failed'));
+  assert.ok(fixture.stateUpdates.some(([index, value]) => (
+    index === 2 && typeof value === 'string' && value.includes('CORS')
+  )));
+  assert.ok(fixture.stateUpdates.some(([index, value]) => index === 3 && value === true));
 });

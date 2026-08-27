@@ -147,15 +147,16 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 |---|---|
 | `none` | Không screen share, không recording-stop guard |
 | `local` | Part 5 phút, ZIP AES-256 vào folder candidate chọn; password server sinh/lưu/trả ngầm |
-| `s3` | Part 5 phút, PUT trực tiếp S3 bằng presigned URL; backend `HeadObject` trước khi persist metadata |
+| `s3` | Part 5 phút, PUT trực tiếp S3 bằng presigned URL; persist acknowledgement sau khi browser nhận PUT 2xx |
 
 - VP9, fallback VP8, 5 fps, khoảng 600 kbps.
 - Candidate dừng share → `recording_stopped`, lock ngay lần đầu.
 - F5 mất recorder singleton → blocking modal bắt share/chọn folder lại.
 - Answer submit xong trước; `/submit` chờ shared `stopAndSave()` promise.
 - S3 finalize yêu cầu contiguous manifest `0..finalPartIndex`.
-- Manifest chưa xong khi submit đặt `recording_incomplete=true`; recording endpoints có grace 15 phút.
-- S3 cần CORS `PUT`, lifecycle retention và IAM `PutObject` + `GetObject` cho `HeadObject`.
+- Manifest chưa xong khi submit đặt `recording_incomplete=true`; recording endpoints có grace 60 phút.
+- S3 cần CORS `PUT`, lifecycle retention và IAM chỉ có `s3:PutObject` trên `recordings/*`.
+- PUT-2xx acknowledgement được lưu tạm trong `sessionStorage` trước callback để retry/reload không upload lại part. Đây là xác nhận từ client, không phải bằng chứng tồn tại độc lập từ S3; dùng S3 ObjectCreated event nếu threat model yêu cầu server-authoritative proof.
 
 ### 3.10 Anti-cheat and forensic policy
 
@@ -193,7 +194,7 @@ Concurrent session:
 | `exam_questions` | Assignment/option order/answer/scores |
 | `violations` | Unique counted row theo student/type |
 | `violation_events` | Append-only forensic event + idempotency id |
-| `recording_parts` | S3 part đã verify |
+| `recording_parts` | S3 part đã được client xác nhận PUT 2xx |
 | `exam_sessions` | Recent jti/IP/UA activity |
 | `user_ai_settings` | Một verified LLM connection/user; API key mã hóa và fingerprint cấu hình đã test |
 | `admin_users` | Credentials + role |
@@ -249,7 +250,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 9. Client không report được `concurrent_session`; different-IP overlap auto-submit.
 10. Unsupported display API, extended display, non-monitor share hoặc fullscreen denial đều chặn Start.
 11. Side-panel persistent shrink tạo tối đa hai report; transient shrink không report.
-12. S3 metadata chỉ persist sau HeadObject; finalize thiếu part trả 409; submit page phản ánh finalize failure.
+12. S3 metadata chỉ persist sau browser-observed PUT 2xx; failed/ambiguous PUT không được acknowledge; finalize thiếu part trả 409; submit page phản ánh finalize failure.
 13. Health trả 503 pending/error và 200 chỉ khi ready.
 14. Results dùng paged summary/lazy detail; export giữ trainer-score precedence.
 
@@ -258,7 +259,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - Không ngăn tuyệt đối thiết bị thứ hai, VM, OS accessibility, spoofed UA/IP hoặc custom client.
 - Concurrent use cùng NAT/IP có thể không bị detector phát hiện.
 - Local recording do candidate kiểm soát; password phải hiện diện trong client để mã hóa.
-- S3 chỉ verify object/key/size/manifest, chưa verify duration/frame/black screen.
+- PutObject-only lưu acknowledgement của client cho object key/size/manifest; backend không tự đọc S3 và cũng không xác minh duration/frame/black screen. Muốn bằng chứng độc lập phải dùng S3 ObjectCreated event consumer.
 - AI output được validate cấu trúc/ID/range nhưng chất lượng chấm và prompt injection không thể được loại bỏ tuyệt đối; cần review khi kết quả bất thường.
 - Manual grading đọc question/rubric hiện tại từ `question_bank` tại lúc bấm AI Grade; quiz finalization cũng đọc correct answer/score hiện tại khi submit. Sửa question/rubric/quiz key sau khi đề đã được assign có thể thay đổi kết quả vì chưa có immutable question versioning.
 - Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Xử lý tuần tự giảm nguy cơ response isolation nhưng tăng tổng latency; chunk/correlation retry tiếp tục tăng số outbound request và thời gian xử lý.

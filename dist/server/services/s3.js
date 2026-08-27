@@ -4,24 +4,34 @@
 // chỉ nhận một URL đã ký, hết hạn ngắn. Video đi thẳng client → S3, không qua
 // backend, nên né hoàn toàn giới hạn payload/timeout của Vercel serverless.
 //
+// Runtime principal intentionally needs only s3:PutObject. The browser treats a
+// successful PUT response as the upload acknowledgement; the backend does not
+// call HeadObject/ListObjects. For server-authoritative verification, connect an
+// S3 ObjectCreated notification instead of granting read/list to this principal.
+//
 // Xóa video: dùng S3 Lifecycle rule trên bucket (tự xóa sau N ngày) — không cần
 // script backend.
-import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const BUCKET = process.env.S3_RECORDINGS_BUCKET || '';
 const URL_EXPIRES_SECONDS = 15 * 60; // presigned URL hết hạn 15 phút
 let s3Client = null;
-/** Cấu hình S3 đã đủ để hoạt động chưa (env có mặt). */
+/** Cấu hình S3 đã đủ để tạo presigned URL chưa (chỉ kiểm tra env cục bộ). */
 export function isS3Configured() {
-    return !!(BUCKET &&
-        process.env.AWS_ACCESS_KEY_ID &&
-        process.env.AWS_SECRET_ACCESS_KEY);
+    return !!(BUCKET
+        && process.env.AWS_ACCESS_KEY_ID
+        && process.env.AWS_SECRET_ACCESS_KEY);
 }
 function getClient() {
     if (!s3Client) {
         s3Client = new S3Client({
             region: REGION,
+            // Recent AWS SDK versions default to WHEN_SUPPORTED and can presign an
+            // empty-body CRC32 for PutObject. The browser subsequently uploads a video
+            // body to that URL and S3 rejects it with BadDigest. We do not require a
+            // payload checksum for this presigned browser PUT.
+            requestChecksumCalculation: 'WHEN_REQUIRED',
             credentials: {
                 accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
                 secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
@@ -36,6 +46,11 @@ function getClient() {
  * nên thí sinh không thể ghi đè video của người khác.
  */
 export async function createRecordingUploadUrl(params) {
+    if (!isS3Configured()) {
+        throw Object.assign(new Error('Recording storage is not configured'), {
+            code: 'S3_NOT_CONFIGURED',
+        });
+    }
     const { batchId, studentId, partIndex, objectKey, contentType } = params;
     const part = String(partIndex).padStart(3, '0');
     // Current routes always provide an authenticated, session-namespaced
@@ -49,24 +64,4 @@ export async function createRecordingUploadUrl(params) {
     });
     const url = await getSignedUrl(getClient(), command, { expiresIn: URL_EXPIRES_SECONDS });
     return { url, key };
-}
-export async function inspectRecordingObject(key) {
-    const result = await getClient().send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
-    return { byteSize: Number(result.ContentLength || 0) };
-}
-/**
- * Reconciliation treats a genuine 404 as "not uploaded yet". Authentication,
- * throttling and transport failures must still propagate so the caller retries
- * instead of falsely declaring the evidence incomplete.
- */
-export async function inspectRecordingObjectIfExists(key) {
-    try {
-        return await inspectRecordingObject(key);
-    }
-    catch (error) {
-        const status = Number(error?.$metadata?.httpStatusCode ?? error?.statusCode);
-        if (status === 404 || error?.name === 'NotFound' || error?.name === 'NoSuchKey')
-            return null;
-        throw error;
-    }
 }

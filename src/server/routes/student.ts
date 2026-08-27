@@ -15,14 +15,13 @@ import { computeViolationLock, isForensicOnlyViolation } from '../services/viola
 import { isClientReportableViolation, isServerOwnedViolation } from '../services/violationPolicy.js';
 import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEnforcer.js';
 import { persistViolationIfInProgress } from '../services/violationRequestStore.js';
+import { isRecordingPutAcknowledgementPayload } from '../services/recordingProtocol.js';
 import {
-  commitInspectedReservedRecordingPart,
+  acknowledgeReservedRecordingPart,
   effectiveAttemptRecordMode,
   finalizeRecordingManifest,
   findNextRecordingPartIndex,
-  findRecordingUploadReservation,
   getRecordingRecoveryStatus,
-  listPendingRecordingReservations,
   reserveRecordingUpload,
   sealRecordingManifest,
   timestampWithoutTimezoneUtcMs,
@@ -95,14 +94,6 @@ const USE_SQLITE = !process.env.DATABASE_URL;
 
 function readRecordingRecoveryStatusLocked(studentId: number, batchId: number) {
   return db.withTransaction((tx) => getRecordingRecoveryStatus(tx, {
-    studentId,
-    batchId,
-    useSqlite: USE_SQLITE,
-  }));
-}
-
-function readPendingRecordingReservationsLocked(studentId: number, batchId: number) {
-  return db.withTransaction((tx) => listPendingRecordingReservations(tx, {
     studentId,
     batchId,
     useSqlite: USE_SQLITE,
@@ -1173,57 +1164,50 @@ router.post('/exam/recording-reconcile', studentAuthMiddleware, async (req: Requ
   let outcome = 'rejected';
   let caughtError: any;
   try {
-    let status = await readRecordingRecoveryStatusLocked(studentId, batchId);
-    if (status.state !== 'processing') {
-      outcome = status.state;
-      return res.json(status);
-    }
-
-    const pending = await readPendingRecordingReservationsLocked(studentId, batchId);
-    if (pending.length > 0) {
-      const { inspectRecordingObjectIfExists, isS3Configured } = await loadS3Service();
-      if (!isS3Configured()) {
-        return res.status(503).json({
-          error: 'S3 not configured',
-          reason: 'recording_reconcile_failed',
-        });
-      }
-      // These keys were created from authenticated server reservations. S3 I/O
-      // stays outside transactions; each successful inspection is then committed
-      // idempotently under the same student lock used by finalization.
-      for (const reservation of pending) {
-        const inspected = await inspectRecordingObjectIfExists(reservation.objectKey);
-        if (!inspected || inspected.byteSize <= 0) continue;
-        await db.withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
-          studentId,
-          batchId,
-          uploadId: reservation.uploadId,
-          objectKey: reservation.objectKey,
-          byteSize: Math.trunc(inspected.byteSize),
-          uploadedAt: new Date().toISOString(),
-          useSqlite: USE_SQLITE,
-        }));
-      }
-    }
-
-    status = await readRecordingRecoveryStatusLocked(studentId, batchId);
-    if (
-      status.state === 'processing'
-      && status.expectedPartCount > 0
-      && status.completedPartCount === status.expectedPartCount
-    ) {
-      await db.withTransaction((tx) => finalizeRecordingManifest(tx, {
+    const status = await db.withTransaction(async (tx) => {
+      let current = await getRecordingRecoveryStatus(tx, {
         studentId,
         batchId,
         useSqlite: USE_SQLITE,
-      }));
-      status = await readRecordingRecoveryStatusLocked(studentId, batchId);
-    }
+      });
+      if (current.state !== 'processing') return current;
+
+      // PutObject-only deployments cannot inspect S3. Reconciliation therefore
+      // never invents a completed part: it only finalizes durable browser PUT-2xx
+      // acknowledgements already committed in recording_parts. Keep the status
+      // decision, finalize and read-back under one student-row lock so reset/JTI
+      // rotation cannot turn a deterministic lifecycle result into a 503 race.
+      if (
+        current.expectedPartCount > 0
+        && current.completedPartCount === current.expectedPartCount
+      ) {
+        await finalizeRecordingManifest(tx, {
+          studentId,
+          batchId,
+          useSqlite: USE_SQLITE,
+        });
+        current = await getRecordingRecoveryStatus(tx, {
+          studentId,
+          batchId,
+          useSqlite: USE_SQLITE,
+        });
+      }
+      return current;
+    });
     outcome = status.state;
     return res.json(status);
   } catch (error: any) {
     caughtError = error;
     outcome = 'error';
+    if (error?.code === 'BAD_RECORD_MODE') {
+      return res.status(403).json({ error: error.message, reason: 'bad_record_mode' });
+    }
+    if (error?.code === 'NOT_IN_PROGRESS') {
+      return res.status(409).json({ error: error.message, reason: 'not_in_progress' });
+    }
+    if (error?.code === 'RECORDING_INCOMPLETE') {
+      return res.status(409).json({ error: error.message, reason: 'recording_incomplete' });
+    }
     const manifestConflict = [
       'MANIFEST_CONFLICT',
       'MANIFEST_NOT_SEALED',
@@ -1290,7 +1274,10 @@ router.post('/exam/recording-url', studentAuthMiddleware, async (req: Request, r
 
     const { createRecordingUploadUrl, isS3Configured } = await loadS3Service();
     if (!isS3Configured()) {
-      return res.status(503).json({ error: 'S3 not configured' });
+      return res.status(424).json({
+        error: 'Recording storage requires administrator configuration',
+        reason: 'recording_storage_not_configured',
+      });
     }
 
     const { url, key } = await createRecordingUploadUrl({
@@ -1341,16 +1328,33 @@ router.post('/exam/recording-complete', studentAuthMiddleware, async (req: Reque
   const studentId = req.studentPayload!.studentId;
   const batchId = req.studentPayload!.batchId;
   const requestedPartIndex = Number(req.body?.partIndex);
-  const uploadId = recordingUploadId(req, requestedPartIndex);
+  const acknowledgedByteSize = Number(req.body?.byteSize);
+  const uploadId = typeof req.body?.uploadId === 'string' ? req.body.uploadId : '';
   let operationPartIndex = requestedPartIndex;
   let outcome = 'rejected';
   let caughtError: any;
   try {
+    if (!isRecordingPutAcknowledgementPayload(req.body)) {
+      return res.status(426).json({
+        error: 'Recording completion protocol upgrade required',
+        reason: 'recording_protocol_upgrade_required',
+      });
+    }
     if (!Number.isInteger(requestedPartIndex) || requestedPartIndex < 0 || requestedPartIndex > 1000) {
       return res.status(400).json({ error: 'Invalid recording part metadata' });
     }
     if (!isValidRecordingUploadId(uploadId)) {
       return res.status(400).json({ error: 'Invalid uploadId' });
+    }
+    if (
+      !Number.isSafeInteger(acknowledgedByteSize)
+      || acknowledgedByteSize <= 0
+      || acknowledgedByteSize > 2_147_483_647
+    ) {
+      return res.status(422).json({
+        error: 'Invalid recording part size',
+        reason: 'invalid_recording_part',
+      });
     }
 
     // Reject non-S3 modes before looking up any stale reservation left by a
@@ -1360,43 +1364,19 @@ router.post('/exam/recording-complete', studentAuthMiddleware, async (req: Reque
       return res.status(403).json({ error: 'S3 recording is not enabled', reason: 'bad_record_mode' });
     }
 
-    const reservation = await findRecordingUploadReservation(db, studentId, uploadId);
-    if (!reservation || reservation.batchId !== batchId) {
-      return res.status(409).json({
-        error: 'Recording upload reservation was not found',
-        reason: 'reservation_not_found',
-      });
-    }
-    operationPartIndex = reservation.partIndex;
-    if (reservation.completed) {
-      outcome = 'already_complete';
-      return res.json({
-        success: true,
-        already: true,
-        alreadyComplete: true,
-        completed: true,
-        uploadId: reservation.uploadId,
-        partIndex: reservation.partIndex,
-        key: reservation.objectKey,
-        byteSize: reservation.byteSize,
-      });
-    }
-
-    const { inspectRecordingObject } = await loadS3Service();
-    const { byteSize } = await inspectRecordingObject(reservation.objectKey);
-    if (byteSize <= 0) return res.status(422).json({ error: 'Uploaded recording part is empty' });
-    // HeadObject is network I/O, so it happens before opening the transaction.
-    // Lifecycle is then re-checked under the same student lock used by finalize;
-    // a part can no longer be inserted after a manifest has committed.
-    const completion = await db.withTransaction((tx) => commitInspectedReservedRecordingPart(tx, {
+    // The browser calls this endpoint only after observing a successful S3 PUT
+    // response. With a PutObject-only principal this acknowledgement is the
+    // operational completion signal; the transaction derives all object metadata
+    // from the authenticated server reservation and rechecks lifecycle.
+    const completion = await db.withTransaction((tx) => acknowledgeReservedRecordingPart(tx, {
       studentId,
       batchId,
       uploadId,
-      objectKey: reservation.objectKey,
-      byteSize: Math.trunc(byteSize),
-      uploadedAt: new Date().toISOString(),
+      byteSize: acknowledgedByteSize,
       useSqlite: USE_SQLITE,
+      sessionId: req.studentPayload!.jti,
     }));
+    operationPartIndex = completion.partIndex;
     outcome = completion.already ? 'already_complete' : 'stored';
     res.json({
       success: true,
@@ -1418,7 +1398,7 @@ router.post('/exam/recording-complete', studentAuthMiddleware, async (req: Reque
       : error?.code === 'INVALID_RECORDING_PART' ? 422 : 500;
     res.status(status).json(status < 500
       ? { error: error.message, reason: error.code.toLowerCase() }
-      : { error: 'Could not verify the uploaded recording part', reason: 'recording_complete_failed' });
+      : { error: 'Could not acknowledge the uploaded recording part', reason: 'recording_complete_failed' });
   } finally {
     logRecordingOperation({
       stage: 'complete',

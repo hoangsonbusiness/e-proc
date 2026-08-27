@@ -16,7 +16,7 @@ Express 4 + TypeScript
   ├─ /api/student student JWT + active jti
   ├─ readiness/operations
   ├─ creator-triggered manual AI grading
-  └─ S3 presigning + HeadObject verification
+  └─ S3 PutObject-only presigning + client PUT-2xx acknowledgement
         │
         ├─ SQLite/better-sqlite3 (DATABASE_URL absent)
         └─ PostgreSQL/Supabase (DATABASE_URL present)
@@ -253,10 +253,10 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | POST | `/student/exam/flush` | legacy buffer flush |
 | POST | `/student/violation` | idempotent forensic/counter transaction |
 | POST | `/student/exam/recording-url` | presigned S3 PUT URL |
-| POST | `/student/exam/recording-complete` | HeadObject + metadata insert |
+| POST | `/student/exam/recording-complete` | persist PUT-2xx acknowledgement against canonical reservation |
 | POST | `/student/exam/recording-seal` | persist the exact logical upload manifest after answer submission |
 | GET | `/student/exam/recording-status` | return durable finalization state and part counts |
-| POST | `/student/exam/recording-reconcile` | HeadObject sealed pending keys and finalize when complete |
+| POST | `/student/exam/recording-reconcile` | DB-only finalize when every sealed reservation is acknowledged |
 | POST | `/student/exam/recording-finalize` | contiguous manifest validation |
 
 Common terminal responses use HTTP 410 with `reason` such as `submitted`, `timeout`, `absent_too_long`, or `concurrent_session`.
@@ -336,10 +336,11 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 - S3 retry: up to 5 total attempts per stage with exponential backoff.
 - Presigned URL expiry: 15 minutes.
 - Object key: `recordings/{batchId}/{studentId}/session-{hash(activeJti)}/partNNN.webm`.
-- Completion ignores client byte claim and uses S3 ContentLength.
+- Completion accepts the byte size reported only after browser-observed PUT 2xx, but derives object key/index exclusively from the authenticated server reservation.
 - Submit releases capture, then seals the exact upload-ID manifest before SPA handoff; upload/finalize continues on `/submit`.
 - Finalize derives the authoritative highest index from the sealed durable manifest and requires every part from zero.
-- Lost PUT/complete/finalize responses are reconciled from S3 `HeadObject` plus server metadata instead of being classified from browser Promise state.
+- The PUT-2xx acknowledgement is written to attempt-scoped `sessionStorage` before `/recording-complete`; lost completion responses/reloads replay it without another PUT, while ambiguous/failed PUT responses are re-uploaded and never acknowledged. Status/reconcile are database-only.
+- PutObject-only cannot independently prove object existence from the backend. For server-authoritative verification without `GetObject`/`ListBucket`, consume trusted S3 ObjectCreated events.
 - Submitted/incomplete attempts get 60-minute recording-only grace.
 - Local file: `exam_{timestamp}_partNNN.zip`, AES-256, compression level 0.
 

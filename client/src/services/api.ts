@@ -266,7 +266,7 @@ export const studentApi = {
   completeRecordingPart: (partIndex: number, byteSize: number, uploadId: string) =>
     api.post(
       '/student/exam/recording-complete',
-      { partIndex, byteSize, uploadId },
+      { protocolVersion: 2, putAcknowledged: true, partIndex, byteSize, uploadId },
       { timeout: RECORDING_CONTROL_TIMEOUT_MS }
     ),
 

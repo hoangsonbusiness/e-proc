@@ -85,8 +85,8 @@ async function waitFor(predicate, message) {
   assert.fail(message);
 }
 
-function completedResponse(partIndex, _byteSize, uploadId) {
-  return { data: { success: true, partIndex, uploadId } };
+function completedResponse(partIndex, byteSize, uploadId) {
+  return { data: { success: true, partIndex, byteSize, uploadId } };
 }
 
 function replaceGlobal(name, value) {
@@ -102,6 +102,16 @@ function replaceGlobal(name, value) {
   };
 }
 
+function createMemoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+    clear: () => values.clear(),
+  };
+}
+
 function installBrowserFixture({
   api,
   fetchImpl,
@@ -110,6 +120,9 @@ function installBrowserFixture({
   emitFinalData = true,
   emitTimesliceData = false,
   directoryHandle = null,
+  fastRetryDelays = false,
+  sessionStorageImpl = null,
+  localStorageImpl = null,
 }) {
   if (typeof api.sealRecordingManifest !== 'function') {
     api.sealRecordingManifest = async (parts) => ({
@@ -219,6 +232,15 @@ function installBrowserFixture({
     restores.push(replaceGlobal('window', {
       showDirectoryPicker: async () => directoryHandle,
     }));
+  }
+  if (sessionStorageImpl) restores.push(replaceGlobal('sessionStorage', sessionStorageImpl));
+  if (localStorageImpl) restores.push(replaceGlobal('localStorage', localStorageImpl));
+  if (fastRetryDelays) {
+    const nativeSetTimeout = globalThis.setTimeout;
+    const retryDelays = new Set([3000, 6000, 12000, 24000]);
+    restores.push(replaceGlobal('setTimeout', (callback, delay, ...args) => (
+      nativeSetTimeout(callback, retryDelays.has(Number(delay)) ? 0 : delay, ...args)
+    )));
   }
   restoreBrowserGlobals = () => {
     for (const restore of restores.reverse()) restore();
@@ -711,7 +733,7 @@ test('a replayed but incomplete reservation still uploads and completes its blob
   assert.equal(completeCalls, 1);
 });
 
-test('an ambiguous S3 PUT failure is recovered when backend completion confirms the object', async () => {
+test('an ambiguous S3 PUT never acknowledges completion until the browser observes 2xx', async () => {
   let putCalls = 0;
   let completeCalls = 0;
   let finalizeCalls = 0;
@@ -727,11 +749,11 @@ test('an ambiguous S3 PUT failure is recovered when backend completion confirms 
   };
   installBrowserFixture({
     api,
+    fastRetryDelays: true,
     fetchImpl: async () => {
       putCalls += 1;
-      // This is retryable by default. Completion must probe immediately rather
-      // than re-uploading the same 5-minute blob before checking S3 truth.
-      throw new Error('S3 response was lost');
+      if (putCalls === 1) throw new Error('S3 response was lost');
+      return { ok: true, status: 200 };
     },
   });
   const recorder = await importFreshRecorder();
@@ -740,9 +762,268 @@ test('an ambiguous S3 PUT failure is recovered when backend completion confirms 
   recorder.start({ mode: 's3' });
   await recorder.stopAndSave();
 
-  assert.equal(putCalls, 1);
-  assert.equal(completeCalls, 1, 'completion must probe whether S3 stored the ambiguous PUT');
+  assert.equal(putCalls, 2, 'the same blob/key must be PUT again after an ambiguous response');
+  assert.equal(completeCalls, 1, 'completion is sent only after an observed PUT 2xx');
   assert.equal(finalizeCalls, 1);
+});
+
+test('a PUT-2xx acknowledgement survives completion failure and reload without another PUT', async () => {
+  const sessionStorageImpl = createMemoryStorage();
+  const localStorageImpl = createMemoryStorage({ studentToken: 'header.payload.attempt-signature' });
+  let allowCompletion = false;
+  let presignCalls = 0;
+  let putCalls = 0;
+  let completeCalls = 0;
+  let reconcileCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => {
+      presignCalls += 1;
+      return { data: { url: 'https://s3.test/receipt-reload', partIndex: index, uploadId } };
+    },
+    completeRecordingPart: async (index, size, uploadId) => {
+      completeCalls += 1;
+      if (!allowCompletion) {
+        throw Object.assign(new Error('completion response unavailable'), {
+          response: { status: 503 },
+        });
+      }
+      return completedResponse(index, size, uploadId);
+    },
+    finalizeRecording: async () => assert.fail('the first module must not reach finalize'),
+    getRecordingStatus: async () => ({ data: {
+      state: 'processing',
+      recordMode: 's3',
+      expectedPartCount: 1,
+      completedPartCount: allowCompletion ? 1 : 0,
+      finalPartIndex: 0,
+    } }),
+    reconcileRecording: async () => {
+      reconcileCalls += 1;
+      return { data: {
+        state: 'finalized',
+        recordMode: 's3',
+        expectedPartCount: 1,
+        completedPartCount: 1,
+        finalPartIndex: 0,
+      } };
+    },
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    sessionStorageImpl,
+    localStorageImpl,
+    fetchImpl: async () => {
+      putCalls += 1;
+      return { ok: true, status: 200 };
+    },
+  });
+  const firstRecorder = await importFreshRecorder();
+
+  await firstRecorder.requestSetup('s3');
+  firstRecorder.start({ mode: 's3' });
+  await assert.rejects(firstRecorder.stopAndSave(), (error) => error?.stage === 'complete');
+
+  assert.equal(presignCalls, 1);
+  assert.equal(putCalls, 1);
+  assert.equal(completeCalls, 5);
+  assert.equal(firstRecorder.hasStoredUploadAcknowledgements(), true);
+
+  allowCompletion = true;
+  const reloadedRecorder = await importFreshRecorder();
+  const recovered = await reloadedRecorder.recoverRecordingFinalization();
+
+  assert.equal(recovered.state, 'finalized');
+  assert.equal(presignCalls, 1, 'reload recovery must not request another URL');
+  assert.equal(putCalls, 1, 'reload recovery must not upload the 5-minute blob again');
+  assert.equal(completeCalls, 6, 'reload replays only the idempotent completion acknowledgement');
+  assert.equal(reconcileCalls, 1);
+  assert.equal(reloadedRecorder.hasStoredUploadAcknowledgements(), false);
+});
+
+test('terminal status failure quarantines a stored PUT receipt after reload', async () => {
+  const sessionStorageImpl = createMemoryStorage();
+  const localStorageImpl = createMemoryStorage({ studentToken: 'header.payload.expiring-attempt' });
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => ({
+      data: { url: 'https://s3.test/receipt-expired-auth', partIndex: index, uploadId },
+    }),
+    completeRecordingPart: async () => {
+      throw Object.assign(new Error('completion temporarily unavailable'), {
+        response: { status: 503 },
+      });
+    },
+    finalizeRecording: async () => assert.fail('failed completion must not finalize'),
+    getRecordingStatus: async () => {
+      throw Object.assign(new Error('student session expired'), {
+        response: { status: 401, data: { reason: 'invalid_student_token' } },
+      });
+    },
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    sessionStorageImpl,
+    localStorageImpl,
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+  });
+  const firstRecorder = await importFreshRecorder();
+
+  await firstRecorder.requestSetup('s3');
+  firstRecorder.start({ mode: 's3' });
+  await assert.rejects(firstRecorder.stopAndSave(), (error) => error?.stage === 'complete');
+  assert.equal(firstRecorder.hasStoredUploadAcknowledgements(), true);
+
+  const reloadedRecorder = await importFreshRecorder();
+  await assert.rejects(
+    reloadedRecorder.recoverRecordingFinalization(),
+    (error) => reloadedRecorder.isRetryableFinalizationFailure(error) === false,
+  );
+  assert.equal(reloadedRecorder.hasStoredUploadAcknowledgements(), false);
+});
+
+test('hardened sessionStorage failures never crash receipt inspection', async () => {
+  const throwingStorage = {
+    getItem: () => { throw new DOMException('blocked', 'SecurityError'); },
+    setItem: () => { throw new DOMException('blocked', 'SecurityError'); },
+    removeItem: () => { throw new DOMException('blocked', 'SecurityError'); },
+    clear: () => { throw new DOMException('blocked', 'SecurityError'); },
+  };
+  installBrowserFixture({
+    api: {},
+    sessionStorageImpl: throwingStorage,
+    fetchImpl: async () => ({ ok: true }),
+  });
+  const recorder = await importFreshRecorder();
+
+  assert.doesNotThrow(() => recorder.hasStoredUploadAcknowledgements());
+  assert.equal(recorder.hasStoredUploadAcknowledgements(), false);
+});
+
+test('same-tab retry replays completion after PUT 2xx without presigning or uploading again', async () => {
+  const sessionStorageImpl = createMemoryStorage();
+  let allowCompletion = false;
+  let presignCalls = 0;
+  let putCalls = 0;
+  let completeCalls = 0;
+  let finalizeCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => {
+      presignCalls += 1;
+      return { data: { url: 'https://s3.test/receipt-same-tab', partIndex: index, uploadId } };
+    },
+    completeRecordingPart: async (index, size, uploadId) => {
+      completeCalls += 1;
+      if (!allowCompletion) {
+        throw Object.assign(new Error('completion temporarily unavailable'), {
+          response: { status: 503 },
+        });
+      }
+      return completedResponse(index, size, uploadId);
+    },
+    finalizeRecording: async () => { finalizeCalls += 1; },
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    sessionStorageImpl,
+    fetchImpl: async () => {
+      putCalls += 1;
+      return { ok: true, status: 200 };
+    },
+  });
+  const recorder = await importFreshRecorder();
+
+  await recorder.requestSetup('s3');
+  recorder.start({ mode: 's3' });
+  await assert.rejects(recorder.stopAndSave(), (error) => error?.stage === 'complete');
+  assert.equal(recorder.canRetryFinalization(), true);
+  assert.equal(completeCalls, 5);
+
+  allowCompletion = true;
+  await recorder.retryFinalization();
+
+  assert.equal(presignCalls, 1);
+  assert.equal(putCalls, 1);
+  assert.equal(completeCalls, 6);
+  assert.equal(finalizeCalls, 1);
+  assert.equal(recorder.hasStoredUploadAcknowledgements(), false);
+});
+
+test('a terminal completion rejection removes its receipt instead of offering endless retry', async () => {
+  const sessionStorageImpl = createMemoryStorage();
+  let completeCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => ({
+      data: { url: 'https://s3.test/terminal-receipt', partIndex: index, uploadId },
+    }),
+    completeRecordingPart: async () => {
+      completeCalls += 1;
+      throw Object.assign(new Error('reservation no longer exists'), {
+        response: { status: 409, data: { reason: 'reservation_not_found' } },
+      });
+    },
+    finalizeRecording: async () => assert.fail('terminal acknowledgement must not finalize'),
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    sessionStorageImpl,
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+  });
+  const recorder = await importFreshRecorder();
+
+  await recorder.requestSetup('s3');
+  recorder.start({ mode: 's3' });
+  await assert.rejects(recorder.stopAndSave(), (error) => (
+    error?.stage === 'complete' && error?.retryable === false
+  ));
+
+  assert.equal(completeCalls, 1);
+  assert.equal(recorder.hasStoredUploadAcknowledgements(), false);
+  assert.equal(recorder.canRetryFinalization(), false);
+});
+
+test('a mismatched completion byte size cannot discard the PUT acknowledgement or blob', async () => {
+  const sessionStorageImpl = createMemoryStorage();
+  let returnCorrectSize = false;
+  let presignCalls = 0;
+  let putCalls = 0;
+  let completeCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => {
+      presignCalls += 1;
+      return { data: { url: 'https://s3.test/size-mismatch', partIndex: index, uploadId } };
+    },
+    completeRecordingPart: async (index, size, uploadId) => {
+      completeCalls += 1;
+      return completedResponse(index, returnCorrectSize ? size : size + 1, uploadId);
+    },
+    finalizeRecording: async () => undefined,
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    sessionStorageImpl,
+    fetchImpl: async () => {
+      putCalls += 1;
+      return { ok: true, status: 200 };
+    },
+  });
+  const recorder = await importFreshRecorder();
+
+  await recorder.requestSetup('s3');
+  recorder.start({ mode: 's3' });
+  await assert.rejects(recorder.stopAndSave(), (error) => error?.stage === 'complete');
+  assert.equal(recorder.hasStoredUploadAcknowledgements(), true);
+
+  returnCorrectSize = true;
+  await recorder.retryFinalization();
+
+  assert.equal(presignCalls, 1);
+  assert.equal(putCalls, 1);
+  assert.equal(completeCalls, 6);
+  assert.equal(recorder.hasStoredUploadAcknowledgements(), false);
 });
 
 test('an active S3 interval is reserved before its blob enters the upload queue', async () => {
@@ -777,29 +1058,21 @@ test('an active S3 interval is reserved before its blob enters the upload queue'
   assert.equal(putCalls, 1);
 });
 
-test('status recovery reconciles server truth and confirms finalized state after a lost response', async () => {
+test('status recovery trusts a finalized reconcile response without a redundant status request', async () => {
   const calls = [];
   let statusCalls = 0;
   const api = {
     getRecordingStatus: async () => {
       statusCalls += 1;
       calls.push(`status-${statusCalls}`);
-      return {
-        data: statusCalls === 1
-          ? {
-              state: 'processing',
-              recordMode: 's3',
-              expectedPartCount: 1,
-              completedPartCount: 0,
-            }
-          : {
-              state: 'finalized',
-              recordMode: 's3',
-              expectedPartCount: 1,
-              completedPartCount: 1,
-              finalPartIndex: 0,
-            },
-      };
+      if (statusCalls > 1) throw new Error('redundant status confirmation was lost');
+      return { data: {
+        state: 'processing',
+        recordMode: 's3',
+        expectedPartCount: 1,
+        completedPartCount: 1,
+        finalPartIndex: 0,
+      } };
     },
     reconcileRecording: async () => {
       calls.push('reconcile');
@@ -819,9 +1092,216 @@ test('status recovery reconciles server truth and confirms finalized state after
 
   const status = await recorder.recoverRecordingFinalization();
 
-  assert.deepEqual(calls, ['status-1', 'reconcile', 'status-2']);
+  assert.deepEqual(calls, ['status-1', 'reconcile']);
   assert.equal(status.state, 'finalized');
   assert.equal(status.completedPartCount, 1);
+});
+
+test('status recovery confirms server truth after the reconcile response is lost', async () => {
+  const calls = [];
+  let statusCalls = 0;
+  const api = {
+    getRecordingStatus: async () => {
+      statusCalls += 1;
+      calls.push(`status-${statusCalls}`);
+      return { data: statusCalls === 1
+        ? {
+            state: 'processing',
+            recordMode: 's3',
+            expectedPartCount: 1,
+            completedPartCount: 1,
+            finalPartIndex: 0,
+          }
+        : {
+            state: 'finalized',
+            recordMode: 's3',
+            expectedPartCount: 1,
+            completedPartCount: 1,
+            finalPartIndex: 0,
+          } };
+    },
+    reconcileRecording: async () => {
+      calls.push('reconcile');
+      throw Object.assign(new Error('response was lost'), { response: { status: 503 } });
+    },
+  };
+  installBrowserFixture({ api, fetchImpl: async () => ({ ok: true }) });
+  const recorder = await importFreshRecorder();
+
+  const status = await recorder.recoverRecordingFinalization();
+
+  assert.deepEqual(calls, ['status-1', 'reconcile', 'status-2']);
+  assert.equal(status.state, 'finalized');
+});
+
+test('an uncommitted DB finalization keeps N/N status retryable after reload', async () => {
+  let statusCalls = 0;
+  let reconcileCalls = 0;
+  const api = {
+    getRecordingStatus: async () => {
+      statusCalls += 1;
+      return { data: {
+        state: 'processing',
+        recordMode: 's3',
+        expectedPartCount: 1,
+        completedPartCount: 1,
+        finalPartIndex: 0,
+      } };
+    },
+    reconcileRecording: async () => {
+      reconcileCalls += 1;
+      throw Object.assign(new Error('database temporarily unavailable'), {
+        response: { status: 503 },
+      });
+    },
+  };
+  installBrowserFixture({ api, fetchImpl: async () => ({ ok: true }) });
+  const recorder = await importFreshRecorder();
+
+  await assert.rejects(
+    recorder.recoverRecordingFinalization(),
+    (error) => recorder.isRetryableFinalizationFailure(error),
+  );
+  assert.equal(statusCalls, 2);
+  assert.equal(reconcileCalls, 1);
+});
+
+test('status recovery does not call DB finalization while upload acknowledgements are missing', async () => {
+  let reconcileCalls = 0;
+  const api = {
+    getRecordingStatus: async () => ({ data: {
+      state: 'processing',
+      recordMode: 's3',
+      expectedPartCount: 2,
+      completedPartCount: 1,
+      finalPartIndex: 1,
+    } }),
+    reconcileRecording: async () => {
+      reconcileCalls += 1;
+      throw new Error('DB finalization cannot recover a missing PUT acknowledgement');
+    },
+  };
+  installBrowserFixture({ api, fetchImpl: async () => ({ ok: true }) });
+  const recorder = await importFreshRecorder();
+
+  const status = await recorder.recoverRecordingFinalization();
+
+  assert.equal(status.state, 'processing');
+  assert.equal(status.completedPartCount, 1);
+  assert.equal(reconcileCalls, 0);
+});
+
+test('recording storage configuration failures are not offered as endless retries', async () => {
+  installBrowserFixture({ api: {}, fetchImpl: async () => ({ ok: true }) });
+  const recorder = await importFreshRecorder();
+  const error = Object.assign(new Error('storage unavailable'), {
+    response: {
+      status: 503,
+      data: { reason: 'recording_storage_not_configured' },
+    },
+  });
+
+  assert.equal(recorder.isRetryableFinalizationFailure(error), false);
+  assert.equal(recorder.isRetryableFinalizationFailure(Object.assign(new Error('upload blocked'), {
+    response: {
+      status: 424,
+      data: { reason: 'recording_upload_blocked' },
+    },
+  })), false);
+});
+
+test('an administrator-repaired storage configuration can manually upload blobs still in this tab', async () => {
+  let presignCalls = 0;
+  let putCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => {
+      presignCalls += 1;
+      if (presignCalls === 1) {
+        throw Object.assign(new Error('IAM read-back permission is missing'), {
+          response: {
+            status: 424,
+            data: { reason: 'recording_storage_misconfigured' },
+          },
+        });
+      }
+      return { data: { url: 'https://s3.test/repaired', partIndex: index, uploadId } };
+    },
+    completeRecordingPart: async (...args) => completedResponse(...args),
+    finalizeRecording: async () => undefined,
+  };
+  installBrowserFixture({
+    api,
+    fetchImpl: async () => {
+      putCalls += 1;
+      return { ok: true };
+    },
+  });
+  const recorder = await importFreshRecorder();
+
+  await recorder.requestSetup('s3');
+  recorder.start({ mode: 's3' });
+  await assert.rejects(
+    recorder.stopAndSave(),
+    (error) => error?.stage === 'presign' && error?.retryable === false,
+  );
+
+  assert.equal(presignCalls, 1, 'a permanent configuration error must not back off automatically');
+  assert.equal(putCalls, 0);
+  assert.equal(recorder.canRetryFinalization(), true, 'the in-memory blob must remain manually recoverable');
+
+  await recorder.retryFinalization();
+  assert.equal(presignCalls, 2);
+  assert.equal(putCalls, 1);
+  assert.equal(recorder.canRetryFinalization(), false);
+});
+
+test('a CORS-like Failed to fetch becomes bounded manual recovery and retains the blob', async () => {
+  let uploadAllowed = false;
+  let presignCalls = 0;
+  let putCalls = 0;
+  let completeCalls = 0;
+  const api = {
+    getRecordingUploadUrl: async (index, _contentType, uploadId) => {
+      presignCalls += 1;
+      return { data: { url: `https://s3.test/upload/${presignCalls}`, partIndex: index, uploadId } };
+    },
+    completeRecordingPart: async (...args) => {
+      completeCalls += 1;
+      return completedResponse(...args);
+    },
+    finalizeRecording: async () => undefined,
+  };
+  installBrowserFixture({
+    api,
+    fastRetryDelays: true,
+    fetchImpl: async () => {
+      putCalls += 1;
+      if (!uploadAllowed) throw new TypeError('Failed to fetch');
+      return { ok: true };
+    },
+  });
+  const recorder = await importFreshRecorder();
+
+  await recorder.requestSetup('s3');
+  recorder.start({ mode: 's3' });
+  await assert.rejects(
+    recorder.stopAndSave(),
+    (error) => error?.stage === 'upload'
+      && error?.retryable === false
+      && error?.cause?.response?.data?.reason === 'recording_upload_blocked',
+  );
+
+  assert.equal(presignCalls, 1);
+  assert.equal(putCalls, 5, 'CORS/network ambiguity must use only the bounded retry budget');
+  assert.equal(completeCalls, 0, 'a failed/ambiguous PUT must never be acknowledged');
+  assert.equal(recorder.canRetryFinalization(), true);
+
+  uploadAllowed = true;
+  await recorder.retryFinalization();
+  assert.equal(presignCalls, 2, 'manual retry must obtain a fresh URL after CORS/network repair');
+  assert.equal(putCalls, 6);
+  assert.equal(completeCalls, 1);
+  assert.equal(recorder.canRetryFinalization(), false);
 });
 
 test('local recording keeps its encrypted file path and never calls S3 seal or finalize', async () => {
@@ -892,11 +1372,6 @@ test('an expired presigned URL allows whole-pipeline retry with a fresh URL', as
     },
     completeRecordingPart: async (...args) => {
       completeCalls += 1;
-      if (putCalls === 1) {
-        throw Object.assign(new Error('S3 object is not present'), {
-          response: { status: 409, data: { reason: 'recording_object_missing' } },
-        });
-      }
       return completedResponse(...args);
     },
     finalizeRecording: async () => undefined,
@@ -918,7 +1393,7 @@ test('an expired presigned URL allows whole-pipeline retry with a fresh URL', as
   await recorder.retryFinalization();
   assert.equal(presignCalls, 2, 'manual retry must request a fresh presigned URL');
   assert.equal(putCalls, 2);
-  assert.equal(completeCalls, 2, 'the first failed PUT is probed before retrying with a fresh URL');
+  assert.equal(completeCalls, 1, 'the failed PUT is never acknowledged');
 });
 
 test('pre-exam discard releases sharing without uploading or reporting a violation', async () => {
