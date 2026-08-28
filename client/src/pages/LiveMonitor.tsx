@@ -77,12 +77,72 @@ function LiveMonitor() {
     connecting: 'Đang chờ học viên kết nối…', 'connected-direct': 'Đang xem P2P trực tiếp',
     'connected-relay': 'Đang xem qua TURN relay', failed: 'Không kết nối được', ended: 'Đã dừng',
   };
-  return <div className="min-h-screen bg-slate-50 p-4 md:p-8"><div className="max-w-6xl mx-auto">
-    <AdminNav />
-    <div className="flex items-center justify-between gap-4 mb-6"><div><Link to={`/admin/batches/${id}/students`} className="inline-flex items-center gap-1 text-sm text-slate-500 hover:text-blue-700"><ArrowLeft size={15}/> Học viên</Link><h1 className="mt-2 text-2xl font-bold text-slate-900">Live Monitor</h1><p className="text-sm text-slate-500">WebRTC P2P; TURN chỉ dùng khi không thể kết nối trực tiếp.</p></div><button onClick={() => void load()} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><RefreshCw size={15}/> Làm mới</button></div>
-    {error && <div className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
-    <div className="grid gap-5 lg:grid-cols-[360px_1fr]"><section className="rounded-xl border bg-white p-4"><h2 className="font-semibold">Đang thi ({students.length})</h2>{loading ? <p className="mt-4 text-sm text-slate-500">Đang tải…</p> : students.length === 0 ? <p className="mt-4 text-sm text-slate-500">Chưa có học viên đang thi.</p> : <div className="mt-3 space-y-2">{students.map((student) => <div key={student.id} className="rounded-lg border p-3"><p className="truncate text-sm font-medium">{student.email}</p><p className="mt-1 text-xs text-slate-500">{student.exam_started_at ? new Date(student.exam_started_at).toLocaleString() : 'Đang khởi tạo'}</p><button disabled={!!selected} onClick={() => void view(student)} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50"><MonitorPlay size={15}/> Xem live</button></div>)}</div>}</section>
-    <section className="rounded-xl border bg-slate-950 p-3 text-white"><div className="mb-3 flex items-center justify-between"><span className="inline-flex items-center gap-2 text-sm"><Wifi size={15}/>{status ? statusText[status] : 'Chưa chọn học viên'}</span>{selected && <button onClick={() => void stop()} className="inline-flex items-center gap-2 rounded-md bg-red-600 px-3 py-1.5 text-sm"><Square size={14}/> Dừng xem</button>}</div><div className="aspect-video overflow-hidden rounded-lg bg-black"><video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-contain" /></div><p className="mt-3 text-xs text-slate-400">Mỗi admin chỉ xem một luồng tại một thời điểm. Hoạt động mở/dừng phiên được ghi audit.</p></section></div>
-  </div></div>;
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <div className="container space-y-6">
+        <div className="flex flex-col items-start justify-between gap-4 border-b border-slate-200 pb-4 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-3">
+            <div className="rounded-lg bg-emerald-100 p-2 text-emerald-600">
+              <MonitorPlay size={24} />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">Live Monitor</h1>
+              <p className="text-sm text-slate-500">Theo dõi màn hình học viên đang thi theo thời gian thực.</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+            >
+              <RefreshCw size={15} />
+              Làm mới
+            </button>
+            <Link
+              to={`/admin/batches/${id}/students`}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm transition-colors hover:bg-slate-50"
+            >
+              <ArrowLeft size={16} />
+              <span className="hidden sm:inline">Học viên</span>
+            </Link>
+          </div>
+        </div>
+
+        <AdminNav />
+
+        {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
+
+        <div className="grid gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-semibold text-slate-900">Đang thi ({students.length})</h2>
+            {loading ? <p className="mt-4 text-sm text-slate-500">Đang tải…</p> : students.length === 0 ? <p className="mt-4 text-sm text-slate-500">Chưa có học viên đang thi.</p> : (
+              <div className="mt-4 space-y-3">
+                {students.map((student) => (
+                  <div key={student.id} className="rounded-lg border border-slate-200 p-3">
+                    <p className="truncate text-sm font-medium text-slate-900">{student.email}</p>
+                    <p className="mt-1 text-xs text-slate-500">{student.exam_started_at ? new Date(student.exam_started_at).toLocaleString() : 'Đang khởi tạo'}</p>
+                    <button disabled={!!selected} onClick={() => void view(student)} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+                      <MonitorPlay size={15} />
+                      Xem live
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-slate-800 bg-slate-950 p-4 text-white shadow-sm">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-2 text-sm"><Wifi size={15} />{status ? statusText[status] : 'Chưa chọn học viên'}</span>
+              {selected && <button onClick={() => void stop()} className="inline-flex items-center gap-2 rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium transition-colors hover:bg-red-700"><Square size={14} />Dừng xem</button>}
+            </div>
+            <div className="aspect-video overflow-hidden rounded-lg bg-black"><video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-contain" /></div>
+            <p className="mt-3 text-xs text-slate-400">Mỗi admin chỉ xem một luồng tại một thời điểm. Hoạt động mở/dừng phiên được ghi audit.</p>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
 }
 export default LiveMonitor;
