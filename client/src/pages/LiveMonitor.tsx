@@ -59,7 +59,15 @@ function LiveMonitor() {
         },
       });
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Không thể mở phiên xem live.');
+      // Axios errors carry the server response; signaling errors are plain
+      // Errors. Keep the latter visible so deployment issues are diagnosable
+      // without exposing JWTs, ICE credentials, or other secrets.
+      const message = err.response?.data?.error || err.message || 'Không thể mở phiên xem live.';
+      console.error('[live-monitor] could not start viewer', {
+        message,
+        status: err.response?.status,
+      });
+      setError(message);
       setStatus('failed');
     }
   };
