@@ -19,6 +19,8 @@ function Results() {
   const [saving, setSaving] = useState(false);
   const [resettingStudentId, setResettingStudentId] = useState<number | null>(null);
   const [gradingStudentId, setGradingStudentId] = useState<number | null>(null);
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<number>>(new Set());
+  const [gradingSelected, setGradingSelected] = useState(false);
   const [aiSettingsVerified, setAiSettingsVerified] = useState(false);
   const [detailLoadingStudentId, setDetailLoadingStudentId] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -34,6 +36,7 @@ function Results() {
     detailCacheRef.current.clear();
     setSelectedStudent(null);
     setViolationDetail(null);
+    setSelectedStudentIds(new Set());
     setCurrentPage(1);
   }, [id]);
 
@@ -211,6 +214,71 @@ function Results() {
     && Number(batch?.created_by) === userId
     && aiSettingsVerified;
 
+  const pageStudentIds = results.map(result => Number(result.student.id));
+  const allPageSelected = pageStudentIds.length > 0
+    && pageStudentIds.every(studentId => selectedStudentIds.has(studentId));
+  const somePageSelected = pageStudentIds.some(studentId => selectedStudentIds.has(studentId));
+
+  const toggleStudentSelection = (studentId: number) => {
+    setSelectedStudentIds(previous => {
+      const next = new Set(previous);
+      next.has(studentId) ? next.delete(studentId) : next.add(studentId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllStudents = () => {
+    setSelectedStudentIds(previous => {
+      const next = new Set(previous);
+      if (allPageSelected) pageStudentIds.forEach(studentId => next.delete(studentId));
+      else pageStudentIds.forEach(studentId => next.add(studentId));
+      return next;
+    });
+  };
+
+  const handleSelectedAiGrade = async () => {
+    if (!canManageAiGrading || selectedStudentIds.size === 0 || !id) return;
+    const studentIds = Array.from(selectedStudentIds);
+    if (!window.confirm(
+      `Regrade ${studentIds.length} selected student(s)?\n\n`
+      + 'Submitted exams will be graded with the latest answers and rubrics. Pending or in-progress exams will be skipped.'
+    )) return;
+
+    setGradingSelected(true);
+    try {
+      const response = await adminApi.gradeStudentsWithAI(Number(id), studentIds);
+      const data = response.data;
+      const failureDetails = (data.failures || [])
+        .map((failure: any) => `Student ${failure.studentId}: ${failure.error}`)
+        .join('\n');
+      const retryIds = [
+        ...(data.remainingStudentIds || []),
+        ...(data.failures || []).map((failure: any) => Number(failure.studentId)),
+      ].map(Number);
+      setSelectedStudentIds(new Set(retryIds));
+      studentIds.forEach(studentId => detailCacheRef.current.delete(studentId));
+      if (selectedStudent?.student?.id && studentIds.includes(Number(selectedStudent.student.id))) {
+        setSelectedStudent(null);
+      }
+      await loadResults();
+      window.alert([
+        'Regrade finished.',
+        `Completed: ${Number(data.completed) || 0}`,
+        `Skipped: ${Number(data.skipped) || 0}`,
+        `Failed: ${Number(data.failed) || 0}`,
+        `Remaining: ${Number(data.remaining) || 0}`,
+        retryIds.length > 0 ? 'Failed or remaining students stay selected so you can retry.' : '',
+        failureDetails ? `\n${failureDetails}` : '',
+      ].filter(Boolean).join('\n'));
+    } catch (error: any) {
+      studentIds.forEach(studentId => detailCacheRef.current.delete(studentId));
+      await loadResults();
+      window.alert(error.response?.data?.error || error.message || 'Selected student grading failed.');
+    } finally {
+      setGradingSelected(false);
+    }
+  };
+
   return (
     <div className="container">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 pb-4 border-b border-slate-200 gap-4">
@@ -236,8 +304,18 @@ function Results() {
         <div className="flex items-center gap-3">
           <PageSizeSelect
             value={pageSize}
-            onChange={size => { setPageSize(size); setCurrentPage(1); }}
+            onChange={size => { setPageSize(size); setCurrentPage(1); setSelectedStudentIds(new Set()); }}
           />
+          {canManageAiGrading && (
+            <button
+              onClick={handleSelectedAiGrade}
+              disabled={selectedStudentIds.size === 0 || gradingSelected || gradingStudentId !== null}
+              className="inline-flex shrink-0 items-center gap-1.5 px-3 py-1.5 bg-indigo-600 border border-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 hover:border-indigo-700 transition-colors shadow-sm disabled:opacity-50"
+            >
+              <Sparkles size={14} />
+              {gradingSelected ? 'Regrading...' : `Regrade (${selectedStudentIds.size})`}
+            </button>
+          )}
           <button
             onClick={handleExport}
             disabled={total === 0}
@@ -261,6 +339,20 @@ function Results() {
               <table className="w-full text-sm text-left">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200">
+                    {canManageAiGrading && (
+                      <th className="px-4 py-4 text-center w-12">
+                        <input
+                          type="checkbox"
+                          checked={allPageSelected}
+                          ref={element => { if (element) element.indeterminate = somePageSelected && !allPageSelected; }}
+                          onChange={toggleSelectAllStudents}
+                          disabled={pageStudentIds.length === 0 || gradingSelected || gradingStudentId !== null}
+                          aria-label="Select all students on this page"
+                          title="Select all students on this page"
+                          className="w-4 h-4 text-indigo-600 bg-slate-100 border-slate-300 rounded focus:ring-indigo-500 disabled:opacity-50 cursor-pointer"
+                        />
+                      </th>
+                    )}
                     <th className="px-6 py-4 font-semibold text-slate-600">Student</th>
                     <th className="px-6 py-4 font-semibold text-slate-600 text-center">Status</th>
                     <th className="px-6 py-4 font-semibold text-slate-600">Violations</th>
@@ -270,7 +362,22 @@ function Results() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {results.map(r => (
-                    <tr key={r.student.id} className="hover:bg-slate-50/50 transition-colors">
+                    <tr
+                      key={r.student.id}
+                      className={`transition-colors ${selectedStudentIds.has(Number(r.student.id)) ? 'bg-indigo-50/50' : 'hover:bg-slate-50/50'}`}
+                    >
+                      {canManageAiGrading && (
+                        <td className="px-4 py-4 text-center">
+                          <input
+                            type="checkbox"
+                            checked={selectedStudentIds.has(Number(r.student.id))}
+                            onChange={() => toggleStudentSelection(Number(r.student.id))}
+                            disabled={gradingSelected || gradingStudentId !== null}
+                            aria-label={`Select ${r.student.email} for re-grading`}
+                            className="w-4 h-4 text-indigo-600 bg-slate-100 border-slate-300 rounded focus:ring-indigo-500 disabled:opacity-50 cursor-pointer"
+                          />
+                        </td>
+                      )}
                       <td className="px-6 py-4">
                         <div className="font-medium text-slate-900">{r.student.email}</div>
                         {/* Mật khẩu giải nén video record (mode local). HV không thấy — chỉ admin. */}
@@ -375,8 +482,8 @@ function Results() {
                           {canManageAiGrading && r.student.status === 'submitted' && r.student.questions_count > 0 && (
                             <button
                               onClick={() => handleStudentAiGrade(r)}
-                              disabled={gradingStudentId !== null || r.student.ai_grading_status === 'processing'}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50"
+                              disabled={gradingStudentId !== null || gradingSelected || r.student.ai_grading_status === 'processing'}
+                              className="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-3 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm font-medium hover:bg-indigo-100 transition-colors disabled:opacity-50"
                               title={r.student.ai_grading_error || undefined}
                             >
                               <Sparkles size={14} />
@@ -385,7 +492,7 @@ function Results() {
                                 : r.student.ai_grading_status === 'completed'
                                   ? 'Regrade AI'
                                   : r.student.ai_grading_status === 'failed'
-                                    ? 'Retry AI Grade'
+                                    ? 'Regrade'
                                     : 'AI Grade'}
                             </button>
                           )}
@@ -393,7 +500,7 @@ function Results() {
                             <button
                               onClick={() => handleResetExam(r.student)}
                               disabled={resettingStudentId === r.student.id}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-sm font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
+                              className="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-sm font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
                               title="Continue with the saved questions and answers"
                             >
                               <RotateCcw size={14} />
@@ -403,7 +510,7 @@ function Results() {
                           <button
                             onClick={() => handleReview(r)}
                             disabled={detailLoadingStudentId === r.student.id}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
+                            className="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-100 transition-colors"
                           >
                             <Settings2 size={14} />
                             {detailLoadingStudentId === r.student.id ? 'Loading...' : 'Review'}
@@ -414,7 +521,7 @@ function Results() {
                   ))}
                   {results.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-6 py-12 text-center text-slate-500">
+                      <td colSpan={canManageAiGrading ? 6 : 5} className="px-6 py-12 text-center text-slate-500">
                         <div className="flex flex-col items-center justify-center gap-2">
                           <FileJson size={32} className="text-slate-300" />
                           <p>No results available for this batch yet.</p>
@@ -434,7 +541,7 @@ function Results() {
               </span>
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setCurrentPage(page => Math.max(1, page - 1))}
+                  onClick={() => { setSelectedStudentIds(new Set()); setCurrentPage(page => Math.max(1, page - 1)); }}
                   disabled={currentPage === 1}
                   className="inline-flex items-center gap-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm disabled:opacity-50"
                 >
@@ -442,7 +549,7 @@ function Results() {
                 </button>
                 <span className="text-sm font-medium text-slate-600">Page {currentPage} / {totalPages}</span>
                 <button
-                  onClick={() => setCurrentPage(page => Math.min(totalPages, page + 1))}
+                  onClick={() => { setSelectedStudentIds(new Set()); setCurrentPage(page => Math.min(totalPages, page + 1)); }}
                   disabled={currentPage === totalPages}
                   className="inline-flex items-center gap-1 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm disabled:opacity-50"
                 >

@@ -258,6 +258,72 @@ try {
 
   await pool.query(`
     UPDATE students SET status = 'submitted', submitted_at = NOW()
+    WHERE id = $1
+  `, [students[1].id]);
+  await pool.query(`
+    UPDATE exam_questions SET answer = CONCAT('R1-Q', question_order)
+    WHERE student_id = $1
+  `, [students[0].id]);
+
+  const selectedRunStart = mockState.gradingCalls.length;
+  const selectedRun = await requestJson(`/api/admin/batches/${batchId}/students/ai-grade`, {
+    method: 'POST',
+    token: ownerToken,
+    body: {
+      student_ids: [students[0].id, students[1].id, students[2].id],
+    },
+  });
+  assert.equal(selectedRun.response.status, 200, JSON.stringify(selectedRun.payload));
+  assert.deepEqual(
+    {
+      requested: selectedRun.payload.requested,
+      total: selectedRun.payload.total,
+      completed: selectedRun.payload.completed,
+      failed: selectedRun.payload.failed,
+      skipped: selectedRun.payload.skipped,
+      remaining: selectedRun.payload.remaining,
+    },
+    { requested: 3, total: 2, completed: 2, failed: 0, skipped: 1, remaining: 0 },
+  );
+  assert.deepEqual(
+    selectedRun.payload.results.map((result) => ({ studentId: result.studentId, mode: result.mode })),
+    [
+      { studentId: students[0].id, mode: 'regrade' },
+      { studentId: students[1].id, mode: 'initial' },
+    ],
+  );
+  assert.deepEqual(selectedRun.payload.skippedStudents, [{
+    studentId: students[2].id,
+    examStatus: 'in_progress',
+    gradingStatus: 'pending',
+    reason: 'not_submitted',
+  }]);
+  const selectedCalls = mockState.gradingCalls.slice(selectedRunStart);
+  assert.equal(selectedCalls.length, 2, 'Only the two selected submitted students should reach the LLM');
+  assert.deepEqual(
+    selectedCalls.map((call) => call.input[0].student_answer.match(/^[SR]\d+-Q\d+/)?.[0]).sort(),
+    ['R1-Q1', 'S2-Q1'],
+  );
+  const selectedRows = await pool.query(`
+    SELECT s.id, s.ai_final_score, s.ai_grading_status, s.ai_summary_feedback,
+           eq.question_order, eq.ai_feedback
+    FROM students s
+    JOIN exam_questions eq ON eq.student_id = s.id
+    WHERE s.id = ANY($1::int[])
+    ORDER BY s.id, eq.question_order
+  `, [[students[0].id, students[1].id]]);
+  for (const row of selectedRows.rows) {
+    const student = students.find((entry) => entry.id === Number(row.id));
+    const expected = student.number === 1 ? `R1-Q${row.question_order}` : `S2-Q${row.question_order}`;
+    const expectedSummary = student.number === 1 ? 'R1-Q1' : 'S2-Q1';
+    assert.equal(Number(row.ai_final_score), 10);
+    assert.equal(row.ai_grading_status, 'completed');
+    assert.match(String(row.ai_summary_feedback), new RegExp(`summary:${expectedSummary}`));
+    assert.match(String(row.ai_feedback), new RegExp(`feedback:${expected}:`));
+  }
+
+  await pool.query(`
+    UPDATE students SET status = 'submitted', submitted_at = NOW()
     WHERE batch_id = $1 AND status = 'in_progress'
   `, [batchId]);
 
@@ -268,7 +334,7 @@ try {
   assert.equal(secondRun.response.status, 200, JSON.stringify(secondRun.payload));
   assert.deepEqual(
     { total: secondRun.payload.total, completed: secondRun.payload.completed, failed: secondRun.payload.failed, remaining: secondRun.payload.remaining },
-    { total: 24, completed: 24, failed: 0, remaining: 0 },
+    { total: 23, completed: 23, failed: 0, remaining: 0 },
   );
 
   const secondCalls = mockState.gradingCalls.slice(secondRunStart);
@@ -279,7 +345,7 @@ try {
     const owner = Number([...owners][0]);
     callsByStudent.set(owner, (callsByStudent.get(owner) || 0) + 1);
   }
-  for (let studentNumber = 2; studentNumber <= 24; studentNumber += 1) {
+  for (let studentNumber = 3; studentNumber <= 24; studentNumber += 1) {
     assert.equal(callsByStudent.get(studentNumber), 1, `Student ${studentNumber} should use one LLM request`);
   }
   assert.ok(callsByStudent.get(25) > 1, 'Oversized student input should use chunk fallback');
@@ -295,11 +361,11 @@ try {
     const rows = savedRows.rows.filter((row) => Number(row.id) === student.id);
     assert.equal(rows.length, questionIds.length);
     assert.equal(rows[0].ai_grading_status, 'completed');
-    const expectedFinalScore = student.number === 1 ? 0 : (student.number === 3 ? 3.3 : 10);
+    const expectedFinalScore = student.number === 3 ? 3.3 : 10;
     assert.equal(Number(rows[0].ai_final_score), expectedFinalScore);
     for (const row of rows) {
-      const expected = student.number === 1 ? 'EMPTY' : `S${student.number}-Q${row.question_order}`;
-      const expectedQuestionScore = student.number === 1 ? 0 : (student.number === 3 ? 0.33 : 1);
+      const expected = student.number === 1 ? `R1-Q${row.question_order}` : `S${student.number}-Q${row.question_order}`;
+      const expectedQuestionScore = student.number === 3 ? 0.33 : 1;
       assert.equal(Number(row.ai_score), expectedQuestionScore);
       assert.match(String(row.ai_feedback), new RegExp(`feedback:${expected}:`));
     }

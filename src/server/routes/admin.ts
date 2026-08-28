@@ -31,7 +31,12 @@ import {
   type QuestionCategory,
 } from '../services/adminQuestions.js';
 import { deleteOwnedAiSetting, getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
-import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
+import {
+  AiGradingError,
+  gradeBatchManually,
+  gradeSelectedStudentsManually,
+  gradeStudentManually,
+} from '../services/batchAiGrading.js';
 import { loadPagedBatches, loadPagedStudents } from '../services/adminLists.js';
 import { AdminUserPasswordError, resetAdminUserPassword } from '../services/adminUsers.js';
 
@@ -1535,6 +1540,20 @@ router.post('/batches/:id/ai-grade', async (req: Request, res: Response) => {
         WHERE id = ? AND created_by = ? AND ai_grading_status = 'processing'
       `, [batchId, req.adminUser.id]).catch(() => {});
     }
+    return res.status(500).json({ error: error?.message || 'AI grading failed' });
+  }
+});
+
+router.post('/batches/:batchId/students/ai-grade', async (req: Request, res: Response) => {
+  try {
+    const batchId = Number(req.params.batchId);
+    const userId = req.adminUser?.id;
+    if (!Number.isInteger(batchId) || batchId < 1) return res.status(400).json({ error: 'Invalid batch id' });
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    return res.json(await gradeSelectedStudentsManually(db, batchId, req.body?.student_ids, userId));
+  } catch (error: any) {
+    if (error instanceof AiGradingError) return res.status(error.statusCode).json({ error: error.message });
+    console.error('[AI Grade] Selected student grading failed:', error?.message || error);
     return res.status(500).json({ error: error?.message || 'AI grading failed' });
   }
 });

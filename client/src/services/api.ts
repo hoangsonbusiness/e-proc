@@ -217,6 +217,9 @@ export const adminApi = {
   gradeBatchWithAI: (batchId: number) =>
     api.post(`/admin/batches/${batchId}/ai-grade`),
 
+  gradeStudentsWithAI: (batchId: number, studentIds: number[]) =>
+    api.post(`/admin/batches/${batchId}/students/ai-grade`, { student_ids: studentIds }),
+
   gradeStudentWithAI: (batchId: number, studentId: number) =>
     api.post(`/admin/batches/${batchId}/students/${studentId}/ai-grade`)
 };

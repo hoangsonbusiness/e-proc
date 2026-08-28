@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import jwt from 'jsonwebtoken';
-import { AiGradingError, calculateFinalScore, gradeBatchManually, gradeStudentManually, validateGradingResponse } from '../dist/server/services/batchAiGrading.js';
+import {
+  AiGradingError,
+  calculateFinalScore,
+  gradeBatchManually,
+  gradeSelectedStudentsManually,
+  gradeStudentManually,
+  validateGradingResponse,
+} from '../dist/server/services/batchAiGrading.js';
 import { assertSafeProviderUrl, connectionFingerprint, normalizeConnectionConfig } from '../dist/server/services/aiProvider.js';
 import { deleteOwnedAiSetting, saveOwnedAiSetting } from '../dist/server/services/aiSettings.js';
 
@@ -67,7 +74,7 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
   const db = {
     async query(sql, params = []) {
       const normalized = sql.replace(/\s+/g, ' ').trim();
-      if (normalized.includes('SELECT id, created_by, exam_type, ai_grading_status')) {
+      if (normalized.startsWith('SELECT id, created_by, exam_type') && normalized.includes('FROM batches WHERE id = ?')) {
         return { rows: [{ ...batch }], rowCount: 1 };
       }
       if (normalized.includes("SELECT s.id, s.status, COALESCE(s.ai_grading_status, 'pending')")) {
@@ -76,6 +83,15 @@ function incrementalGradingDb({ batch, setting, students, questionRows }) {
           rows: student ? [{ ...student, batch_id: batch.id, created_by: batch.created_by, exam_type: batch.exam_type }] : [],
           rowCount: student ? 1 : 0,
         };
+      }
+      if (normalized.startsWith("SELECT id, status, COALESCE(ai_grading_status, 'pending')")
+        && normalized.includes('FROM students WHERE batch_id = ? AND id IN')) {
+        const batchId = Number(params[0]);
+        const selectedIds = new Set(params.slice(1).map(Number));
+        const rows = students
+          .filter((student) => student.batch_id === batchId && selectedIds.has(student.id))
+          .map((student) => ({ ...student }));
+        return { rows, rowCount: rows.length };
       }
       if (normalized.includes('SELECT * FROM user_ai_settings')) {
         return { rows: [setting], rowCount: 1 };
@@ -262,7 +278,7 @@ test('manual grading rejects quiz batches before resolving an LLM setting', asyn
   assert.equal(db.queries.length, 1);
 });
 
-test('a later AI Grade run grades a newly submitted student without regrading completed students', async () => {
+test('a later AI Grade run grades a newly submitted student without regrading completed students', async (t) => {
   const previousNodeEnv = process.env.NODE_ENV;
   const previousVercel = process.env.VERCEL;
   const previousEncryptionKey = process.env.AI_SETTINGS_ENCRYPTION_KEY;
@@ -460,6 +476,145 @@ test('a later AI Grade run grades a newly submitted student without regrading co
     assert.equal(students[2].ai_grading_attempt_token, null);
     assert.equal(students[2].ai_grading_started_at, null);
     assert.equal(providerCalls, 9);
+
+    await t.test('selected grading regrades completed work, grades pending work, and bypasses unfinished exams', async () => {
+      const completedStudent = students[0];
+      const initialStudent = students[4];
+      const inProgressStudent = students[1];
+      const pendingExamStudent = students[3];
+      const completedQuestion = questionRows.find((row) => row.student_id === completedStudent.id);
+      const initialQuestion = questionRows.find((row) => row.student_id === initialStudent.id);
+      const inProgressQuestion = questionRows.find((row) => row.student_id === inProgressStudent.id);
+      const pendingExamQuestion = questionRows.find((row) => row.student_id === pendingExamStudent.id);
+
+      assert.ok(completedQuestion);
+      assert.ok(initialQuestion);
+      assert.ok(inProgressQuestion);
+      assert.ok(pendingExamQuestion);
+
+      completedStudent.status = 'submitted';
+      completedStudent.ai_grading_status = 'completed';
+      completedStudent.ai_final_score = 1;
+      completedStudent.ai_summary_feedback = 'Old completed summary';
+      completedStudent.ai_graded_at = '2000-01-01T00:00:00.000Z';
+      completedQuestion.answer = 'Newest completed answer';
+      completedQuestion.ai_score = 0.1;
+      completedQuestion.ai_feedback = 'Old completed feedback';
+
+      initialStudent.status = 'submitted';
+      initialStudent.ai_grading_status = 'pending';
+      initialStudent.ai_final_score = null;
+      initialStudent.ai_summary_feedback = null;
+      initialStudent.ai_graded_at = null;
+      initialQuestion.answer = 'Newest initial answer';
+      initialQuestion.ai_score = null;
+      initialQuestion.ai_feedback = null;
+
+      inProgressStudent.status = 'in_progress';
+      inProgressStudent.ai_grading_status = 'pending';
+      inProgressStudent.ai_final_score = 4;
+      inProgressStudent.ai_summary_feedback = 'Keep in-progress summary';
+      inProgressStudent.ai_graded_at = '2001-01-01T00:00:00.000Z';
+      inProgressQuestion.answer = 'MUST NOT GRADE IN PROGRESS';
+      inProgressQuestion.ai_score = 0.4;
+      inProgressQuestion.ai_feedback = 'Keep in-progress feedback';
+
+      pendingExamStudent.status = 'pending';
+      pendingExamStudent.ai_grading_status = 'pending';
+      pendingExamStudent.ai_final_score = 5;
+      pendingExamStudent.ai_summary_feedback = 'Keep pending-exam summary';
+      pendingExamStudent.ai_graded_at = '2002-01-01T00:00:00.000Z';
+      pendingExamQuestion.answer = 'MUST NOT GRADE PENDING';
+      pendingExamQuestion.ai_score = 0.5;
+      pendingExamQuestion.ai_feedback = 'Keep pending-exam feedback';
+
+      const callsBeforeSelection = providerCalls;
+      const inputsBeforeSelection = providerInputs.length;
+      const selected = await gradeSelectedStudentsManually(
+        db,
+        77,
+        [completedStudent.id, initialStudent.id, inProgressStudent.id, pendingExamStudent.id],
+        9,
+      );
+
+      assert.deepEqual(
+        {
+          requested: selected.requested,
+          total: selected.total,
+          completed: selected.completed,
+          failed: selected.failed,
+          skipped: selected.skipped,
+          remaining: selected.remaining,
+          recovered: selected.recovered,
+          status: selected.status,
+        },
+        {
+          requested: 4,
+          total: 2,
+          completed: 2,
+          failed: 0,
+          skipped: 2,
+          remaining: 0,
+          recovered: 0,
+          status: 'completed',
+        },
+      );
+      assert.deepEqual(selected.results, [
+        { success: true, studentId: completedStudent.id, mode: 'regrade', status: 'completed', finalScore: 10 },
+        { success: true, studentId: initialStudent.id, mode: 'initial', status: 'completed', finalScore: 10 },
+      ]);
+      assert.deepEqual(selected.skippedStudents, [
+        {
+          studentId: inProgressStudent.id,
+          examStatus: 'in_progress',
+          gradingStatus: 'pending',
+          reason: 'not_submitted',
+        },
+        {
+          studentId: pendingExamStudent.id,
+          examStatus: 'pending',
+          gradingStatus: 'pending',
+          reason: 'not_submitted',
+        },
+      ]);
+      assert.deepEqual(selected.failures, []);
+      assert.deepEqual(selected.remainingStudentIds, []);
+
+      assert.equal(providerCalls - callsBeforeSelection, 2);
+      assert.deepEqual(
+        providerInputs.slice(inputsBeforeSelection)
+          .map((input) => input.map((item) => item.student_answer))
+          .sort((left, right) => left[0].localeCompare(right[0])),
+        [['Newest completed answer'], ['Newest initial answer']]
+          .sort((left, right) => left[0].localeCompare(right[0])),
+      );
+      assert.equal(
+        providerInputs.slice(inputsBeforeSelection).flat().some((item) => item.student_answer.startsWith('MUST NOT GRADE')),
+        false,
+      );
+
+      assert.equal(completedStudent.ai_final_score, 10);
+      assert.equal(completedStudent.ai_summary_feedback, 'Summary only: Newest completed answer');
+      assert.notEqual(completedStudent.ai_graded_at, '2000-01-01T00:00:00.000Z');
+      assert.equal(completedQuestion.ai_score, 1);
+      assert.equal(completedQuestion.ai_feedback, 'Graded only: Newest completed answer');
+      assert.equal(initialStudent.ai_final_score, 10);
+      assert.equal(initialStudent.ai_grading_status, 'completed');
+      assert.equal(initialStudent.ai_summary_feedback, 'Summary only: Newest initial answer');
+      assert.equal(initialQuestion.ai_score, 1);
+      assert.equal(initialQuestion.ai_feedback, 'Graded only: Newest initial answer');
+
+      assert.equal(inProgressStudent.ai_final_score, 4);
+      assert.equal(inProgressStudent.ai_summary_feedback, 'Keep in-progress summary');
+      assert.equal(inProgressStudent.ai_graded_at, '2001-01-01T00:00:00.000Z');
+      assert.equal(inProgressQuestion.ai_score, 0.4);
+      assert.equal(inProgressQuestion.ai_feedback, 'Keep in-progress feedback');
+      assert.equal(pendingExamStudent.ai_final_score, 5);
+      assert.equal(pendingExamStudent.ai_summary_feedback, 'Keep pending-exam summary');
+      assert.equal(pendingExamStudent.ai_graded_at, '2002-01-01T00:00:00.000Z');
+      assert.equal(pendingExamQuestion.ai_score, 0.5);
+      assert.equal(pendingExamQuestion.ai_feedback, 'Keep pending-exam feedback');
+    });
   } finally {
     await new Promise((resolve, reject) => provider.close((error) => error ? reject(error) : resolve()));
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
