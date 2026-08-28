@@ -37,6 +37,10 @@ export async function openLiveChannel(
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     accessToken: async () => config.realtimeToken!,
   });
+  // SupabaseClient also schedules this from the accessToken callback, but that
+  // initial call is asynchronous. Without awaiting it, the first phx_join can
+  // race ahead with only the publishable key and private-channel RLS rejects it.
+  await client.realtime.setAuth(config.realtimeToken);
   const channel = client.channel(config.topic, { config: { private: true } });
   for (const event of ['watch-request', 'offer', 'answer', 'ice-candidate', 'hangup'] as LiveSignalEvent[]) {
     channel.on('broadcast', { event }, ({ payload }) => {
