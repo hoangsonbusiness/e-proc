@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import DOMPurify from 'dompurify';
 import { studentApi } from '../services/api';
 import * as examRecorder from '../services/examRecorder';
+import { startLivePublisher, type LivePublisher } from '../services/livePublisher';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
 import {
   hasServerConfirmedTerminalSubmission,
@@ -109,6 +110,7 @@ function StudentExam() {
   const recordingSetupGenerationRef = useRef(0);
   const pendingRecordingStoppedRef = useRef(false);
   const recordingNextPartIndexRef = useRef(0);
+  const livePublisherRef = useRef<LivePublisher | null>(null);
   // [#3] cooldown riêng cho từng type
   const violationCooldownByTypeRef = useRef<Record<string, number>>({});
   const currentQuestionIdRef = useRef<string | undefined>(undefined);
@@ -241,6 +243,30 @@ function StudentExam() {
   useEffect(() => {
     startedRef.current = started;
   }, [started]);
+
+  // The candidate keeps one private signaling connection while the recorded
+  // capture is active. A WebRTC peer is created only after an admin clicks View.
+  useEffect(() => {
+    if (!started || !recordEnabled || locked || submitting) {
+      const current = livePublisherRef.current;
+      livePublisherRef.current = null;
+      if (current) void current.stop();
+      return;
+    }
+    let cancelled = false;
+    void startLivePublisher()
+      .then((publisher) => {
+        if (cancelled) { if (publisher) void publisher.stop(); return; }
+        livePublisherRef.current = publisher;
+      })
+      .catch((error) => console.warn('[live-monitor] signaling unavailable', error));
+    return () => {
+      cancelled = true;
+      const current = livePublisherRef.current;
+      livePublisherRef.current = null;
+      if (current) void current.stop();
+    };
+  }, [started, recordEnabled, locked, submitting]);
 
   useEffect(() => {
     lockedRef.current = locked;

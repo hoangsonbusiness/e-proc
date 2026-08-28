@@ -419,6 +419,19 @@ async function initPostgres() {
         catch (_) { /* already exists */ }
         console.log('[DB] admin_users ready');
         await client.query(`
+    CREATE TABLE IF NOT EXISTS live_monitor_audit (
+      viewer_session_id UUID PRIMARY KEY,
+      admin_user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE RESTRICT,
+      student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
+      attempt_jti_hash CHAR(64) NOT NULL,
+      outcome VARCHAR(20) NOT NULL DEFAULT 'connecting',
+      started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      ended_at TIMESTAMP
+    )
+  `);
+        await client.query('CREATE INDEX IF NOT EXISTS idx_live_monitor_audit_student_started ON live_monitor_audit(student_id, started_at)');
+        await client.query(`
     CREATE TABLE IF NOT EXISTS user_ai_settings (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL UNIQUE REFERENCES admin_users(id) ON DELETE RESTRICT,
@@ -692,6 +705,22 @@ function initSqlite() {
       )
     `);
         sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS live_monitor_audit (
+        viewer_session_id TEXT PRIMARY KEY,
+        admin_user_id INTEGER NOT NULL,
+        student_id INTEGER NOT NULL,
+        batch_id INTEGER NOT NULL,
+        attempt_jti_hash TEXT NOT NULL,
+        outcome TEXT NOT NULL DEFAULT 'connecting',
+        started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        ended_at DATETIME,
+        FOREIGN KEY (admin_user_id) REFERENCES admin_users(id) ON DELETE RESTRICT,
+        FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+        FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
+      )
+    `);
+        sqliteDb.exec('CREATE INDEX IF NOT EXISTS idx_live_monitor_audit_student_started ON live_monitor_audit(student_id, started_at)');
+        sqliteDb.exec(`
       CREATE TABLE IF NOT EXISTS user_ai_settings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL UNIQUE,
@@ -857,6 +886,7 @@ export async function verifyRequiredSchema() {
                 'created_at', 'completed_at',
             ],
             exam_sessions: ['student_id', 'jti', 'ip', 'user_agent', 'last_seen'],
+            live_monitor_audit: ['viewer_session_id', 'admin_user_id', 'student_id', 'batch_id', 'attempt_jti_hash', 'outcome'],
             user_ai_settings: ['user_id', 'api_protocol', 'base_url', 'encrypted_api_key',
                 'key_iv', 'key_auth_tag', 'key_mask', 'model', 'test_status', 'tested_config_hash'],
         };

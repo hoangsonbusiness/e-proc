@@ -26,6 +26,7 @@ import {
   sealRecordingManifest,
   timestampWithoutTimezoneUtcMs,
 } from '../services/recordingPersistence.js';
+import { issueLiveSession } from '../services/liveMonitoring.js';
 
 let s3ServicePromise: Promise<typeof import('../services/s3.js')> | null = null;
 
@@ -836,6 +837,29 @@ router.post('/exam/disconnect', studentAuthMiddleware, async (req: Request, res:
   } catch (error: any) {
     // Không trả lỗi để không block beacon
     res.status(204).send();
+  }
+});
+
+// A short-lived, topic-scoped Supabase Realtime token. This is signaling only:
+// no screen video crosses this HTTP endpoint, Vercel, or the database.
+router.post('/live/session', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { studentId, batchId, jti } = req.studentPayload!;
+    const active = await db.query(`
+      SELECT id FROM students
+      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti = ?
+    `, [studentId, batchId, jti]);
+    if (!active.rows[0]) return res.status(409).json({ error: 'Exam is not active' });
+    const config = await issueLiveSession({
+      actor: 'student', subject: `student:${studentId}:${jti}`,
+      batchId, studentId, jti,
+    });
+    // Disabled is deliberately a normal response: an exam must never fail just
+    // because an optional live-monitoring integration is not configured.
+    return res.json(config);
+  } catch (error: any) {
+    console.error('[live-monitor] could not create student signaling session', error);
+    return res.status(503).json({ error: 'Live monitoring is temporarily unavailable' });
   }
 });
 

@@ -11,3 +11,5 @@ data/*.db-wal
 
 # Claude Code per-machine local settings (permission allowlist, not shared config)
 .claude/settings.local.json
+live-realtime-jwk.json
+live-realtime-jwk.base64.txt

@@ -15,6 +15,7 @@ import { createConcurrentSessionEnforcer } from '../services/concurrentSessionEn
 import { persistViolationIfInProgress } from '../services/violationRequestStore.js';
 import { isRecordingPutAcknowledgementPayload } from '../services/recordingProtocol.js';
 import { acknowledgeReservedRecordingPart, effectiveAttemptRecordMode, finalizeRecordingManifest, findNextRecordingPartIndex, getRecordingRecoveryStatus, reserveRecordingUpload, sealRecordingManifest, timestampWithoutTimezoneUtcMs, } from '../services/recordingPersistence.js';
+import { issueLiveSession } from '../services/liveMonitoring.js';
 let s3ServicePromise = null;
 function loadS3Service() {
     s3ServicePromise ||= import('../services/s3.js');
@@ -715,6 +716,30 @@ router.post('/exam/disconnect', studentAuthMiddleware, async (req, res) => {
     catch (error) {
         // Không trả lỗi để không block beacon
         res.status(204).send();
+    }
+});
+// A short-lived, topic-scoped Supabase Realtime token. This is signaling only:
+// no screen video crosses this HTTP endpoint, Vercel, or the database.
+router.post('/live/session', studentAuthMiddleware, async (req, res) => {
+    try {
+        const { studentId, batchId, jti } = req.studentPayload;
+        const active = await db.query(`
+      SELECT id FROM students
+      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti = ?
+    `, [studentId, batchId, jti]);
+        if (!active.rows[0])
+            return res.status(409).json({ error: 'Exam is not active' });
+        const config = await issueLiveSession({
+            actor: 'student', subject: `student:${studentId}:${jti}`,
+            batchId, studentId, jti,
+        });
+        // Disabled is deliberately a normal response: an exam must never fail just
+        // because an optional live-monitoring integration is not configured.
+        return res.json(config);
+    }
+    catch (error) {
+        console.error('[live-monitor] could not create student signaling session', error);
+        return res.status(503).json({ error: 'Live monitoring is temporarily unavailable' });
     }
 });
 router.post('/exam/answers', studentAuthMiddleware, sessionTracker, async (req, res) => {

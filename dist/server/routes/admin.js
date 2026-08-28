@@ -7,6 +7,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
+import { attemptHash, issueLiveSession } from '../services/liveMonitoring.js';
 import crypto from 'crypto';
 import { parseBlueprintCompat } from '../services/blueprint.js';
 import cache from '../cache.js';
@@ -172,6 +173,77 @@ router.post('/logout', (req, res) => {
 // PROTECTED ROUTES — Require JWT từ đây trở xuống
 // =============================================
 router.use(authMiddleware);
+// Live screen monitoring uses Supabase only as encrypted WebRTC signaling. The
+// stream itself remains browser-to-browser (or TURN fallback), never Vercel/Supabase.
+router.get('/batches/:batchId/live/students', requireAdmin, async (req, res) => {
+    const batchId = Number(req.params.batchId);
+    if (!Number.isInteger(batchId) || batchId < 1)
+        return res.status(400).json({ error: 'Invalid batch id' });
+    try {
+        const batch = await db.query('SELECT id FROM batches WHERE id = ?', [batchId]);
+        if (!batch.rows[0])
+            return res.status(404).json({ error: 'Batch not found' });
+        const students = await db.query(`
+      SELECT id, email, status, exam_started_at
+      FROM students
+      WHERE batch_id = ? AND status = 'in_progress' AND active_jti IS NOT NULL
+      ORDER BY exam_started_at ASC, id ASC
+    `, [batchId]);
+        return res.json({ students: students.rows });
+    }
+    catch (error) {
+        return res.status(500).json({ error: error?.message || 'Could not load live candidates' });
+    }
+});
+router.post('/batches/:batchId/live/students/:studentId/session', requireAdmin, async (req, res) => {
+    const batchId = Number(req.params.batchId);
+    const studentId = Number(req.params.studentId);
+    if (!Number.isInteger(batchId) || batchId < 1 || !Number.isInteger(studentId) || studentId < 1) {
+        return res.status(400).json({ error: 'Invalid batch or student id' });
+    }
+    try {
+        const result = await db.query(`
+      SELECT active_jti FROM students
+      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti IS NOT NULL
+    `, [studentId, batchId]);
+        const jti = result.rows[0]?.active_jti;
+        if (!jti)
+            return res.status(409).json({ error: 'Candidate does not have an active exam attempt' });
+        const viewerSessionId = crypto.randomUUID();
+        const config = await issueLiveSession({
+            actor: 'admin', subject: `admin:${req.adminUser.id}:${viewerSessionId}`,
+            batchId, studentId, jti,
+        });
+        if (!config.enabled)
+            return res.status(503).json({ error: 'Live monitoring is not configured' });
+        await db.query(`
+      INSERT INTO live_monitor_audit
+        (viewer_session_id, admin_user_id, student_id, batch_id, attempt_jti_hash, outcome)
+      VALUES (?, ?, ?, ?, ?, 'connecting')
+    `, [viewerSessionId, req.adminUser.id, studentId, batchId, attemptHash(jti)]);
+        return res.json({ ...config, viewerSessionId });
+    }
+    catch (error) {
+        console.error('[live-monitor] could not create viewer session', error);
+        return res.status(500).json({ error: 'Could not create live viewing session' });
+    }
+});
+router.post('/live/audit/:viewerSessionId/end', requireAdmin, async (req, res) => {
+    const viewerSessionId = String(req.params.viewerSessionId || '');
+    const outcome = typeof req.body?.outcome === 'string' && /^(connected|direct|relay|failed|ended|timeout)$/.test(req.body.outcome)
+        ? req.body.outcome : 'ended';
+    if (!/^[0-9a-f-]{36}$/i.test(viewerSessionId))
+        return res.status(400).json({ error: 'Invalid viewer session id' });
+    try {
+        await db.query(`UPDATE live_monitor_audit
+      SET ended_at = CURRENT_TIMESTAMP, outcome = ?
+      WHERE viewer_session_id = ? AND admin_user_id = ?`, [outcome, viewerSessionId, req.adminUser.id]);
+        return res.json({ success: true });
+    }
+    catch (error) {
+        return res.status(500).json({ error: error?.message || 'Could not close live viewing session' });
+    }
+});
 // ── Quản lý user (chỉ admin) ─────────────────────────────────────────────
 // GET /api/admin/users — liệt kê user (chỉ admin)
 router.get('/users', requireAdmin, async (_req, res) => {

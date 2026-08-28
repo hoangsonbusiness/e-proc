@@ -221,7 +221,13 @@ export const adminApi = {
     api.post(`/admin/batches/${batchId}/students/ai-grade`, { student_ids: studentIds }),
 
   gradeStudentWithAI: (batchId: number, studentId: number) =>
-    api.post(`/admin/batches/${batchId}/students/${studentId}/ai-grade`)
+    api.post(`/admin/batches/${batchId}/students/${studentId}/ai-grade`),
+
+  getLiveStudents: (batchId: number) => api.get(`/admin/batches/${batchId}/live/students`),
+  createLiveSession: (batchId: number, studentId: number) =>
+    api.post(`/admin/batches/${batchId}/live/students/${studentId}/session`),
+  endLiveSession: (viewerSessionId: string, outcome: string) =>
+    api.post(`/admin/live/audit/${viewerSessionId}/end`, { outcome }),
 };
 
 export const studentApi = {
@@ -233,6 +239,8 @@ export const studentApi = {
 
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
+
+  getLiveSession: () => api.post('/student/live/session'),
 
   // [C-4] Không còn truyền studentId - token tự động gắn qua interceptor
   getQuestions: () =>

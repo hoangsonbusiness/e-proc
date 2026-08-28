@@ -53,6 +53,12 @@ app.use(
 // [SEC] Security headers (không dùng helmet để tránh thêm dependency).
 // CSP: SPA React + Monaco. Monaco cần 'unsafe-eval' (worker/wasm) và blob: cho worker.
 // 'unsafe-inline' style cho Monaco/React inline styles. Ảnh data: cho watermark/avatar.
+const realtimeWebSocketOrigin = (() => {
+  try {
+    const url = new URL(process.env.SUPABASE_URL || '');
+    return url.protocol === 'https:' ? `wss://${url.host}` : null;
+  } catch { return null; }
+})();
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('X-Frame-Options', 'DENY');
@@ -70,7 +76,7 @@ app.use((req, res, next) => {
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
       "worker-src 'self' blob:",
-      "connect-src 'self' https:",
+      `connect-src 'self' https:${realtimeWebSocketOrigin ? ` ${realtimeWebSocketOrigin}` : ''}`,
       "media-src 'self' blob:",
       "object-src 'none'",
       "base-uri 'self'",

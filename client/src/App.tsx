@@ -14,6 +14,7 @@ const StudentManagement = lazy(() => import('./pages/StudentManagement'));
 const Results = lazy(() => import('./pages/Results'));
 const AISettings = lazy(adminRouteLoaders['/admin/settings']);
 const UserManagement = lazy(adminRouteLoaders['/admin/users']);
+const LiveMonitor = lazy(() => import('./pages/LiveMonitor'));
 const StudentLogin = lazy(() => import('./pages/StudentLogin'));
 const StudentExam = lazy(() => import('./pages/StudentExam'));
 const StudentConfirm = lazy(() => import('./pages/StudentConfirm'));
@@ -53,6 +54,7 @@ function App() {
           <Route path="/admin/batches" element={<PrivateRoute><BatchManagement /></PrivateRoute>} />
           <Route path="/admin/batches/:id/students" element={<PrivateRoute><StudentManagement /></PrivateRoute>} />
           <Route path="/admin/batches/:id/results" element={<PrivateRoute><Results /></PrivateRoute>} />
+          <Route path="/admin/batches/:id/live" element={<PrivateRoute><LiveMonitor /></PrivateRoute>} />
           <Route path="/admin/settings" element={<PrivateRoute><AISettings /></PrivateRoute>} />
           <Route path="/admin/users" element={<PrivateRoute><UserManagement /></PrivateRoute>} />
         </Routes>

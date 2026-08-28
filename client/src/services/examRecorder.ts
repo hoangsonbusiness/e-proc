@@ -103,6 +103,22 @@ let chunkBuffer: Blob[] = [];
 let partIndex = 0;
 let partTimer: ReturnType<typeof setInterval> | null = null;
 let onRecordingStopped: (() => void) | null = null;
+const captureStreamListeners = new Set<(capture: MediaStream | null) => void>();
+
+function notifyCaptureStreamChanged(): void {
+  for (const listener of captureStreamListeners) listener(stream);
+}
+
+/** The live viewer reuses this already-approved screen-share stream; it never asks for a second capture. */
+export function getCaptureStream(): MediaStream | null {
+  return stream;
+}
+
+export function onCaptureStreamChanged(listener: (capture: MediaStream | null) => void): () => void {
+  captureStreamListeners.add(listener);
+  listener(stream);
+  return () => captureStreamListeners.delete(listener);
+}
 let recordingStoppedFired = false;
 let active = false;
 let lifecycle: RecorderLifecycle = 'idle';
@@ -1062,6 +1078,7 @@ export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: bo
   if (surface !== 'monitor') {
     stream.getTracks().forEach((candidate) => candidate.stop());
     stream = null;
+    notifyCaptureStreamChanged();
     dirHandle = forMode === 'local' ? null : dirHandle;
     lifecycle = 'idle';
     return { ok: false, reason: 'not_fullscreen' };
@@ -1069,6 +1086,7 @@ export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: bo
 
   lifecycle = 'ready';
   active = false;
+  notifyCaptureStreamChanged();
   return { ok: true };
 }
 
@@ -1191,6 +1209,7 @@ async function stopMediaRecorder(): Promise<void> {
 function releaseCapture(): void {
   const currentStream = stream;
   stream = null;
+  notifyCaptureStreamChanged();
   active = false;
 
   if (currentStream) {

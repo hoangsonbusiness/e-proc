@@ -12,6 +12,7 @@ import {
   Copy,
   FolderKanban,
   ListChecks,
+  MonitorPlay,
   Pencil,
   Plus,
   Sparkles,
@@ -1341,6 +1342,10 @@ function BatchManagement() {
                           <BarChart3 size={14} />
                           Results
                         </Link>
+                        {isAdmin && <Link to={`/admin/batches/${batch.id}/live`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors">
+                          <MonitorPlay size={14} />
+                          Live
+                        </Link>}
                         {editable && (
                           <>
                             <button

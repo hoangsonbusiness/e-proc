@@ -3,16 +3,22 @@ import { readFileSync } from 'node:fs';
 
 const compose = ['compose', '-f', 'docker-compose.local.yml'];
 
-function run(args, options = {}) {
+function run(args, { quiet = false, ...options } = {}) {
   const result = spawnSync('docker', [...compose, ...args], {
     cwd: process.cwd(),
     env: process.env,
-    stdio: 'inherit',
+    stdio: quiet ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     shell: false,
     ...options,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`docker ${[...compose, ...args].join(' ')} failed with exit code ${result.status}`);
+  if (result.status !== 0) {
+    if (quiet) {
+      process.stdout.write(result.stdout || '');
+      process.stderr.write(result.stderr || '');
+    }
+    throw new Error(`docker ${[...compose, ...args].join(' ')} failed with exit code ${result.status}`);
+  }
 }
 
 function diagnostics() {
@@ -66,9 +72,9 @@ function applySql(label, sql) {
 
 try {
   console.log('\n[1/8] Building and starting the two-service local stack...');
-  run(['up', '--build', '--detach', '--wait']);
+  run(['up', '--build', '--detach', '--wait'], { quiet: true });
 
-  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v4...');
+  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v5...');
   run(['stop', 'app']);
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
@@ -224,6 +230,19 @@ try {
       END IF;
     END $$;
   `);
+  applyMigration('migrations/20260828_live_monitoring.sql');
+  applyMigration('migrations/20260828_live_monitoring.sql');
+  applySql('schema v5 live-monitor migration assertion', `
+    DO $$
+    BEGIN
+      IF (SELECT version FROM public.app_schema_state WHERE id = 1) <> 5 THEN
+        RAISE EXCEPTION 'live monitor migration did not set schema v5';
+      END IF;
+      IF to_regclass('public.live_monitor_audit') IS NULL THEN
+        RAISE EXCEPTION 'live_monitor_audit was not created by migration';
+      END IF;
+    END $$;
+  `);
   applySql('recording migration fixture cleanup', `
     DELETE FROM public.batches WHERE id = 900001;
   `);
@@ -237,10 +256,10 @@ try {
     "if('queue' in body)throw new Error('Health response still exposes legacy queue state');",
     "const pg=(await import('pg')).default;",
     "const p=new pg.Pool({connectionString:process.env.DATABASE_URL,max:1});",
-    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
+    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,to_regclass('public.live_monitor_audit') live_monitor_audit,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
     "await p.end();",
     "const s=q.rows[0];",
-    "if(Number(s.version)!==4||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
+    "if(Number(s.version)!==5||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||!s.live_monitor_audit||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
   ].join('')]);
 
   console.log('\n[4/8] Verifying the built React frontend is served by the app container...');
