@@ -207,6 +207,9 @@ export const adminApi = {
   
   saveAISettings: (settings: any) =>
     api.put('/admin/settings/ai', settings),
+
+  deleteAISettings: () =>
+    api.delete('/admin/settings/ai'),
   
   testAI: (settings: any) =>
     api.post('/admin/settings/ai/test', settings),

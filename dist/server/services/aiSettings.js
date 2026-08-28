@@ -68,6 +68,10 @@ export async function getOwnedAiSetting(db, userId) {
         updatedAt: row.updated_at,
     };
 }
+export async function deleteOwnedAiSetting(db, userId) {
+    const result = await db.query('DELETE FROM user_ai_settings WHERE user_id = ?', [userId]);
+    return { success: true, deleted: result.rowCount > 0 };
+}
 async function resolveDraftConfig(db, userId, input) {
     let apiKey = typeof input?.apiKey === 'string' ? input.apiKey.trim() : '';
     if (!apiKey) {

@@ -5,7 +5,7 @@ import http from 'node:http';
 import jwt from 'jsonwebtoken';
 import { AiGradingError, calculateFinalScore, gradeBatchManually, gradeStudentManually, validateGradingResponse } from '../dist/server/services/batchAiGrading.js';
 import { assertSafeProviderUrl, connectionFingerprint, normalizeConnectionConfig } from '../dist/server/services/aiProvider.js';
-import { saveOwnedAiSetting } from '../dist/server/services/aiSettings.js';
+import { deleteOwnedAiSetting, saveOwnedAiSetting } from '../dist/server/services/aiSettings.js';
 
 const questions = [
   {
@@ -619,4 +619,22 @@ test('saving a verified setting encrypts the key and returns only a mask', async
   assert.match(saved.keyMask, /^sup\*+-key$/);
   assert.equal(Object.hasOwn(saved, 'apiKey'), false);
   assert.equal(Object.hasOwn(saved, 'encrypted_api_key'), false);
+});
+
+test('deleting an AI setting is owner-scoped and safely repeatable', async () => {
+  const calls = [];
+  const rowCounts = [1, 0];
+  const db = {
+    async query(sql, params = []) {
+      calls.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
+      return { rows: [], rowCount: rowCounts.shift() ?? 0 };
+    },
+  };
+
+  assert.deepEqual(await deleteOwnedAiSetting(db, 42), { success: true, deleted: true });
+  assert.deepEqual(await deleteOwnedAiSetting(db, 42), { success: true, deleted: false });
+  assert.deepEqual(calls, [
+    { sql: 'DELETE FROM user_ai_settings WHERE user_id = ?', params: [42] },
+    { sql: 'DELETE FROM user_ai_settings WHERE user_id = ?', params: [42] },
+  ]);
 });

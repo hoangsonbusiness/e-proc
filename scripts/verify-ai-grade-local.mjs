@@ -167,6 +167,15 @@ try {
   assert.equal(saved.payload.hasApiKey, true);
   assert.equal(Object.hasOwn(saved.payload, 'apiKey'), false, 'Plaintext API key leaked from settings response');
 
+  const reloadedSetting = await requestJson('/api/admin/settings/ai', {
+    method: 'GET', token: ownerToken,
+  });
+  assert.equal(reloadedSetting.response.status, 200, JSON.stringify(reloadedSetting.payload));
+  assert.equal(reloadedSetting.payload.configured, true);
+  assert.equal(reloadedSetting.payload.provider, settingDraft.provider);
+  assert.equal(reloadedSetting.payload.hasApiKey, true);
+  assert.equal(Object.hasOwn(reloadedSetting.payload, 'apiKey'), false, 'Plaintext API key leaked from reloaded settings');
+
   for (const [index, questionId] of questionIds.entries()) {
     await pool.query(`
       INSERT INTO question_bank (
@@ -412,6 +421,39 @@ try {
   assert.equal(recoveredInitialState.rows[0].ai_grading_started_at, null);
   assert.equal(recoveredInitialState.rows[0].ai_grading_attempt_token, null);
 
+  const otherUserDelete = await requestJson('/api/admin/settings/ai', {
+    method: 'DELETE', token: otherToken,
+  });
+  assert.equal(otherUserDelete.response.status, 200, JSON.stringify(otherUserDelete.payload));
+  assert.deepEqual(otherUserDelete.payload, { success: true, deleted: false });
+
+  const ownerSettingAfterOtherDelete = await requestJson('/api/admin/settings/ai', {
+    method: 'GET', token: ownerToken,
+  });
+  assert.equal(ownerSettingAfterOtherDelete.payload.configured, true);
+
+  const deletedSetting = await requestJson('/api/admin/settings/ai', {
+    method: 'DELETE', token: ownerToken,
+  });
+  assert.equal(deletedSetting.response.status, 200, JSON.stringify(deletedSetting.payload));
+  assert.deepEqual(deletedSetting.payload, { success: true, deleted: true });
+
+  const repeatedDelete = await requestJson('/api/admin/settings/ai', {
+    method: 'DELETE', token: ownerToken,
+  });
+  assert.equal(repeatedDelete.response.status, 200, JSON.stringify(repeatedDelete.payload));
+  assert.deepEqual(repeatedDelete.payload, { success: true, deleted: false });
+
+  const settingAfterDelete = await requestJson('/api/admin/settings/ai', {
+    method: 'GET', token: ownerToken,
+  });
+  assert.equal(settingAfterDelete.response.status, 200, JSON.stringify(settingAfterDelete.payload));
+  assert.deepEqual(settingAfterDelete.payload, {
+    configured: false,
+    testStatus: 'not_configured',
+    hasApiKey: false,
+  });
+
   console.log(JSON.stringify({
     success: true,
     batchId,
@@ -432,6 +474,7 @@ try {
       'stale regrade recovers while preserving the published result until replacement',
       'stale initial grading becomes retryable in the same batch request',
       'completed and failed attempts clear grading lease metadata',
+      'AI setting reload is masked and owner-scoped deletion is idempotent',
     ],
   }, null, 2));
 } finally {

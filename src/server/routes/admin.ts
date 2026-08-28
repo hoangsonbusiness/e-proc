@@ -30,7 +30,7 @@ import {
   validateQuestionUpdate,
   type QuestionCategory,
 } from '../services/adminQuestions.js';
-import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
+import { deleteOwnedAiSetting, getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
 import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
 import { loadPagedBatches, loadPagedStudents } from '../services/adminLists.js';
 import { AdminUserPasswordError, resetAdminUserPassword } from '../services/adminUsers.js';
@@ -1679,6 +1679,14 @@ router.put('/settings/ai', async (req: Request, res: Response) => {
     return res.json(await saveOwnedAiSetting(db, req.adminUser!.id, req.body));
   } catch (error: any) {
     return res.status(400).json({ error: error.message });
+  }
+});
+
+router.delete('/settings/ai', async (req: Request, res: Response) => {
+  try {
+    return res.json(await deleteOwnedAiSetting(db, req.adminUser!.id));
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 });
 

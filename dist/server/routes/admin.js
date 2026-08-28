@@ -14,7 +14,7 @@ import { ExamResetError, reopenExamAttempt } from '../services/examReset.js';
 import { runWithDbMetrics } from '../observability/dbMetrics.js';
 import { loadBatchExportData, loadBatchResultsLegacy, loadBatchResultsSummary, loadStudentResultDetail, } from '../services/adminResults.js';
 import { insertQuestion, isDuplicateQuestionIdError, isQuestionIdAvailable, loadPagedQuestions, loadQuestionCatalogSummary, QuestionValidationError, validateQuestionCreate, validateQuestionId, validateQuestionUpdate, } from '../services/adminQuestions.js';
-import { getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
+import { deleteOwnedAiSetting, getOwnedAiSetting, saveOwnedAiSetting, testOwnedAiSetting } from '../services/aiSettings.js';
 import { AiGradingError, gradeBatchManually, gradeStudentManually } from '../services/batchAiGrading.js';
 import { loadPagedBatches, loadPagedStudents } from '../services/adminLists.js';
 import { AdminUserPasswordError, resetAdminUserPassword } from '../services/adminUsers.js';
@@ -1537,6 +1537,14 @@ router.put('/settings/ai', async (req, res) => {
     }
     catch (error) {
         return res.status(400).json({ error: error.message });
+    }
+});
+router.delete('/settings/ai', async (req, res) => {
+    try {
+        return res.json(await deleteOwnedAiSetting(db, req.adminUser.id));
+    }
+    catch (error) {
+        return res.status(500).json({ error: error.message });
     }
 });
 export default router;

@@ -83,6 +83,11 @@ export async function getOwnedAiSetting(db: DbExecutor, userId: number): Promise
   };
 }
 
+export async function deleteOwnedAiSetting(db: DbExecutor, userId: number): Promise<{ success: true; deleted: boolean }> {
+  const result = await db.query('DELETE FROM user_ai_settings WHERE user_id = ?', [userId]);
+  return { success: true, deleted: result.rowCount > 0 };
+}
+
 async function resolveDraftConfig(db: DbExecutor, userId: number, input: any): Promise<LlmConnectionConfig> {
   let apiKey = typeof input?.apiKey === 'string' ? input.apiKey.trim() : '';
   if (!apiKey) {

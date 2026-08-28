@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowLeft, CheckCircle2, Cpu, KeyRound, Link as LinkIcon, Save, ShieldAlert, XCircle } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Cpu, KeyRound, Link as LinkIcon, Save, ShieldAlert, Trash2, XCircle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import AdminNav from '../components/AdminNav';
 import { adminApi } from '../services/api';
@@ -22,6 +22,17 @@ const PROTOCOLS: Array<{ value: AiProtocol; label: string }> = [
   { value: 'ollama_generate', label: 'Ollama Generate' },
 ];
 
+const PROVIDERS = [
+  'OpenAI',
+  'Anthropic',
+  'Google Gemini',
+  'OpenRouter',
+  'Groq',
+  'DeepSeek',
+  'Ollama',
+] as const;
+const CUSTOM_PROVIDER = '__custom__';
+
 const DEFAULT_URLS: Record<AiProtocol, string> = {
   openai_chat: 'https://api.openai.com/v1',
   openai_responses: 'https://api.openai.com/v1',
@@ -36,6 +47,8 @@ const EMPTY_FORM: SettingsForm = {
 
 function AISettings() {
   const [form, setForm] = useState<SettingsForm>(EMPTY_FORM);
+  const [providerSelection, setProviderSelection] = useState('');
+  const [configured, setConfigured] = useState(false);
   const [hasStoredKey, setHasStoredKey] = useState(false);
   const [keyMask, setKeyMask] = useState('');
   const [savedStatus, setSavedStatus] = useState('not_configured');
@@ -43,6 +56,7 @@ function AISettings() {
   const [testToken, setTestToken] = useState('');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<{ success: boolean; message: string } | null>(null);
 
@@ -50,10 +64,13 @@ function AISettings() {
     adminApi.getAISettings().then((response) => {
       const data = response.data;
       if (data.configured) {
+        const provider = data.provider || '';
         setForm({
-          provider: data.provider || '', apiProtocol: data.apiProtocol || 'openai_chat',
+          provider, apiProtocol: data.apiProtocol || 'openai_chat',
           baseUrl: data.baseUrl || '', apiKey: '', model: data.model || '',
         });
+        setProviderSelection(PROVIDERS.some((option) => option === provider) ? provider : CUSTOM_PROVIDER);
+        setConfigured(true);
         setHasStoredKey(Boolean(data.hasApiKey));
         setKeyMask(data.keyMask || '');
         setSavedStatus(data.testStatus || 'untested');
@@ -68,6 +85,11 @@ function AISettings() {
     setForm((previous) => ({ ...previous, [field]: value }));
     setTestToken('');
     setNotice(null);
+  };
+
+  const handleProviderChange = (provider: string) => {
+    setProviderSelection(provider);
+    updateField('provider', provider === CUSTOM_PROVIDER ? '' : provider);
   };
 
   const handleProtocolChange = (protocol: AiProtocol) => {
@@ -110,6 +132,7 @@ function AISettings() {
     setSaving(true);
     try {
       const response = await adminApi.saveAISettings({ ...form, testToken });
+      setConfigured(true);
       setHasStoredKey(Boolean(response.data.hasApiKey));
       setKeyMask(response.data.keyMask || '');
       setSavedStatus(response.data.testStatus || 'verified');
@@ -121,6 +144,28 @@ function AISettings() {
       setNotice({ success: false, message: requestError.response?.data?.error || 'Could not save AI settings' });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!configured || !confirm('Delete this saved API key and AI configuration? AI Grade will be unavailable until you save a new verified connection.')) return;
+    setDeleting(true);
+    setNotice(null);
+    try {
+      await adminApi.deleteAISettings();
+      setForm({ ...EMPTY_FORM });
+      setProviderSelection('');
+      setConfigured(false);
+      setHasStoredKey(false);
+      setKeyMask('');
+      setSavedStatus('not_configured');
+      setTestedAt(null);
+      setTestToken('');
+      setNotice({ success: true, message: 'The saved API key and AI configuration have been deleted.' });
+    } catch (requestError: any) {
+      setNotice({ success: false, message: requestError.response?.data?.error || 'Could not delete the API key' });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -172,18 +217,26 @@ function AISettings() {
               <div className="space-y-6">
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                   <div className="space-y-2">
-                    <label className="block text-sm font-bold text-slate-700">API Provider</label>
-                    <input
-                      list="provider-suggestions"
-                      value={form.provider}
-                      onChange={(event) => updateField('provider', event.target.value)}
-                      placeholder="e.g. OpenAI, Anthropic, STU Gateway"
-                      className={controlClassName}
-                    />
-                    <datalist id="provider-suggestions">
-                      <option value="OpenAI" /><option value="Anthropic" /><option value="Google Gemini" />
-                      <option value="OpenRouter" /><option value="Groq" /><option value="DeepSeek" /><option value="Ollama" />
-                    </datalist>
+                    <label htmlFor="api-provider" className="block text-sm font-bold text-slate-700">API Provider</label>
+                    <select
+                      id="api-provider"
+                      value={providerSelection}
+                      onChange={(event) => handleProviderChange(event.target.value)}
+                      className={`${controlClassName} bg-white`}
+                    >
+                      <option value="" disabled>Select an API provider</option>
+                      {PROVIDERS.map((provider) => <option key={provider} value={provider}>{provider}</option>)}
+                      <option value={CUSTOM_PROVIDER}>Custom provider...</option>
+                    </select>
+                    {providerSelection === CUSTOM_PROVIDER && (
+                      <input
+                        aria-label="Custom API Provider"
+                        value={form.provider}
+                        onChange={(event) => updateField('provider', event.target.value)}
+                        placeholder="e.g. STU Gateway"
+                        className={controlClassName}
+                      />
+                    )}
                   </div>
 
                   <div className="space-y-2">
@@ -253,7 +306,7 @@ function AISettings() {
                     <button
                       type="button"
                       onClick={handleTest}
-                      disabled={testing || saving}
+                      disabled={testing || saving || deleting}
                       className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-blue-300 bg-white px-4 py-2.5 text-sm font-bold text-blue-700 shadow-sm transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                     >
                       <Cpu size={17} /> {testing ? 'Testing...' : 'Test Connection'}
@@ -261,10 +314,18 @@ function AISettings() {
                     <button
                       type="button"
                       onClick={handleSave}
-                      disabled={!testToken || testing || saving}
+                      disabled={!testToken || testing || saving || deleting}
                       className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                     >
                       <Save size={17} /> {saving ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      disabled={!configured || testing || saving || deleting}
+                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-bold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+                    >
+                      <Trash2 size={17} /> {deleting ? 'Deleting...' : 'Delete Key'}
                     </button>
                   </div>
                 </div>
