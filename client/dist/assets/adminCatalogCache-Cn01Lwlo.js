@@ -1,0 +1,6 @@
+import{c as n}from"./createLucideIcon-J3djxRoY.js";import{b as i}from"./index-BrwjwOyT.js";/**
+ * @license lucide-react v1.30.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const l=[["path",{d:"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",key:"1a8usu"}],["path",{d:"m15 5 4 4",key:"1mk7zo"}]],r=n("pencil",l),o=6e4;let a=null,t=null;async function m(){return a&&a.expiresAt>Date.now()?a.data:(t||(t=i.getQuestionCatalogSummary().then(e=>(a={data:e.data,expiresAt:Date.now()+o},e.data)).finally(()=>{t=null})),t)}function s(){a=null}export{r as P,m as g,s as i};

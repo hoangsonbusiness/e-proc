@@ -30,6 +30,7 @@ const S3_PUT_TIMEOUT_MS = 120_000;         // một part có thể ~22MB trên m
 const RECORDER_STOP_TIMEOUT_MS = 10_000;   // browser phải phát dataavailable + stop
 
 type RecordMode = 's3' | 'local';
+type CaptureMode = RecordMode | 'live';
 type RecordingFailureStage = 'capture' | 'seal' | 'presign' | 'upload' | 'complete' | 'local-save' | 'finalize';
 type RecorderLifecycle =
   | 'idle'
@@ -287,18 +288,17 @@ export function isChromeOrEdgeDesktop(): boolean {
 }
 
 /** Trình duyệt có đủ API để ghi hình cho mode tương ứng không. */
-export function isSupported(forMode: RecordMode = 's3'): boolean {
+export function isSupported(forMode: CaptureMode = 's3'): boolean {
   // [#6][P2-5] Bắt buộc Chrome/Edge desktop — không chỉ dựa vào sự tồn tại của API,
   // và không chấp nhận Chromium fork (Brave/Opera/Vivaldi).
   if (!isChromeOrEdgeDesktop()) return false;
-  const base =
-    !!navigator.mediaDevices?.getDisplayMedia &&
-    typeof MediaRecorder !== 'undefined' &&
-    typeof fetch === 'function';
+  const base = !!navigator.mediaDevices?.getDisplayMedia;
+  if (forMode === 'live') return base;
+  const recordingBase = base && typeof MediaRecorder !== 'undefined' && typeof fetch === 'function';
   if (forMode === 'local') {
-    return base && typeof (window as any).showDirectoryPicker === 'function';
+    return recordingBase && typeof (window as any).showDirectoryPicker === 'function';
   }
-  return base;
+  return recordingBase;
 }
 
 export function isActive(): boolean {
@@ -1043,7 +1043,7 @@ function queuePendingProcessing(): void {
  * Trả về { ok, reason }. ok=false → KHÔNG được vào thi.
  * Gọi trong cùng user gesture của cú click (không await gì tiêu thụ gesture trước đó).
  */
-export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: boolean; reason?: string }> {
+export async function requestSetup(forMode: CaptureMode = 's3'): Promise<{ ok: boolean; reason?: string }> {
   if (!isSupported(forMode)) {
     return { ok: false, reason: 'unsupported' };
   }
@@ -1088,6 +1088,42 @@ export async function requestSetup(forMode: RecordMode = 's3'): Promise<{ ok: bo
   active = false;
   notifyCaptureStreamChanged();
   return { ok: true };
+}
+
+function attachCaptureEndHandler(): void {
+  const track = stream?.getVideoTracks()[0];
+  if (!track) return;
+  track.onended = () => {
+    // stopAndSave/stopAndDiscard sets lifecycle before stopping the track, so a
+    // programmatic release is never treated as a candidate stopping the share.
+    if (lifecycle !== 'capturing') return;
+    active = false;
+    lifecycle = 'interrupted';
+    recordingStoppedFired = true;
+    if (onRecordingStopped) onRecordingStopped();
+  };
+}
+
+/**
+ * Starts a capture-only session for live monitoring. It deliberately does not
+ * create a MediaRecorder, chunks, local file, S3 reservation, or upload.
+ */
+export function startLiveCapture(): void {
+  if (!stream) {
+    console.error('[examRecorder] startLiveCapture() called without a screen-share stream');
+    return;
+  }
+  recorder = null;
+  chunkBuffer = [];
+  pendingParts = new Map<string, PendingPart>();
+  manifestParts = new Map<string, number>();
+  bufferedPartIdentity = null;
+  reservationTrackingActive = false;
+  clearPartTimer();
+  recordingStoppedFired = false;
+  active = true;
+  lifecycle = 'capturing';
+  attachCaptureEndHandler();
 }
 
 /**
@@ -1151,16 +1187,7 @@ export function start(opts?: {
   }, PART_INTERVAL_MS);
 
   // Thí sinh bấm "Stop sharing" của trình duyệt giữa bài
-  const track = stream.getVideoTracks()[0];
-  track.onended = () => {
-    // stopAndSave/stopAndDiscard đặt lifecycle đồng bộ trước track.stop(). Kể cả browser
-    // fixture phát `ended` cho programmatic stop, đây vẫn không phải vi phạm.
-    if (lifecycle !== 'capturing') return;
-    active = false;
-    lifecycle = 'interrupted';
-    recordingStoppedFired = true;
-    if (onRecordingStopped) onRecordingStopped();
-  };
+  attachCaptureEndHandler();
 }
 
 function clearPartTimer(): void {

@@ -367,7 +367,7 @@ router.post('/verify', verifyRateLimit, async (req, res) => {
         }
         const result = await db.query(`
       SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration,
-             b.record_enabled, b.record_mode
+              b.record_enabled, b.record_mode, b.live_enabled
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.access_code = ?
@@ -402,7 +402,7 @@ router.post('/verify', verifyRateLimit, async (req, res) => {
         // verifies must return exactly the mode/password that won persisted state.
         const frozenAttempt = await db.withTransaction(async (tx) => {
             const current = (await tx.query(`SELECT s.attempt_record_mode, s.recording_password,
-                b.record_mode, b.record_enabled
+                 b.record_mode, b.record_enabled, b.live_enabled
          FROM students s JOIN batches b ON b.id = s.batch_id
          WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE OF s'}`, [student.id])).rows[0];
             if (!current)
@@ -416,9 +416,9 @@ router.post('/verify', verifyRateLimit, async (req, res) => {
          SET active_jti = ?, attempt_record_mode = ?,
              recording_password = COALESCE(recording_password, ?)
          WHERE id = ?`, [jti, recordMode, recordingPassword, student.id]);
-            return { jti, recordMode, recordingPassword };
+            return { jti, recordMode, recordingPassword, liveEnabled: Boolean(current.live_enabled) };
         });
-        const { jti, recordMode, recordingPassword } = frozenAttempt;
+        const { jti, recordMode, recordingPassword, liveEnabled } = frozenAttempt;
         const studentToken = jwt.sign({ studentId: student.id, batchId: student.batch_id, jti }, secret, { expiresIn: '4h' });
         res.json({
             valid: true,
@@ -432,6 +432,7 @@ router.post('/verify', verifyRateLimit, async (req, res) => {
             exam_end: endTime.toISOString(),
             record_enabled: recordMode === 's3', // giữ để tương thích ngược theo mode đã freeze
             record_mode: recordMode,
+            live_enabled: liveEnabled,
             recording_next_part_index: recordingNextPartIndex,
             // chỉ trả pass khi local — client dùng ngầm để mã hóa, không hiển thị
             recording_password: recordMode === 'local' ? recordingPassword : undefined,
@@ -724,11 +725,15 @@ router.post('/live/session', studentAuthMiddleware, async (req, res) => {
     try {
         const { studentId, batchId, jti } = req.studentPayload;
         const active = await db.query(`
-      SELECT id FROM students
-      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti = ?
+      SELECT s.id, b.record_mode, b.live_enabled
+      FROM students s JOIN batches b ON b.id = s.batch_id
+      WHERE s.id = ? AND s.batch_id = ? AND s.status = 'in_progress' AND s.active_jti = ?
     `, [studentId, batchId, jti]);
         if (!active.rows[0])
             return res.status(409).json({ error: 'Exam is not active' });
+        if (active.rows[0].record_mode === 'none' && !Boolean(active.rows[0].live_enabled)) {
+            return res.json({ enabled: false });
+        }
         const config = await issueLiveSession({
             actor: 'student', subject: `student:${studentId}:${jti}`,
             batchId, studentId, jti,

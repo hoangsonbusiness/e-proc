@@ -127,6 +127,8 @@ function StudentExam() {
   const studentEmail = localStorage.getItem('studentEmail');
   const recordMode = (localStorage.getItem('recordMode') || 'none') as 'none' | 'local' | 's3';
   const recordEnabled = recordMode !== 'none'; // có ghi màn hình (local hoặc s3)
+  const liveEnabled = localStorage.getItem('liveEnabled') === 'true';
+  const screenShareRequired = recordEnabled || liveEnabled;
 
   const finishSubmittedAttempt = useCallback((submissionNotice?: string) => {
     if (submissionFinishedRef.current) return;
@@ -137,8 +139,10 @@ function StudentExam() {
     // Capture cleanup starts synchronously; S3/local I/O continues on /submit.
     // Do this before any user-facing notice: a blocking dialog must never keep the
     // browser's native screen-sharing indicator alive after terminal submission.
-    const recordingFinalization = recordEnabled ? examRecorder.stopAndSave() : null;
-    const submitHandoff = recordingFinalization
+    const recordingFinalization = recordEnabled
+      ? examRecorder.stopAndSave()
+      : screenShareRequired ? examRecorder.stopAndDiscard() : null;
+    const submitHandoff = recordEnabled && recordingFinalization
       ? examRecorder.getSubmitHandoffPromise()
       : null;
     recordingFinalization?.catch((recErr) => {
@@ -164,7 +168,7 @@ function StudentExam() {
     } else {
       navigateToSubmit();
     }
-  }, [navigate, recordEnabled]);
+  }, [navigate, recordEnabled, screenShareRequired]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -247,7 +251,7 @@ function StudentExam() {
   // The candidate keeps one private signaling connection while the recorded
   // capture is active. A WebRTC peer is created only after an admin clicks View.
   useEffect(() => {
-    if (!started || !recordEnabled || locked || submitting) {
+    if (!started || !screenShareRequired || locked || submitting) {
       const current = livePublisherRef.current;
       livePublisherRef.current = null;
       if (current) void current.stop();
@@ -266,7 +270,7 @@ function StudentExam() {
       livePublisherRef.current = null;
       if (current) void current.stop();
     };
-  }, [started, recordEnabled, locked, submitting]);
+  }, [started, screenShareRequired, locked, submitting]);
 
   useEffect(() => {
     lockedRef.current = locked;
@@ -644,7 +648,7 @@ function StudentExam() {
   // recording_stopped → backend khóa NGAY lần đầu → handleViolation auto-submit.
   // Nếu track đã ended trước khi effect này chạy, setOnRecordingStopped gọi lại ngay.
   useEffect(() => {
-    if (!recordEnabled) return; // batch không ghi màn hình → bỏ qua
+    if (!screenShareRequired) return;
     return examRecorder.setOnRecordingStopped(() => {
       if (!startedRef.current) {
         pendingRecordingStoppedRef.current = true;
@@ -652,25 +656,25 @@ function StudentExam() {
       }
       void handleViolation('recording_stopped');
     });
-  }, [handleViolation, recordEnabled]);
+  }, [handleViolation, screenShareRequired]);
 
   // The track can end during async exam initialization. Defer the report until
   // the backend has transitioned the attempt to `in_progress`.
   useEffect(() => {
-    if (!recordEnabled || !started || !pendingRecordingStoppedRef.current) return;
+    if (!screenShareRequired || !started || !pendingRecordingStoppedRef.current) return;
     pendingRecordingStoppedRef.current = false;
     void handleViolation('recording_stopped');
-  }, [handleViolation, recordEnabled, started]);
+  }, [handleViolation, screenShareRequired, started]);
 
   // Resume-after-reload guard: nếu vào /exam khi bài đang chạy nhưng recorder KHÔNG
   // còn active (thí sinh F5/reload làm mất singleton), yêu cầu bật lại ghi màn hình.
   // Chỉ áp dụng khi batch bật record.
   useEffect(() => {
-    if (!recordEnabled) return;
+    if (!screenShareRequired) return;
     if (started && !locked && !submitting && !examRecorder.isActive()) {
       setRecordingLost(true);
     }
-  }, [started, locked, submitting, recordEnabled]);
+  }, [started, locked, submitting, screenShareRequired]);
 
   // [Anti-Cheat v2] Dynamic watermark interval
   useEffect(() => {
@@ -976,7 +980,7 @@ function StudentExam() {
     // Resume sau F5: dirHandle (local) không sống qua reload → phải chọn lại thư mục.
     // Password lấy lại từ localStorage (server đã cấp lúc verify, tái dùng đúng pass cũ).
     try {
-      const setup = await examRecorder.requestSetup(recordMode === 'none' ? 's3' : recordMode);
+      const setup = await examRecorder.requestSetup(recordMode === 'none' ? 'live' : recordMode);
       if (!setup.ok) return; // giữ modal, thí sinh phải thử lại
 
       // The picker may resolve after a timer/violation has already submitted and
@@ -991,13 +995,17 @@ function StudentExam() {
         return;
       }
 
-      const password = localStorage.getItem('recordingPassword');
-      examRecorder.start({
-        mode: recordMode === 'none' ? 's3' : recordMode,
-        password,
-        initialPartIndex: recordMode === 's3' ? recordingNextPartIndexRef.current : 0,
-      });
-      if (recordMode === 's3') examRecorder.activateS3ReservationTracking();
+      if (recordMode === 'none') {
+        examRecorder.startLiveCapture();
+      } else {
+        const password = localStorage.getItem('recordingPassword');
+        examRecorder.start({
+          mode: recordMode,
+          password,
+          initialPartIndex: recordMode === 's3' ? recordingNextPartIndexRef.current : 0,
+        });
+        if (recordMode === 's3') examRecorder.activateS3ReservationTracking();
+      }
       setRecordingLost(false);
     } finally {
       recordingResumeInFlightRef.current = false;
@@ -1386,17 +1394,17 @@ function StudentExam() {
               </svg>
             </div>
             <h3 className="text-xl font-bold text-red-600 mb-4">
-              Screen recording interrupted
+              {recordEnabled ? 'Screen recording interrupted' : 'Screen sharing interrupted'}
             </h3>
             <p className="text-slate-600 mb-8 leading-relaxed">
-              Screen recording was lost (possibly due to a page reload). You must share
+              {recordEnabled ? 'Screen recording was lost' : 'Screen sharing was lost'} (possibly due to a page reload). You must share
               your <strong className="text-slate-900">entire screen</strong> again to continue the exam.
             </p>
             <button 
               onClick={handleResumeRecording} 
               className="w-full inline-flex justify-center items-center px-6 py-3 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-colors shadow-sm"
             >
-              Restart Screen Recording
+              {recordEnabled ? 'Restart Screen Recording' : 'Restart Screen Sharing'}
             </button>
           </div>
         </div>

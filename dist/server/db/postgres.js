@@ -176,6 +176,7 @@ async function initPostgres() {
       blueprint JSONB,
       record_enabled BOOLEAN DEFAULT false,
       record_mode VARCHAR(16) DEFAULT 'none',
+      live_enabled BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -194,6 +195,10 @@ async function initPostgres() {
         // Migration: loại đề (essay = tự luận/coding, quiz = trắc nghiệm). Batch cũ mặc định 'essay'.
         try {
             await client.query("ALTER TABLE batches ADD COLUMN IF NOT EXISTS exam_type TEXT DEFAULT 'essay'");
+        }
+        catch (_) { /* already exists */ }
+        try {
+            await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN DEFAULT false');
         }
         catch (_) { /* already exists */ }
         // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
@@ -512,6 +517,7 @@ function initSqlite() {
         blueprint TEXT,
         record_enabled INTEGER DEFAULT 0,
         record_mode TEXT DEFAULT 'none',
+        live_enabled INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -757,6 +763,9 @@ function initSqlite() {
         if (!batchCols.includes('created_by')) {
             sqliteDb.exec('ALTER TABLE batches ADD COLUMN created_by INTEGER');
         }
+        if (!batchCols.includes('live_enabled')) {
+            sqliteDb.exec('ALTER TABLE batches ADD COLUMN live_enabled INTEGER DEFAULT 0');
+        }
         if (!batchCols.includes('ai_grading_status')) {
             sqliteDb.exec("ALTER TABLE batches ADD COLUMN ai_grading_status TEXT NOT NULL DEFAULT 'idle'");
         }
@@ -876,7 +885,7 @@ export async function verifyRequiredSchema() {
                 'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
                 'ai_grading_started_at', 'ai_grading_attempt_token',
             ],
-            batches: ['record_mode', 'exam_type',
+            batches: ['record_mode', 'live_enabled', 'exam_type',
                 'ai_grading_status', 'ai_grading_started_at', 'ai_graded_at'],
             exam_questions: ['option_order'],
             violation_events: ['metadata_json', 'event_id'],

@@ -180,9 +180,12 @@ router.get('/batches/:batchId/live/students', requireAdmin, async (req, res) => 
     if (!Number.isInteger(batchId) || batchId < 1)
         return res.status(400).json({ error: 'Invalid batch id' });
     try {
-        const batch = await db.query('SELECT id FROM batches WHERE id = ?', [batchId]);
+        const batch = await db.query('SELECT id, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
         if (!batch.rows[0])
             return res.status(404).json({ error: 'Batch not found' });
+        if (batch.rows[0].record_mode === 'none' && !Boolean(batch.rows[0].live_enabled)) {
+            return res.status(403).json({ error: 'Live screen sharing is not enabled for this batch' });
+        }
         const students = await db.query(`
       SELECT id, email, status, exam_started_at
       FROM students
@@ -203,12 +206,16 @@ router.post('/batches/:batchId/live/students/:studentId/session', requireAdmin, 
     }
     try {
         const result = await db.query(`
-      SELECT active_jti FROM students
-      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti IS NOT NULL
+      SELECT s.active_jti, b.record_mode, b.live_enabled
+      FROM students s JOIN batches b ON b.id = s.batch_id
+      WHERE s.id = ? AND s.batch_id = ? AND s.status = 'in_progress' AND s.active_jti IS NOT NULL
     `, [studentId, batchId]);
         const jti = result.rows[0]?.active_jti;
         if (!jti)
             return res.status(409).json({ error: 'Candidate does not have an active exam attempt' });
+        if (result.rows[0].record_mode === 'none' && !Boolean(result.rows[0].live_enabled)) {
+            return res.status(403).json({ error: 'Live screen sharing is not enabled for this batch' });
+        }
         const viewerSessionId = crypto.randomUUID();
         const config = await issueLiveSession({
             actor: 'admin', subject: `admin:${req.adminUser.id}:${viewerSessionId}`,
@@ -954,7 +961,7 @@ router.delete('/questions/:id', async (req, res) => {
 });
 router.post('/batches', async (req, res) => {
     try {
-        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+        const { name, start_time, end_time, duration, blueprint, record_mode, live_enabled, exam_type } = req.body;
         console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
         if (!name || !start_time || !end_time || !duration) {
@@ -978,21 +985,22 @@ router.post('/batches', async (req, res) => {
         if (req.adminUser?.role !== 'admin')
             recordMode = 'none';
         const recordFlag = recordMode === 's3' ? 1 : 0;
+        const liveEnabled = req.adminUser?.role === 'admin' && live_enabled === true;
         // Lưu người tạo batch
         const createdBy = req.adminUser?.id ?? null;
         let result;
         if (USE_SQLITE) {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, examType, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, live_enabled, exam_type, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, liveEnabled ? 1 : 0, examType, createdBy]);
         }
         else {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, exam_type, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, live_enabled, exam_type, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         RETURNING id
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, examType, createdBy]);
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, liveEnabled, examType, createdBy]);
         }
         console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
         res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -1068,9 +1076,9 @@ router.put('/batches/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const batchId = parseInt(id);
-        const { name, start_time, end_time, duration, blueprint, record_mode, exam_type } = req.body;
+        const { name, start_time, end_time, duration, blueprint, record_mode, live_enabled, exam_type } = req.body;
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
-        const currentResult = await db.query('SELECT created_by, record_mode FROM batches WHERE id = ?', [batchId]);
+        const currentResult = await db.query('SELECT created_by, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
         const currentBatch = currentResult.rows[0];
         if (!currentBatch)
             return res.status(404).json({ error: 'Batch not found' });
@@ -1092,10 +1100,13 @@ router.put('/batches/:id', async (req, res) => {
             recordMode = currentBatch.record_mode || 'none';
         }
         const recordFlag = recordMode === 's3' ? 1 : 0;
+        const liveEnabled = req.adminUser?.role === 'admin'
+            ? live_enabled === true
+            : Boolean(currentBatch.live_enabled);
         await db.query(`
-      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, exam_type = ?
+      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, live_enabled = ?, exam_type = ?
       WHERE id = ?
-    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, examType, batchId]);
+    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, USE_SQLITE ? (liveEnabled ? 1 : 0) : liveEnabled, examType, batchId]);
         res.json({ success: true });
     }
     catch (error) {

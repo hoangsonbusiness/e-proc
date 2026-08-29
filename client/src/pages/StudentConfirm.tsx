@@ -25,6 +25,8 @@ function StudentConfirm() {
   const email = location.state?.email;
   const duration = location.state?.duration;
   const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
+  const liveEnabled = Boolean(location.state?.liveEnabled);
+  const screenShareRequired = recordMode !== 'none' || liveEnabled;
   const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
   const recordingNextPartIndex = Number(location.state?.recordingNextPartIndex) || 0;
 
@@ -60,10 +62,11 @@ function StudentConfirm() {
       return;
     }
 
-    // Chỉ yêu cầu ghi màn hình khi batch bật record (local/s3). Mode 'none' → thi thẳng.
-    if (recordMode !== 'none') {
-      if (!examRecorder.isSupported(recordMode)) {
-        setError('Your browser does not support screen recording. Please use a recent version of Google Chrome or Microsoft Edge to take the exam.');
+    // Local/S3 record and capture-only Live both require one full-screen share.
+    if (screenShareRequired) {
+      const captureMode = recordMode === 'none' ? 'live' : recordMode;
+      if (!examRecorder.isSupported(captureMode)) {
+        setError('Your browser does not support full-screen sharing. Please use a recent version of Google Chrome or Microsoft Edge to take the exam.');
         setLoading(false);
         return;
       }
@@ -71,7 +74,7 @@ function StudentConfirm() {
       // QUAN TRỌNG — thứ tự: chia sẻ màn hình (và chọn thư mục nếu local) TRƯỚC, fullscreen SAU.
       // getDisplayMedia đòi "user activation" của cú click; nếu gọi requestFullscreen
       // trước, gesture bị tiêu thụ → getDisplayMedia bị chặn (SecurityError).
-      const setup = await examRecorder.requestSetup(recordMode);
+      const setup = await examRecorder.requestSetup(captureMode);
       if (!setup.ok) {
         const messages: Record<string, string> = {
           unsupported: 'Your browser does not support screen recording. Please use Chrome or Edge.',
@@ -79,15 +82,19 @@ function StudentConfirm() {
           no_screen: 'You must allow screen sharing to start the exam.',
           not_fullscreen: 'Please share your "Entire Screen", not a single tab or window.',
         };
-        setError(messages[setup.reason || ''] || 'Could not start screen recording. Please try again.');
+        setError(messages[setup.reason || ''] || 'Could not start screen sharing. Please try again.');
         setLoading(false);
         return;
       }
-      examRecorder.start({
-        mode: recordMode,
-        password: recordingPassword,
-        initialPartIndex: recordMode === 's3' ? recordingNextPartIndex : 0,
-      });
+      if (recordMode === 'none') {
+        examRecorder.startLiveCapture();
+      } else {
+        examRecorder.start({
+          mode: recordMode,
+          password: recordingPassword,
+          initialPartIndex: recordMode === 's3' ? recordingNextPartIndex : 0,
+        });
+      }
     }
 
     // A new attempt must never inherit a baseline from an older attempt in the same tab.
@@ -98,7 +105,7 @@ function StudentConfirm() {
       await document.documentElement.requestFullscreen();
       if (!document.fullscreenElement) throw new Error('Fullscreen was not activated');
     } catch (e) {
-      if (recordMode !== 'none') await examRecorder.stopAndDiscard().catch(() => undefined);
+      if (screenShareRequired) await examRecorder.stopAndDiscard().catch(() => undefined);
       setError('Fullscreen is required. Allow fullscreen access to start the exam.');
       setLoading(false);
       return;
@@ -111,7 +118,7 @@ function StudentConfirm() {
     await waitForNextPaint();
     const fullscreenBaselineWidth = document.documentElement.getBoundingClientRect().width;
     if (!storeFullscreenBaselineWidth(fullscreenBaselineWidth)) {
-      if (recordMode !== 'none') await examRecorder.stopAndDiscard().catch(() => undefined);
+      if (screenShareRequired) await examRecorder.stopAndDiscard().catch(() => undefined);
       await document.exitFullscreen().catch(() => undefined);
       setError('Could not initialize the secure fullscreen session. Please allow session storage and try again.');
       setLoading(false);
@@ -119,6 +126,7 @@ function StudentConfirm() {
     }
 
     localStorage.setItem('recordMode', recordMode); // để /exam biết mode (none/local/s3)
+    localStorage.setItem('liveEnabled', String(liveEnabled));
     if (recordMode === 'local' && recordingPassword) {
       localStorage.setItem('recordingPassword', recordingPassword); // dùng ngầm cho resume-after-reload
     }
@@ -162,16 +170,18 @@ function StudentConfirm() {
             </div>
           )}
 
-          {recordMode !== 'none' && (
+          {screenShareRequired && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-6 text-sm text-amber-800 shadow-sm">
               <div className="flex gap-2 mb-2">
                 <AlertTriangle className="text-amber-600 shrink-0" size={18} />
-                <span className="font-semibold text-amber-900">Screen Recording Required</span>
+                <span className="font-semibold text-amber-900">Screen Sharing Required</span>
               </div>
               <p className="ml-6 leading-relaxed opacity-90">
                 When you start, you will be asked to
                 {recordMode === 'local' && <> choose a <b>folder to save the video</b> and</>} share your <b>Entire Screen</b>.
-                {recordMode === 'local'
+                {recordMode === 'none'
+                  ? <> Your screen is shared only for authorised live monitoring; no recording is saved.</>
+                  : recordMode === 'local'
                   ? <> The video is saved to the folder you choose. After the exam, commit this folder to GitLab as instructed.</>
                   : <> The video is uploaded automatically to the system during the exam.</>}
                 <br /><br />Please use <b>Google Chrome</b> or <b>Microsoft Edge</b>. If you stop sharing during the exam, it will be locked.

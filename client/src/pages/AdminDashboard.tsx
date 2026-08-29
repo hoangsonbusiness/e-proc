@@ -79,6 +79,7 @@ function AdminDashboard() {
 
   const canViewLiveBatch = (batch: any) => {
     if (userId === null || batch.created_by === null || batch.created_by === undefined || Number(batch.created_by) !== userId || !batch.end_time) return false;
+    if (batch.record_mode === 'none' && !Boolean(batch.live_enabled)) return false;
     const endDate = new Date(batch.end_time);
     if (Number.isNaN(endDate.getTime())) return false;
     endDate.setHours(0, 0, 0, 0);

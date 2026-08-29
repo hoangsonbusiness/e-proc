@@ -246,6 +246,22 @@ try {
   applySql('recording migration fixture cleanup', `
     DELETE FROM public.batches WHERE id = 900001;
   `);
+  applyMigration('migrations/20260829_live_enabled.sql');
+  applyMigration('migrations/20260829_live_enabled.sql');
+  applySql('schema v6 capture-only live migration assertion', `
+    DO $$
+    BEGIN
+      IF (SELECT version FROM public.app_schema_state WHERE id = 1) <> 6 THEN
+        RAISE EXCEPTION 'capture-only live migration did not set schema v6';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'batches' AND column_name = 'live_enabled'
+      ) THEN
+        RAISE EXCEPTION 'batches.live_enabled was not created by migration';
+      END IF;
+    END $$;
+  `);
   run(['up', '--detach', '--wait', 'app']);
 
   console.log('\n[3/8] Verifying PostgreSQL-backed application health and legacy-free schema...');
@@ -256,10 +272,10 @@ try {
     "if('queue' in body)throw new Error('Health response still exposes legacy queue state');",
     "const pg=(await import('pg')).default;",
     "const p=new pg.Pool({connectionString:process.env.DATABASE_URL,max:1});",
-    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,to_regclass('public.live_monitor_audit') live_monitor_audit,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
+    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,to_regclass('public.live_monitor_audit') live_monitor_audit,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name='live_enabled') live_enabled_column,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
     "await p.end();",
     "const s=q.rows[0];",
-    "if(Number(s.version)!==5||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||!s.live_monitor_audit||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
+    "if(Number(s.version)!==6||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||!s.live_monitor_audit||Number(s.live_enabled_column)!==1||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
   ].join('')]);
 
   console.log('\n[4/8] Verifying the built React frontend is served by the app container...');

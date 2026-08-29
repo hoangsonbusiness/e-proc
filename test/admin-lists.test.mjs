@@ -8,7 +8,7 @@ function fixture() {
   database.exec(`
     CREATE TABLE batches (
       id INTEGER PRIMARY KEY, name TEXT, start_time TEXT, end_time TEXT, duration INTEGER,
-      blueprint TEXT, record_enabled INTEGER, record_mode TEXT, exam_type TEXT,
+      blueprint TEXT, record_enabled INTEGER, record_mode TEXT, live_enabled INTEGER, exam_type TEXT,
       created_by INTEGER, ai_grading_status TEXT, created_at TEXT
     );
     CREATE TABLE students (
@@ -16,8 +16,8 @@ function fixture() {
       status TEXT, created_at TEXT
     );
     INSERT INTO batches VALUES
-      (1, 'Older', '', '', 30, '[{"module":"Java"}]', 0, 'none', 'essay', 1, 'idle', '2026-01-01'),
-      (2, 'Newer', '', '', 45, '[{"module":"Spring"}]', 0, 'none', 'quiz', 1, 'idle', '2026-01-02');
+      (1, 'Older', '', '', 30, '[{"module":"Java"}]', 0, 'none', 0, 'essay', 1, 'idle', '2026-01-01'),
+      (2, 'Newer', '', '', 45, '[{"module":"Spring"}]', 0, 'none', 0, 'quiz', 1, 'idle', '2026-01-02');
     INSERT INTO students VALUES
       (1, 2, 'alice@example.com', 'AAA111', 'pending', '2026-01-01'),
       (2, 2, 'bob@example.com', 'BBB222', 'submitted', '2026-01-02');

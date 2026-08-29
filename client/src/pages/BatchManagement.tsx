@@ -153,6 +153,7 @@ function BatchManagement() {
     blueprint: [] as BlueprintItem[],
     blueprintByType: [] as BlueprintItemByType[],
     record_mode: 'none' as 'none' | 'local' | 's3',
+    live_enabled: false,
     exam_type: 'essay' as 'essay' | 'quiz',
   });
   // Edit form state
@@ -404,6 +405,7 @@ function BatchManagement() {
       blueprint: moduleItems,
       blueprintByType: typeItems,
       record_mode: recordMode,
+      live_enabled: isAdmin && Boolean(batch.live_enabled),
       exam_type: batch.exam_type === 'quiz' ? 'quiz' : 'essay',
     });
     setFeasibilityErrors([]);
@@ -451,6 +453,7 @@ function BatchManagement() {
         duration: editingBatch.duration,
         blueprint: blueprintPayload,
         record_mode: editingBatch.record_mode || 'none',
+        live_enabled: Boolean(editingBatch.live_enabled),
         exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
       });
       loadBatches();
@@ -501,12 +504,13 @@ function BatchManagement() {
         duration: formData.duration,
         blueprint: blueprintPayload,
         record_mode: formData.record_mode,
+        live_enabled: formData.live_enabled,
         exam_type: formData.exam_type,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', exam_type: 'essay' });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', live_enabled: false, exam_type: 'essay' });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -638,6 +642,7 @@ function BatchManagement() {
   /** Live is available through the entire end-date, regardless of end time. */
   const canViewLiveBatch = (batch: any) => {
     if (userId === null || batch.created_by === null || batch.created_by === undefined || Number(batch.created_by) !== userId || !batch.end_time) return false;
+    if (batch.record_mode === 'none' && !Boolean(batch.live_enabled)) return false;
     const endDate = new Date(batch.end_time);
     if (Number.isNaN(endDate.getTime())) return false;
     endDate.setHours(0, 0, 0, 0);
@@ -956,6 +961,16 @@ function BatchManagement() {
                   {!isAdmin && (
                     <p className="text-xs text-amber-600 font-medium">Only admin accounts can change this setting.</p>
                   )}
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed">
+                    <input
+                      type="checkbox"
+                      checked={formData.live_enabled}
+                      disabled={!isAdmin}
+                      onChange={e => setFormData(prev => ({ ...prev, live_enabled: e.target.checked }))}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:cursor-not-allowed"
+                    />
+                    Check Live <span className="font-normal text-slate-500">(require full-screen sharing; no recording saved)</span>
+                  </label>
                 </div>
               </div>
 
@@ -1550,6 +1565,16 @@ function BatchManagement() {
                 {!isAdmin && (
                   <p className="mt-2 text-sm text-amber-600 font-medium">Only admin accounts can change this setting.</p>
                 )}
+                <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(editingBatch.live_enabled)}
+                    disabled={!isAdmin}
+                    onChange={e => setEditingBatch({ ...editingBatch, live_enabled: e.target.checked })}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 disabled:cursor-not-allowed"
+                  />
+                  Check Live <span className="font-normal text-slate-500">(require full-screen sharing; no recording saved)</span>
+                </label>
               </div>
             </div>
 
