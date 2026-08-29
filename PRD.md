@@ -68,7 +68,7 @@ Validation:
 
 ### 3.3 Batch management
 
-Mỗi batch có tên, UTC start/end, duration, `exam_type`, blueprint, `record_mode` và `created_by`. Create/Update không có AI flag.
+Mỗi batch có tên, UTC start/end, duration, `exam_type`, blueprint, `record_mode`, `live_enabled` và `created_by`. Create/Update không có AI flag.
 
 Current blueprint:
 
@@ -86,6 +86,7 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - Clone là frontend prefill form tạo mới với hậu tố `CLONE`, không có clone API riêng.
 - Batches List hiện **AI Grade** cho mọi batch essay cũ/mới khi current user là creator và current user có verified LLM setting.
 - Quiz và batch do user khác tạo không hiện button. Submit không tự gọi AI và không tạo manual grading work.
+- **Live:** Creator của batch được xem Live, bất kể role `admin` hay `mod`; user không phải creator bị backend trả `403`, kể cả là admin. UI button chỉ hiện cho creator khi Date của End Time >= ngày hiện tại và batch có nguồn capture (`record_mode=local/s3` hoặc `Check Live=ON`). `Check Live` mặc định OFF, đặt sau Screen Recording. Với `No record`, bật nó sẽ chỉ bắt buộc share toàn màn hình để admin xem Live — không ghi local và không upload S3. Local/S3 vẫn xem Live khi checkbox OFF.
 
 ### 3.4 Candidate management
 
@@ -101,7 +102,7 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 2. Server tạo JWT 4 giờ `{studentId,batchId,jti}`, ghi `active_jti`; verify mới revoke token cũ.
 3. UI dùng email đầu tiên và chuyển tới `/confirm`; `/select-email` chỉ còn legacy, không thuộc flow hiện tại.
 4. Preflight fail closed nếu `screen.isExtended=true` hoặc API không trả boolean.
-5. Recording yêu cầu recent Chrome/Edge desktop và đúng `displaySurface='monitor'`.
+5. Recording hoặc Check Live yêu cầu recent Chrome/Edge desktop và đúng `displaySurface='monitor'`. Check Live-only không tạo evidence recording.
 6. Fullscreen phải thành công; sau hai animation frames, lưu immutable document-width baseline vào `sessionStorage`.
 7. Lưu token/context vào `localStorage`, điều hướng `/exam`.
 
@@ -189,13 +190,14 @@ Concurrent session:
 | Table | Vai trò |
 |---|---|
 | `question_bank` | Question/rubric/quiz config/owner |
-| `batches` | Schedule/blueprint/exam-record-AI mode/owner |
+| `batches` | Schedule/blueprint/exam-record-AI mode, `live_enabled`, owner |
 | `students` | Candidate attempt/code/deadline/session/submit/recording state và AI final result/status |
 | `exam_questions` | Assignment/option order/answer/scores |
 | `violations` | Unique counted row theo student/type |
 | `violation_events` | Append-only forensic event + idempotency id |
 | `recording_parts` | S3 part đã được client xác nhận PUT 2xx |
 | `exam_sessions` | Recent jti/IP/UA activity |
+| `live_monitor_audit` | Audit admin mở/kết thúc một phiên xem Live; không lưu video |
 | `user_ai_settings` | Một verified LLM connection/user; API key mã hóa và fingerprint cấu hình đã test |
 | `admin_users` | Credentials + role |
 | `app_schema_state`, `schema_migrations` | Runtime schema contract và migration ledger cho deploy VPS |
@@ -207,8 +209,8 @@ Production dùng schema-version fast path và không chạy runtime DDL. Full bo
 ## 5. API surface
 
 - Public admin auth: initialization, setup, login, logout.
-- Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility/manual AI Grade; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; owned AI settings/test/save.
-- Student: verify, start, questions, answer(s), submit, disconnect, violation, recording URL/complete/finalize.
+- Protected admin: users; question import/stats/paging/CRUD; batch CRUD/feasibility/manual AI Grade; candidate import/list/export/delete/reset; result summary/detail/legacy/export/override; owned AI settings/test/save; Live list/create viewer session/end audit.
+- Student: verify, start, questions, answer(s), submit, disconnect, violation, recording URL/complete/finalize, short-lived Live signaling session.
 - Operations: readiness health, authenticated DB diagnostics và transitional answer-cache flush.
 
 Chi tiết method/path nằm trong `SPEC.md`.
@@ -222,6 +224,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - CSP giữ `'unsafe-eval'` và `blob:` vì Monaco; client minification không phải security boundary.
 - Rate limit: global 1200/phút/IP; verify 60/phút/IP; admin login 10/phút/IP; setup 5/giờ/IP.
 - JSON/urlencoded 10 MiB; Excel 5 MiB.
+- Live Realtime dùng private channel và RLS policy; triển khai phải tắt Supabase Realtime **Allow public access to channels**. ES256 JWK do server ký phải được import toàn bộ qua Auth → JWT Signing Keys → **Create Standby Key** rồi Rotate active; key Supabase tự sinh không xuất private material cho Vercel.
 
 ### Reliability and performance
 
@@ -253,6 +256,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 12. S3 metadata chỉ persist sau browser-observed PUT 2xx; failed/ambiguous PUT không được acknowledge; finalize thiếu part trả 409; submit page phản ánh finalize failure.
 13. Health trả 503 pending/error và 200 chỉ khi ready.
 14. Results dùng paged summary/lazy detail; export giữ trainer-score precedence.
+15. Live chỉ được bật khi cấu hình Supabase JWT signing key hợp lệ và Open Relay trả TURN (`turnAvailable=true`); bắt buộc smoke test Live qua mạng cần relay. `turnAvailable=false` chỉ là degrade path để bài thi không lỗi, không phải cấu hình production được chấp nhận.
 
 ## 8. Known limitations
 
@@ -271,6 +275,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 
 - Local Docker verification: `docker-compose.local.yml` chạy đúng hai service `app` và Supabase PostgreSQL `database`; `npm run test:local` build/health-check/serve frontend và chạy SQLite, PostgreSQL cùng AI Grade E2E.
 - Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3; manual AI Grade, không daily cron.
+- Live Monitoring: WebRTC P2P, Supabase Realtime Broadcast chỉ signaling, Open Relay/Metered TURN relay khi P2P thất bại. Vercel production phải có `LIVE_MONITORING_ENABLED`, Supabase URL/publishable key, private ES256 JWK Base64 cùng `kid` của JWK đã import/rotate, **và cả hai `OPEN_RELAY_*` variables**; Supabase Realtime public channels phải tắt. Gói TURN free có thể vẫn yêu cầu thẻ xác minh.
 - Ubuntu VPS: `deploy-vps.sh` sinh Docker/Caddy/Compose runtime ngoài checkout, dùng Supabase PostgreSQL.
 - `public/**`, root `server/**`, `index.js` và generated bundles không phải production source of truth theo Vercel config.
 

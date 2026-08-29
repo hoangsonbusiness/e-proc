@@ -373,6 +373,13 @@ Batches support two blueprint formats for question assignment:
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
 | `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
 | `S3_RECORDINGS_BUCKET` | Rec | — | S3 bucket that stores exam screen recordings. |
+| `LIVE_MONITORING_ENABLED` | Live | Must be exact string `true`; otherwise live session API deliberately returns `enabled:false`. |
+| `SUPABASE_URL` | Live | Production project URL `https://<project-ref>.supabase.co`; used as realtime JWT issuer. |
+| `SUPABASE_PUBLISHABLE_KEY` | Live | Project publishable (`sb_publishable_...`) key, never service-role; passed to browser only for Realtime connection. |
+| `SUPABASE_REALTIME_PRIVATE_KEY_BASE64` | Live | Base64 of the complete private ES256 JWK JSON whose matching public JWK is active in Supabase. Server-only secret. |
+| `SUPABASE_REALTIME_JWT_KEY_ID` | Required production Live | Matching `kid` from the private JWK imported through Supabase **Create Standby Key** and then rotated active. |
+| `OPEN_RELAY_CREDENTIALS_URL` | **Required production Live TURN** | Metered/Open Relay credentials endpoint under `https://<app>.metered.live/api/v1/turn/credentials`; source appends `apiKey`. |
+| `OPEN_RELAY_API_KEY` | **Required production Live TURN** | API key for that exact credentials endpoint. |
 
 ## Important project-specific notes
 
@@ -430,6 +437,18 @@ Batches support two blueprint formats for question assignment:
 - `public/assets/*.js` (to confirm the runtime bundle really contains the expected change)
 
 ## Notable current behavior
+
+### Live monitoring / capture-only Live (2026-08-29)
+
+- Live video uses browser-to-browser WebRTC. Supabase Realtime private Broadcast is only the signaling path; Vercel and Supabase do not relay the screen video. STUN is attempted first and configured TURN is fallback-only.
+- `batches.live_enabled` defaults to `false`. The admin-only **Check Live** checkbox is immediately after Screen Recording in Create/Edit Batch. It is required only for `record_mode='none'`; `local` and `s3` already capture a stream suitable for Live even when the checkbox is off.
+- For a no-recording batch with Check Live on, candidate preflight requires sharing the entire monitor. The client starts `startLiveCapture()` only: it must not create a `MediaRecorder`, local evidence file, S3 reservation, upload, manifest, or recording part.
+- Stopping the required share still reports `recording_stopped` and locks the attempt; reload/resume requires sharing again. A Live button is available only to the batch creator, while its end **date** is today or later, and only when the batch has a capture source (`local`, `s3`, or Check Live).
+- Production rollout requires `migrations/20260829_live_enabled.sql` before source that requires schema version 6. The existing `20260828_live_monitoring.sql` remains the Live signaling/audit migration.
+- Deployment requires `LIVE_MONITORING_ENABLED=true`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, private ES256 JWK Base64 and its matching `kid`. Generate the JWK locally, then use Supabase Auth → JWT Signing Keys → **Create Standby Key** to import the entire private JWK JSON and **Rotate key** to activate it; use that same JSON's `kid` on Vercel. Do not choose a Supabase-generated key for this use case because its private material cannot be extracted to Vercel.
+- Realtime Authorization must be enabled operationally: Supabase Realtime → Settings → disable **Allow public access to channels**. Source creates the channel with `private: true`; migration `20260828_live_monitoring.sql` supplies the claim-scoped RLS policy.
+- Live list/create-session routes are authenticated for both `admin` and `mod`, then server-enforce `batches.created_by === req.adminUser.id`. This is a deliberate exception to the general admin-can-manage-all-batches rule: a non-creator, including another admin, receives 403. The audit-end route instead requires that `admin_user_id` matches the user who created that viewer session. The UI uses the same batch ownership rule for the Live button.
+- `OPEN_RELAY_CREDENTIALS_URL` and `OPEN_RELAY_API_KEY` provide Metered/Open Relay TURN credentials, not signaling and not an always-on video path. They are **required for production Live**; `turnAvailable=true` is a deployment acceptance condition. The code's STUN-only fallback merely prevents the exam itself failing when relay credentials break, and is not a supported production Live configuration. The stated 20 GB free plan may still require a card for identity verification.
 
 - **Free-tier integrity hardening (2026-08-10):** no periodic heartbeat, Realtime channel, challenge table, or append-only activity stream was added. Existing exam requests remain the only session activity source, avoiding recurring Vercel invocations and Supabase writes.
 - A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.

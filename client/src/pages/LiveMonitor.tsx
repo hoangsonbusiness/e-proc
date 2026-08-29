@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, Navigate, useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, MonitorPlay, RefreshCw, Square, Wifi } from 'lucide-react';
 import AdminNav from '../components/AdminNav';
-import { useAuth } from '../contexts/AuthContext';
 import { adminApi } from '../services/api';
 import { startLiveViewer, type LiveViewerStatus, type LiveViewer } from '../services/liveViewer';
 
@@ -10,7 +9,6 @@ interface ActiveStudent { id: number; email: string; status: string; exam_starte
 
 function LiveMonitor() {
   const { id } = useParams<{ id: string }>();
-  const { isAdmin, isLoading } = useAuth();
   const batchId = Number(id);
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewerRef = useRef<LiveViewer | null>(null);
@@ -72,7 +70,6 @@ function LiveMonitor() {
     }
   };
 
-  if (!isLoading && !isAdmin) return <Navigate to="/admin/dashboard" replace />;
   const statusText: Record<LiveViewerStatus, string> = {
     connecting: 'Đang chờ học viên kết nối…', 'connected-direct': 'Đang xem P2P trực tiếp',
     'connected-relay': 'Đang xem qua TURN relay', failed: 'Không kết nối được', ended: 'Đã dừng',

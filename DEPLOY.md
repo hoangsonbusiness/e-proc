@@ -130,7 +130,7 @@ npm run test:local
 - `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự tám bước: build/start stack; chạy lần lượt migration recording reservation và manifest recovery hai lần; restart/xác minh schema v4; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; chạy HTTP/PostgreSQL E2E cho admin reset password; rồi chạy manual AI Grade E2E qua mock LLM.
+Gate chạy tuần tự tám bước: build/start stack; dựng fixture schema v2 rồi chạy reservation/manifest recovery, Live Monitoring và `live_enabled` migrations theo thứ tự (các migration cần idempotency được chạy lại); restart/xác minh schema v6; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; chạy HTTP/PostgreSQL E2E cho admin reset password; rồi chạy manual AI Grade E2E qua mock LLM. Stack local chỉ là Supabase PostgreSQL, không có hosted Supabase Realtime/TURN; vì vậy nó không chứng minh một Live channel production kết nối được.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 
@@ -211,9 +211,26 @@ Chạy đúng thứ tự:
    - Nâng `app_schema_state.version` lên `4`; chạy migration này **trước** khi deploy source hiện tại vì runtime mới yêu cầu schema v4.
    - Verification phải trả đủ 3 column recovery và row `app_schema_state.version >= 4`.
 
+13. `migrations/20260828_live_monitoring.sql`
+   - Tạo dữ liệu audit/session cho Live Monitoring và policy Realtime Broadcast private-topic. Video WebRTC không đi qua Vercel hoặc Supabase.
+   - Trên Supabase hosted, migration không được cố `ALTER TABLE realtime.messages` vì role SQL Editor không sở hữu bảng hệ thống này; chỉ tạo policy cần thiết.
+
+14. `migrations/20260829_live_enabled.sql`
+   - Thêm `batches.live_enabled` (mặc định `false`) cho checkbox **Check Live** của batch không record.
+   - Nâng `app_schema_state.version` lên `6`; chạy trước khi deploy source dùng capture-only Live. Không cần biến môi trường mới chỉ riêng cho checkbox này.
+
 > **Điều kiện rollout bắt buộc cho release recording schema-v4:** dừng tạo lượt thi mới và chờ đến khi không còn thí sinh S3 nào đang `in_progress`/không còn tab thi dùng bundle cũ. Client cũ không gửi `/recording-seal`, nên deploy backend mới giữa một lượt thi đang chạy sẽ làm lượt đó không thể finalize. Chỉ chạy hai migration và deploy frontend/backend sau khi đã drain các lượt S3 đang hoạt động.
 
-Các file đều có transaction/idempotent guard và có thể chạy lại khi cần. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
+Các migration có idempotent guard và có thể chạy lại khi cần, nhưng không phải mọi file đều được bọc bằng một transaction chung: `20260828_live_monitoring.sql` tạo audit table/index và policy theo từng statement. Chạy từng file riêng, đọc kết quả trước khi chuyển file tiếp theo. Riêng `20260810_violation_event_idempotency.sql` có bước gộp duplicate `violations`; vẫn phải đọc kết quả và không chạy đồng thời từ hai cửa sổ.
+
+### 3.2.1. Smoke test Check Live
+
+1. Tạo batch `Screen Recording = No record`, bật **Check Live**, và thêm học viên.
+2. Ở máy học viên, Confirm phải yêu cầu share **Entire Screen**; không được hiện chọn thư mục local hoặc gọi S3 upload.
+3. Ở admin, Live chỉ xuất hiện cho người tạo batch khi end-date chưa qua và phải xem được stream. Dừng share phải bị khóa theo `recording_stopped`.
+4. Với batch `Local` hoặc `S3`, để **Check Live = OFF** vẫn phải Live được và workflow record hiện hữu không thay đổi.
+
+> Quyền Live được kiểm tra cả frontend lẫn backend: Live list/session chỉ cho phép `batches.created_by = req.adminUser.id`. Quy tắc này áp dụng cho cả `admin` và `mod`; một admin không phải creator nhận `403`.
 
 ### 3.3. Nếu migration thứ ba báo duplicate
 
@@ -254,6 +271,50 @@ Backend có startup readiness kiểm tra các column/index bắt buộc. Timeout
 ## 5. Environment variables trên Vercel
 
 Vercel Dashboard → project → **Settings** → **Environment Variables**. Thêm từng biến cho environment **Production**; nếu dùng Preview để smoke test thì chọn thêm Preview. Sau khi đổi env phải redeploy vì deployment cũ không tự nhận giá trị mới.
+
+### 5.1. Live Monitoring: Supabase signaling + Open Relay TURN
+
+Live không có video proxy qua Vercel/Supabase: browser học viên và browser admin trao đổi media qua WebRTC. Vercel chỉ tạo JWT 10 phút theo từng topic để hai browser dùng Supabase Realtime Broadcast trao đổi offer/answer/ICE. TURN chỉ relay media khi P2P thất bại.
+
+Chạy trước `migrations/20260828_live_monitoring.sql` và `migrations/20260829_live_enabled.sql`. Sau đó thêm **toàn bộ** các biến sau vào Vercel (Production, và Preview nếu Preview được dùng để test); tuyệt đối không dùng prefix `VITE_` hay commit các giá trị secret:
+
+| Variable | Bắt buộc | Giá trị/lấy ở đâu | Công dụng |
+|---|---|---|---|
+| `LIVE_MONITORING_ENABLED` | Có | chính xác `true` | Bật cấp live signaling session; giá trị khác `true` làm API trả `enabled:false`. |
+| `SUPABASE_URL` | Có | Supabase Dashboard → Connect/API → Project URL, ví dụ `https://<project-ref>.supabase.co` | `iss` của realtime JWT và endpoint Realtime. |
+| `SUPABASE_PUBLISHABLE_KEY` | Có | Supabase Dashboard → Connect/API Keys → Publishable key (`sb_publishable_...`) | Public client key để browser mở Supabase Realtime; không phải service-role key. |
+| `SUPABASE_REALTIME_PRIVATE_KEY_BASE64` | Có | Base64 UTF-8 của **toàn bộ private JWK JSON ES256** khớp public key active trên Supabase | Server ký realtime JWT ES256. Đây là secret chỉ đặt server-side. |
+| `SUPABASE_REALTIME_JWT_KEY_ID` | Có cho ES256 production | chính xác trường `kid` của private JWK đã import và rotate | Ghi JWT header `kid` để Supabase chọn đúng public key. |
+| `OPEN_RELAY_CREDENTIALS_URL` | **Có cho production Live** | URL credentials copy nguyên văn từ Open Relay/Metered, dạng `https://<app>.metered.live/api/v1/turn/credentials` | Server gọi URL này để lấy ICE/TURN credentials ngắn hạn. |
+| `OPEN_RELAY_API_KEY` | **Có cho production Live** | API key của cùng credentials URL | Server tự thêm query `?apiKey=...`; không chèn key vào URL. |
+
+**Quy trình Supabase/JWK — không bỏ qua bước matching:**
+
+1. Lấy `SUPABASE_URL` và `SUPABASE_PUBLISHABLE_KEY` từ đúng project production. Publishable key có thể được client nhận trong payload live; private JWK thì không.
+2. Tạo private JWK local. Lệnh chỉ tạo file local, chưa import/activate trên Supabase:
+
+```powershell
+npx supabase gen signing-key --algorithm ES256 > live-realtime-jwk.json
+```
+
+3. Supabase Dashboard → **Auth → JWT Signing Keys** → **Create Standby Key**. Trong flow tạo key, chọn import private key và paste **toàn bộ** nội dung `live-realtime-jwk.json` (bao gồm `kty`, `kid`, `d`, `crv`, `x`, `y`), sau đó tạo standby key.
+4. Bấm **Rotate key** để key vừa import thành current/active. Không thay `kid`: giá trị trong JSON là giá trị đưa vào `SUPABASE_REALTIME_JWT_KEY_ID`.
+5. Chỉ sau khi import và rotate thành công, encode chính file private JWK đó thành một dòng Base64 và dán kết quả vào Vercel:
+
+```powershell
+$jwk = Get-Content -Raw .\live-realtime-jwk.json
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($jwk))
+```
+
+6. Không tự tạo `kid`, không lấy `kid` của một key Supabase khác, và không dùng service-role key thay cho JWK. Sai mapping làm JWT vẫn được API trả về nhưng Realtime từ chối xác thực/signaling.
+
+> `Create Standby Key` là entry point cho import private JWK. Không chọn kiểu key do Supabase tự generate nếu cần Vercel ký token, vì private material của key Supabase-generate không thể lấy ra để đặt ở Vercel.
+
+**Bật Realtime Authorization:** Supabase Dashboard → **Realtime → Settings** → tắt **Allow public access to channels**. Client Live trong source luôn tạo channel với `private: true`; migration `20260828_live_monitoring.sql` đã tạo SELECT/INSERT RLS policy giới hạn `realtime.topic()` theo claim `live_topic`. Nếu để public access bật, private-topic policy không là hàng rào bắt buộc cho mọi channel.
+
+**Quy trình Open Relay/Metered:** đăng ký/đăng nhập account, vào **TURN Server**, tạo một TURN credential (thường là **Add Credential**) rồi lấy `apiKey` của credential đó. Copy endpoint credentials của chính account (`https://<app>.metered.live/api/v1/turn/credentials`) và API key vào hai biến tương ứng. Không tự đoán `<app>`; dùng Metered Domain/endpoint dashboard hiển thị. Theo chính sách hiện tại của Open Relay, gói 20 GB/tháng có thể yêu cầu thẻ để xác minh chống lạm dụng dù không tự động tính tiền. Vì vậy đây **không** phải giải pháp “không thêm thẻ”.
+
+`OPEN_RELAY_CREDENTIALS_URL` và `OPEN_RELAY_API_KEY` là **bắt buộc cho production Live**. Source vẫn có đường STUN-only (`turnAvailable=false`) để không làm bài thi lỗi khi provider lỗi/mất cấu hình, nhưng đó chỉ là degrade path cho development/chẩn đoán và không đạt điều kiện nghiệm thu vì đã có test thực tế không kết nối được. Khi credentials API lỗi, timeout sau 5 giây, hoặc payload không có URL `turn:`/`turns:`, source hạ xuống STUN-only; admin phải coi phiên đó là không đủ hạ tầng TURN. Sau deploy, `POST /api/admin/batches/:id/live/students/:studentId/session` trả `enabled:true` chỉ xác nhận server đã parse config và ký được token; phải mở một phiên Live thực tế để xác nhận Supabase chấp nhận chữ ký/public-key mapping. `turnAvailable:true` là điều kiện bắt buộc xác nhận Open Relay đã trả TURN thật. Không log/copy `realtimeToken`, JWK, API key, username hoặc credential vào ticket/chat.
 
 Các biến bắt buộc:
 
@@ -432,7 +493,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
 - [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm run test:local` pass toàn bộ bảy bước; default suite hiện có 133 pass/15 skip, PostgreSQL có 15 pass/0 skip, schema v2→v4/backfill idempotent và AI Grade E2E pass các scenario isolation/correlation/regrade/recovery.
+- [ ] `npm run test:local` pass toàn bộ tám bước, gồm migration schema v2→v6 (reservation, manifest, Live Monitoring và `live_enabled`) và AI Grade E2E. Không dùng local gate để kết luận Supabase Realtime/Open Relay production đã kết nối; cần smoke test Live thật theo mục 5.1.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT 2xx → recording-complete → DB-only finalize, retry callback/reload và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.

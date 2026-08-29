@@ -56,10 +56,14 @@ function expectMigrationFailure(file) {
 }
 
 function applySql(label, sql) {
+  applySqlAs('postgres', label, sql);
+}
+
+function applySqlAs(user, label, sql) {
   const result = spawnSync('docker', [
     ...compose,
     'exec', '-T', 'database',
-    'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
+    'psql', '-U', user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
   ], {
     cwd: process.cwd(),
     input: sql,
@@ -74,7 +78,7 @@ try {
   console.log('\n[1/8] Building and starting the two-service local stack...');
   run(['up', '--build', '--detach', '--wait'], { quiet: true });
 
-  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v5...');
+  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v6...');
   run(['stop', 'app']);
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
@@ -230,6 +234,28 @@ try {
       END IF;
     END $$;
   `);
+  // Hosted Supabase owns `realtime.messages` and `realtime.topic()`. Its local
+  // image has the schema but not those runtime objects, so create the smallest
+  // compatible fixture as its schema owner. Transfer just the fixture table to
+  // the test role so the migration's policy statements run unchanged.
+  applySqlAs('supabase_admin', 'Supabase Realtime authorization fixture', `
+    CREATE SCHEMA IF NOT EXISTS realtime;
+    CREATE TABLE IF NOT EXISTS realtime.messages (
+      id BIGSERIAL PRIMARY KEY,
+      topic TEXT,
+      extension TEXT
+    );
+    CREATE OR REPLACE FUNCTION realtime.topic()
+    RETURNS TEXT
+    LANGUAGE sql
+    STABLE
+    AS $$ SELECT NULL::TEXT $$;
+    ALTER TABLE realtime.messages OWNER TO postgres;
+    GRANT USAGE ON SCHEMA realtime TO postgres;
+  `);
+  applySql('Realtime policy fixture access', `
+    ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+  `);
   applyMigration('migrations/20260828_live_monitoring.sql');
   applyMigration('migrations/20260828_live_monitoring.sql');
   applySql('schema v5 live-monitor migration assertion', `
@@ -240,6 +266,15 @@ try {
       END IF;
       IF to_regclass('public.live_monitor_audit') IS NULL THEN
         RAISE EXCEPTION 'live_monitor_audit was not created by migration';
+      END IF;
+      IF (
+        SELECT COUNT(*)
+        FROM pg_policies
+        WHERE schemaname = 'realtime'
+          AND tablename = 'messages'
+          AND policyname IN ('live_monitor_topic_read', 'live_monitor_topic_write')
+      ) <> 2 THEN
+        RAISE EXCEPTION 'live monitor Realtime policies were not created';
       END IF;
     END $$;
   `);

@@ -297,7 +297,7 @@ Deletion: S3 Lifecycle rule auto-expires objects after N days (no backend script
 - **Password provenance:** `POST /api/student/verify` generates `crypto.randomBytes(24).toString('base64url')` **once per `students` row** and stores it in `students.recording_password` (reused on subsequent `/verify` calls for that row, so resume uses the same password). It is returned to the client **only for `local` mode** (needed to encrypt) and **never displayed to the candidate**.
 - **Password scope:** keyed by `students.id`, and since a `students` row is one **(person × batch)**, the same person in different batches gets **different** passwords; all zip parts of one exam attempt share **one** password.
 - **Admin retrieval:** the password is surfaced on the **Results page** (`Results.tsx`) next to each student (`r.student.recording_password`, admin-only) so an admin can decrypt the GitLab-committed zip. It rides along in the `/batches/:id/results` payload via `SELECT s.*`.
-- **DB schema:** recording metadata uses `recording_parts`, `recording_upload_reservations`, `students.recording_manifest_sealed_at`, `students.recording_expected_part_count`, and the per-attempt frozen `students.attempt_record_mode`; local/fresh bootstrap creates the full schema. Production must apply `migrations/20260827_recording_upload_reservations.sql` and then `migrations/20260827_recording_manifest_recovery.sql` after the 20260819 cleanup migration before deploying schema-v4 code.
+- **DB schema:** recording metadata uses `recording_parts`, `recording_upload_reservations`, `students.recording_manifest_sealed_at`, `students.recording_expected_part_count`, and the per-attempt frozen `students.attempt_record_mode`; Live adds `batches.live_enabled` plus the `live_monitor_audit` table. Local/fresh bootstrap creates the full schema. Production must apply `20260827_recording_upload_reservations.sql`, `20260827_recording_manifest_recovery.sql`, `20260828_live_monitoring.sql`, then `20260829_live_enabled.sql` after the 20260819 cleanup migration before deploying schema-v6 code.
 - **Reset behavior:** resetting a student deletes both completed-part metadata and upload reservations, clears the frozen attempt mode, but does **not** delete existing S3 objects. New attempts use a different `session-{hash(activeJti)}` namespace, so stale presigned URLs cannot overwrite them; old objects remain until the configured S3 Lifecycle rule expires them.
 
 ### Runtime and deployment paths
@@ -375,6 +375,13 @@ Batches support two blueprint formats for question assignment:
 | `AWS_SECRET_ACCESS_KEY` | Rec | — | IAM secret for S3. |
 | `AWS_REGION` | No | `us-east-1` | S3 bucket region. |
 | `S3_RECORDINGS_BUCKET` | Rec | — | S3 bucket that stores exam screen recordings. |
+| `LIVE_MONITORING_ENABLED` | Live | Exact string `true`; otherwise Live is disabled without failing the exam. |
+| `SUPABASE_URL` | Live | `https://<project-ref>.supabase.co` for the production project. |
+| `SUPABASE_PUBLISHABLE_KEY` | Live | Publishable `sb_publishable_...` key only; not service-role. |
+| `SUPABASE_REALTIME_PRIVATE_KEY_BASE64` | Live | Base64 of whole private ES256 JWK JSON; server-side secret. |
+| `SUPABASE_REALTIME_JWT_KEY_ID` | Required production Live | `kid` from the complete private JWK imported using Supabase **Create Standby Key** and then rotated active. |
+| `OPEN_RELAY_CREDENTIALS_URL` | **Required production Live TURN** | Copy the Metered/Open Relay `/api/v1/turn/credentials` URL; source adds query API key. |
+| `OPEN_RELAY_API_KEY` | **Required production Live TURN** | Key for that endpoint. |
 
 ## Important project-specific notes
 
@@ -434,6 +441,15 @@ Batches support two blueprint formats for question assignment:
 - `public/assets/*.js` (to confirm the runtime bundle really contains the expected change)
 
 ## Notable current behavior
+
+### Live monitoring / capture-only Live (2026-08-29)
+
+- Treat WebRTC media as P2P: Supabase Realtime private Broadcast carries signaling only, while STUN is direct-connect first and TURN is only a fallback relay. Do not route video through Vercel/Supabase.
+- `batches.live_enabled` is an admin-only boolean (default `false`). **Check Live** after Screen Recording is necessary only when `record_mode='none'`; `local`/`s3` already make the capture stream available to Live without implicitly enabling the checkbox.
+- In the no-recording + Check Live flow, require `displaySurface='monitor'` and run `startLiveCapture()` without `MediaRecorder`, local persistence, S3 URLs/uploads, reservations, manifests, or `recording_parts`. Keep the normal required-share stop/reload enforcement (`recording_stopped`).
+- Show Live only for the creating user, batches whose end calendar date is not before today, and batches with an actual capture source (`local`, `s3`, or `live_enabled`). Before deploying this behavior to Supabase, run `migrations/20260829_live_enabled.sql` (schema v6); `20260828_live_monitoring.sql` supplies the signaling/audit policy.
+- Before enabling Live on Vercel, configure all five Live/Supabase variables, both `OPEN_RELAY_*` variables, and the matching key pair. Generate JWK locally, use Supabase Auth → JWT Signing Keys → **Create Standby Key** to import its entire private JSON, then Rotate it active; use that JSON's `kid`. Do not use a Supabase-generated key because its private material cannot be exported to Vercel. Disable Supabase Realtime → Settings → **Allow public access to channels** so source's `private: true` channel and the `20260828` RLS policies enforce authorization. Code may degrade to STUN-only, but that is not an approved production configuration: require a session response with `turnAvailable=true` and a real Live smoke test. Open Relay/Metered's advertised free allowance may still require card verification.
+- Live list/session routes are authenticated for both roles and server-enforce `batches.created_by === req.adminUser.id`; this deliberately overrides the usual admin-can-manage-all-batches rule. The audit-end route is limited to its own `admin_user_id`. The UI applies the same batch owner/end-date/capture-source condition, and a non-creator (including another admin) receives 403 from the list/session APIs.
 
 - **Free-tier integrity hardening (2026-08-10):** no periodic heartbeat, Realtime channel, challenge table, or append-only activity stream was added. Existing exam requests remain the only session activity source, avoiding recurring Vercel invocations and Supabase writes.
 - A newly verified student JWT has a fresh `jti`, persisted in `students.active_jti`. `studentAuthMiddleware` checks it on every protected student request, so a later verify revokes the previous token. Reset clears `active_jti`.

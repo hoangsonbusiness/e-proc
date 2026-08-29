@@ -107,6 +107,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | `blueprint` | legacy array or `{blueprintMode,items}` |
 | `record_enabled` | legacy compatibility; true only for `s3` |
 | `record_mode` | `none`, `local`, `s3`; source of truth |
+| `live_enabled` | boolean, default `false`; requires capture-only Live for `record_mode='none'` |
 | `exam_type` | `essay` or `quiz` |
 | `ai_grading_status` | `idle`, `processing`, `partial`, or `completed` |
 | `ai_grading_started_at`, `ai_graded_at` | manual run timestamps |
@@ -144,7 +145,7 @@ Required unique key: `(student_id, question_order)`.
 
 - `user_ai_settings`: one row per `user_id`; provider label, `api_protocol`, Base URL, AES-256-GCM encrypted API key/IV/auth tag/version/mask, model, test status/config hash/timestamps. Plaintext secret is never returned by API.
 - `admin_users`: username unique, bcrypt hash, role (`admin|mod`), timestamps.
-- `app_schema_state`: aggregate runtime schema contract version; current recording-manifest schema is version 4.
+- `app_schema_state`: aggregate runtime schema contract version; current Live/capture-only schema is version 6.
 - `schema_migrations`: deploy-vps ledger keyed by migration filename.
 
 ## 5. Authentication and authorization
@@ -397,6 +398,15 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 
 ## 11. Security and limits
 
+### 11.1 Live monitoring and capture-only mode
+
+- WebRTC carries screen media directly between candidate and authorized admin viewer. Supabase Realtime private Broadcast only exchanges offer/answer/ICE signaling; Vercel/Supabase never transport screen frames. STUN is tried first and TURN is fallback when P2P cannot connect.
+- `live_enabled=false` is the default. The admin-only **Check Live** setting applies to `record_mode='none'`; `local` and `s3` already expose their required capture stream to Live and do not need the flag enabled.
+- A capture-only attempt requires the same entire-monitor share as recording (`displaySurface='monitor'`), calls `startLiveCapture()`, and must not instantiate `MediaRecorder` or persist/upload recording data. Share loss remains `recording_stopped`, which locks on first occurrence.
+- Live list/session routes use authenticated admin/mod identity and server-enforce `batches.created_by === req.adminUser.id`; another admin is not an ownership bypass. Audit-end is scoped to the `admin_user_id` that created the viewer session. UI exposes Live only to the same creator, only through the inclusive end-date, and only for a batch that has a capture source. `20260828_live_monitoring.sql` installs signaling/audit policy and `20260829_live_enabled.sql` adds `live_enabled` and schema version 6.
+- Live configuration is valid only if `LIVE_MONITORING_ENABLED=true`, a HTTPS project URL, publishable key, and a private ES256 key are present. The server signs topic-scoped 10-minute JWTs with `live_topic`, `live_actor`, `aud=authenticated`, and matching `kid`. Generate JWK locally, then import the full private JWK through Supabase Auth → JWT Signing Keys → **Create Standby Key** and Rotate it active; use its unchanged `kid`. A Supabase-generated asymmetric key cannot be used because its private key is unavailable to Vercel. Supabase Realtime → Settings must disable **Allow public access to channels**; source uses `private: true` and migration policy authorizes the private topic.
+- Open Relay/Metered credentials are **required for production Live** and fetched server-side with a 5-second limit. Valid returned `stun:`/`turn:`/`turns:` entries are appended after static STUN. Failures/absence use static STUN only and set `turnAvailable=false`, but this is an intentional code degrade path rather than a supported production configuration; production acceptance requires `turnAvailable=true` and a successful cross-network Live test. A free monthly TURN allowance may still require payment-card identity verification.
+
 - Global rate limit: 1200/min/IP; request body: 10 MiB.
 - CORS allowlist default `http://localhost:5173`.
 - Security headers: CSP, nosniff, DENY frame, no-referrer, Permissions-Policy, production HSTS.
@@ -430,6 +440,13 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 | `ANSWER_FLUSH_INTERVAL` | 5000, legacy buffer only |
 | `ADMIN_PERF_LOGS`, `ADMIN_SLOW_REQUEST_MS` | off, 1000 |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_RECORDINGS_BUCKET` | S3 mode |
+| `LIVE_MONITORING_ENABLED` | Must equal `true` to issue Live signaling sessions; other values are disabled. |
+| `SUPABASE_URL` | Required Live project URL; HTTPS only. |
+| `SUPABASE_PUBLISHABLE_KEY` | Required Live publishable `sb_publishable_...` key; passed to browser for Realtime. |
+| `SUPABASE_REALTIME_PRIVATE_KEY_BASE64` | Required Live Base64 of complete private ES256 JWK JSON; server-only. PEM fallback exists only as `SUPABASE_REALTIME_PRIVATE_KEY`. |
+| `SUPABASE_REALTIME_JWT_KEY_ID` | Required production ES256 `kid`, from the JWK imported through **Create Standby Key** and rotated active. |
+| `OPEN_RELAY_CREDENTIALS_URL` | Required production Live HTTPS `*.metered.live` credentials endpoint. |
+| `OPEN_RELAY_API_KEY` | Required production Live credential API key; server adds it as `apiKey` query parameter. |
 
 `JWT_EXPIRES_IN` is documented in older files but current login code hard-codes 24h; changing the env alone has no effect.
 
@@ -447,10 +464,14 @@ Production migration order:
 8. `20260817_ai_grading_student_recovery.sql`
 9. `20260818_admin_startup_fast_path.sql`
 10. `20260819_remove_legacy_ai.sql`
+11. `20260827_recording_upload_reservations.sql`
+12. `20260827_recording_manifest_recovery.sql`
+13. `20260828_live_monitoring.sql`
+14. `20260829_live_enabled.sql`
 
 `npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 73 total, 69 pass, 4 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs four integration cases in temporary schema `test_violation`.
 
-`npm run test:local` is the full local completion gate: build the two-service stack, apply the cleanup migration twice, restart and verify schema v2, verify app/frontend health, run the default suite, run all four PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. The verified AI scenarios include creator-only authorization, late submitters, cross-student isolation, normal one-request-per-student behavior, chunk fallback, targeted regrade, failed-regrade preservation, stale initial/regrade recovery, fresh-lease protection and rejection of uncorrelated `q1/q2` responses. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
+`npm run test:local` is the full local completion gate: build the two-service stack, construct a schema-v2 fixture, apply migrations through `20260829_live_enabled.sql` (including idempotency checks), restart and verify schema v6, verify app/frontend health, run the default suite, run PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. It verifies Live schema contract only; local Compose does not provide hosted Supabase Realtime or Open Relay TURN, so it cannot prove production WebRTC signaling/media connectivity. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
 
 ## 14. Known implementation notes
 

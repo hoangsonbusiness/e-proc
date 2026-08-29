@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs';
 import rateLimit from 'express-rate-limit';
 import { authMiddleware, requireAdmin } from '../middleware/auth.js';
 import { attemptHash, issueLiveSession } from '../services/liveMonitoring.js';
+import { isLiveBatchOwner } from '../services/liveMonitorAccess.js';
 import crypto from 'crypto';
 import { parseBlueprintCompat } from '../services/blueprint.js';
 import cache from '../cache.js';
@@ -175,14 +176,17 @@ router.post('/logout', (req, res) => {
 router.use(authMiddleware);
 // Live screen monitoring uses Supabase only as encrypted WebRTC signaling. The
 // stream itself remains browser-to-browser (or TURN fallback), never Vercel/Supabase.
-router.get('/batches/:batchId/live/students', requireAdmin, async (req, res) => {
+router.get('/batches/:batchId/live/students', async (req, res) => {
     const batchId = Number(req.params.batchId);
     if (!Number.isInteger(batchId) || batchId < 1)
         return res.status(400).json({ error: 'Invalid batch id' });
     try {
-        const batch = await db.query('SELECT id, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
+        const batch = await db.query('SELECT id, created_by, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
         if (!batch.rows[0])
             return res.status(404).json({ error: 'Batch not found' });
+        if (!isLiveBatchOwner(batch.rows[0].created_by, req.adminUser.id)) {
+            return res.status(403).json({ error: 'Forbidden: You can only view live monitoring for batches you created' });
+        }
         if (batch.rows[0].record_mode === 'none' && !Boolean(batch.rows[0].live_enabled)) {
             return res.status(403).json({ error: 'Live screen sharing is not enabled for this batch' });
         }
@@ -198,24 +202,29 @@ router.get('/batches/:batchId/live/students', requireAdmin, async (req, res) => 
         return res.status(500).json({ error: error?.message || 'Could not load live candidates' });
     }
 });
-router.post('/batches/:batchId/live/students/:studentId/session', requireAdmin, async (req, res) => {
+router.post('/batches/:batchId/live/students/:studentId/session', async (req, res) => {
     const batchId = Number(req.params.batchId);
     const studentId = Number(req.params.studentId);
     if (!Number.isInteger(batchId) || batchId < 1 || !Number.isInteger(studentId) || studentId < 1) {
         return res.status(400).json({ error: 'Invalid batch or student id' });
     }
     try {
+        const batch = await db.query('SELECT id, created_by, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
+        if (!batch.rows[0])
+            return res.status(404).json({ error: 'Batch not found' });
+        if (!isLiveBatchOwner(batch.rows[0].created_by, req.adminUser.id)) {
+            return res.status(403).json({ error: 'Forbidden: You can only view live monitoring for batches you created' });
+        }
+        if (batch.rows[0].record_mode === 'none' && !Boolean(batch.rows[0].live_enabled)) {
+            return res.status(403).json({ error: 'Live screen sharing is not enabled for this batch' });
+        }
         const result = await db.query(`
-      SELECT s.active_jti, b.record_mode, b.live_enabled
-      FROM students s JOIN batches b ON b.id = s.batch_id
-      WHERE s.id = ? AND s.batch_id = ? AND s.status = 'in_progress' AND s.active_jti IS NOT NULL
+      SELECT active_jti FROM students
+      WHERE id = ? AND batch_id = ? AND status = 'in_progress' AND active_jti IS NOT NULL
     `, [studentId, batchId]);
         const jti = result.rows[0]?.active_jti;
         if (!jti)
             return res.status(409).json({ error: 'Candidate does not have an active exam attempt' });
-        if (result.rows[0].record_mode === 'none' && !Boolean(result.rows[0].live_enabled)) {
-            return res.status(403).json({ error: 'Live screen sharing is not enabled for this batch' });
-        }
         const viewerSessionId = crypto.randomUUID();
         const config = await issueLiveSession({
             actor: 'admin', subject: `admin:${req.adminUser.id}:${viewerSessionId}`,
@@ -235,7 +244,7 @@ router.post('/batches/:batchId/live/students/:studentId/session', requireAdmin, 
         return res.status(500).json({ error: 'Could not create live viewing session' });
     }
 });
-router.post('/live/audit/:viewerSessionId/end', requireAdmin, async (req, res) => {
+router.post('/live/audit/:viewerSessionId/end', async (req, res) => {
     const viewerSessionId = String(req.params.viewerSessionId || '');
     const outcome = typeof req.body?.outcome === 'string' && /^(connected|direct|relay|failed|ended|timeout)$/.test(req.body.outcome)
         ? req.body.outcome : 'ended';
