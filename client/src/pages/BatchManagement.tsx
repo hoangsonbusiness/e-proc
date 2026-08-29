@@ -44,6 +44,8 @@ const formatGMT7 = (utcStr: string): string => {
 
 type BlueprintMode = 'module' | 'type';
 
+const isVmwareCheckEnabled = (value: unknown): boolean => value === true || value === 1 || value === '1';
+
 const QUESTION_TYPES = ['Coding', 'Conceptual', 'Fill-in', 'Debug'] as const;
 type QuestionType = typeof QUESTION_TYPES[number];
 
@@ -153,6 +155,7 @@ function BatchManagement() {
     blueprint: [] as BlueprintItem[],
     blueprintByType: [] as BlueprintItemByType[],
     record_mode: 'none' as 'none' | 'local' | 's3',
+    vmware_check_enabled: false,
     live_enabled: false,
     exam_type: 'essay' as 'essay' | 'quiz',
   });
@@ -405,6 +408,7 @@ function BatchManagement() {
       blueprint: moduleItems,
       blueprintByType: typeItems,
       record_mode: recordMode,
+      vmware_check_enabled: isVmwareCheckEnabled(batch.vmware_check_enabled),
       live_enabled: isAdmin && Boolean(batch.live_enabled),
       exam_type: batch.exam_type === 'quiz' ? 'quiz' : 'essay',
     });
@@ -453,6 +457,7 @@ function BatchManagement() {
         duration: editingBatch.duration,
         blueprint: blueprintPayload,
         record_mode: editingBatch.record_mode || 'none',
+        vmware_check_enabled: isVmwareCheckEnabled(editingBatch.vmware_check_enabled),
         live_enabled: Boolean(editingBatch.live_enabled),
         exam_type: editingBatch.exam_type === 'quiz' ? 'quiz' : 'essay',
       });
@@ -504,13 +509,14 @@ function BatchManagement() {
         duration: formData.duration,
         blueprint: blueprintPayload,
         record_mode: formData.record_mode,
+        vmware_check_enabled: formData.vmware_check_enabled,
         live_enabled: formData.live_enabled,
         exam_type: formData.exam_type,
       });
       console.log('[BatchManagement] Response:', res.data);
       const batchId = res.data.id;
       setShowForm(false);
-      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', live_enabled: false, exam_type: 'essay' });
+      setFormData({ name: '', start_time: '', end_time: '', duration: 30, blueprint: [], blueprintByType: [], record_mode: 'none', vmware_check_enabled: false, live_enabled: false, exam_type: 'essay' });
       setBlueprintMode('module');
       loadBatches();
       setSelectedBatchId(batchId);
@@ -961,6 +967,15 @@ function BatchManagement() {
                   {!isAdmin && (
                     <p className="text-xs text-amber-600 font-medium">Only admin accounts can change this setting.</p>
                   )}
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={formData.vmware_check_enabled}
+                      onChange={e => setFormData(prev => ({ ...prev, vmware_check_enabled: e.target.checked }))}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                    Check VMware <span className="font-normal text-slate-500">(block exam if RAM is below 8 GB and CPU is below 4 cores)</span>
+                  </label>
                   <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed">
                     <input
                       type="checkbox"
@@ -1565,6 +1580,15 @@ function BatchManagement() {
                 {!isAdmin && (
                   <p className="mt-2 text-sm text-amber-600 font-medium">Only admin accounts can change this setting.</p>
                 )}
+                <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={isVmwareCheckEnabled(editingBatch.vmware_check_enabled)}
+                    onChange={e => setEditingBatch({ ...editingBatch, vmware_check_enabled: e.target.checked })}
+                    className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  Check VMware <span className="font-normal text-slate-500">(block exam if RAM is below 8 GB and CPU is below 4 cores)</span>
+                </label>
                 <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700 disabled:cursor-not-allowed">
                   <input
                     type="checkbox"

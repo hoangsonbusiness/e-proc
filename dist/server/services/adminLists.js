@@ -13,7 +13,7 @@ export async function loadPagedBatches(db, options) {
     const itemsResult = await db.query(`
     SELECT
       b.id, b.name, b.start_time, b.end_time, b.duration,
-      b.record_enabled, b.record_mode, b.live_enabled, b.exam_type, b.created_by,
+      b.record_enabled, b.record_mode, b.vmware_check_enabled, b.live_enabled, b.exam_type, b.created_by,
       b.ai_grading_status, b.created_at${blueprintColumn},
       COUNT(s.id) AS students_count
     FROM batches b

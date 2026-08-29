@@ -2,9 +2,9 @@
 
 ## E-Audit Platform — AI-Powered Technical Assessment
 
-**Version:** 2.1
+**Version:** 2.3
 
-**Last Updated:** 2026-08-16
+**Last Updated:** 2026-08-29
 **Reviewed source of truth:** `src/**`, `client/src/**`, `migrations/**`, package/build/deploy configuration
 
 ---
@@ -87,6 +87,7 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - Batches List hiện **AI Grade** cho mọi batch essay cũ/mới khi current user là creator và current user có verified LLM setting.
 - Quiz và batch do user khác tạo không hiện button. Submit không tự gọi AI và không tạo manual grading work.
 - **Live:** Creator của batch được xem Live, bất kể role `admin` hay `mod`; user không phải creator bị backend trả `403`, kể cả là admin. UI button chỉ hiện cho creator khi Date của End Time >= ngày hiện tại và batch có nguồn capture (`record_mode=local/s3` hoặc `Check Live=ON`). `Check Live` mặc định OFF, đặt sau Screen Recording. Với `No record`, bật nó sẽ chỉ bắt buộc share toàn màn hình để admin xem Live — không ghi local và không upload S3. Local/S3 vẫn xem Live khi checkbox OFF.
+- **Check VMware:** checkbox nằm ngay trước **Check Live**, mặc định OFF. Khi ON, hệ thống dùng RAM/CPU mà browser báo để áp dụng policy: chỉ chặn `403` khi **RAM < 8 GiB và logical CPU < 4**. Đây là gate theo batch, không phải bằng chứng tuyệt đối học viên dùng máy ảo.
 
 ### 3.4 Candidate management
 
@@ -102,9 +103,10 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 2. Server tạo JWT 4 giờ `{studentId,batchId,jti}`, ghi `active_jti`; verify mới revoke token cũ.
 3. UI dùng email đầu tiên và chuyển tới `/confirm`; `/select-email` chỉ còn legacy, không thuộc flow hiện tại.
 4. Preflight fail closed nếu `screen.isExtended=true` hoặc API không trả boolean.
-5. Recording hoặc Check Live yêu cầu recent Chrome/Edge desktop và đúng `displaySurface='monitor'`. Check Live-only không tạo evidence recording.
-6. Fullscreen phải thành công; sau hai animation frames, lưu immutable document-width baseline vào `sessionStorage`.
-7. Lưu token/context vào `localStorage`, điều hướng `/exam`.
+5. Nếu batch bật Check VMware, gửi `navigator.deviceMemory` và `navigator.hardwareConcurrency` tới endpoint JWT-protected. Missing/invalid fail closed; server chỉ trả `403` khi cả RAM <8 GiB và CPU <4. Server lưu snapshot/kết quả và kiểm tra lại trước start/questions.
+6. Recording hoặc Check Live yêu cầu recent Chrome/Edge desktop và đúng `displaySurface='monitor'`. Check Live-only không tạo evidence recording.
+7. Fullscreen phải thành công; sau hai animation frames, lưu immutable document-width baseline vào `sessionStorage`.
+8. Lưu token/context vào `localStorage`, điều hướng `/exam`.
 
 ### 3.6 Exam lifecycle and answers
 
@@ -159,7 +161,15 @@ Mode `type` thêm `type` trong từng item; backend vẫn đọc legacy array.
 - S3 cần CORS `PUT`, lifecycle retention và IAM chỉ có `s3:PutObject` trên `recordings/*`.
 - PUT-2xx acknowledgement được lưu tạm trong `sessionStorage` trước callback để retry/reload không upload lại part. Đây là xác nhận từ client, không phải bằng chứng tồn tại độc lập từ S3; dùng S3 ObjectCreated event nếu threat model yêu cầu server-authoritative proof.
 
-### 3.10 Anti-cheat and forensic policy
+### 3.10 Live monitoring
+
+- Live chỉ khả dụng khi batch có nguồn capture: `record_mode='local'`/`'s3'`, hoặc `record_mode='none'` và admin creator bật **Check Live** (`live_enabled=true`). Check Live-only bắt buộc whole-monitor share nhưng không tạo `MediaRecorder`, ZIP, S3 object, reservation, manifest hay recording part.
+- Candidate và creator xem live trực tiếp qua WebRTC. Supabase Realtime private Broadcast chỉ chuyển offer/answer/ICE; Vercel, database và Realtime không nhận hay lưu video frame. STUN được thử trước; TURN relay là fallback cần cho production cross-network.
+- Chỉ đúng `batches.created_by` được list candidate đang thi hoặc mở viewer session. Quy tắc này áp dụng cả `admin` và `mod`; admin khác creator nhận `403`. UI chỉ hiện Live trong ngày kết thúc của batch và khi có capture source, nhưng backend là cổng quyền quyết định.
+- Một candidate publisher chỉ cho tối đa một viewer peer. Viewer mở session có UUID riêng, chủ sở hữu admin, hash `active_jti`, thời gian bắt đầu/kết thúc và outcome trong `live_monitor_audit`; audit không chứa stream, SDP, ICE, Realtime JWT hoặc secret TURN.
+- Nếu Live signaling không cấu hình/không sẵn sàng, bài thi không được tự chặn chỉ vì integration Live; creator không mở được viewer session. Riêng mất required screen share trong batch recording hoặc Check Live vẫn là `recording_stopped` và khóa bài ở lần đầu.
+
+### 3.11 Anti-cheat and forensic policy
 
 Client-reportable:
 
@@ -177,6 +187,7 @@ Client-reportable:
 - Rapid insertion: tổng ≥300 chars/2,5 giây, mỗi change <300, telemetry cooldown 10 giây.
 - Side panel: immutable document width giảm >80px trong 2 poll ×1,5 giây, tối đa hai report.
 - Multiple display poll 3 giây forensic-only; watermark email/SID/time cập nhật, dịch vị trí mỗi 15 giây.
+- Check VMware là pre-exam server gate theo cấu hình batch: default OFF; khi ON, thiếu signal bị từ chối và chỉ tổ hợp RAM <8 GiB + logical CPU <4 trả `403`. Kết quả không tạo violation/auto-submit và chỉ là browser hint có thể bị giả mạo.
 - Client sinh `event_id`; unique `(student_id,event_id)` làm violation retry idempotent.
 
 Concurrent session:
@@ -190,19 +201,20 @@ Concurrent session:
 | Table | Vai trò |
 |---|---|
 | `question_bank` | Question/rubric/quiz config/owner |
-| `batches` | Schedule/blueprint/exam-record-AI mode, `live_enabled`, owner |
-| `students` | Candidate attempt/code/deadline/session/submit/recording state và AI final result/status |
+| `batches` | Schedule/blueprint/exam-record-AI mode, `live_enabled`, `vmware_check_enabled`, owner |
+| `students` | Candidate attempt/code/deadline/session/submit/recording state, VMware environment snapshot/result và AI final result/status |
 | `exam_questions` | Assignment/option order/answer/scores |
 | `violations` | Unique counted row theo student/type |
 | `violation_events` | Append-only forensic event + idempotency id |
 | `recording_parts` | S3 part đã được client xác nhận PUT 2xx |
+| `recording_upload_reservations` | `upload_id` bền vững → canonical S3 part/key; ngăn resume/reload ghi đè cursor/part |
 | `exam_sessions` | Recent jti/IP/UA activity |
-| `live_monitor_audit` | Audit admin mở/kết thúc một phiên xem Live; không lưu video |
+| `live_monitor_audit` | UUID viewer session, owner admin, candidate/batch, attempt hash, outcome/start/end; audit Live không lưu video hay signaling payload |
 | `user_ai_settings` | Một verified LLM connection/user; API key mã hóa và fingerprint cấu hình đã test |
 | `admin_users` | Credentials + role |
 | `app_schema_state`, `schema_migrations` | Runtime schema contract và migration ledger cho deploy VPS |
 
-Production PostgreSQL cần migrations; startup readiness kiểm tra required columns và unique-index definitions trước khi phục vụ traffic.
+Production PostgreSQL cần migrations; source hiện yêu cầu `app_schema_state.version >= 7`. Startup readiness kiểm tra required columns và unique-index definitions trước khi phục vụ traffic.
 
 Production dùng schema-version fast path và không chạy runtime DDL. Full bootstrap chỉ dành cho local/fresh database khi được bật rõ ràng.
 
@@ -257,6 +269,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 13. Health trả 503 pending/error và 200 chỉ khi ready.
 14. Results dùng paged summary/lazy detail; export giữ trainer-score precedence.
 15. Live chỉ được bật khi cấu hình Supabase JWT signing key hợp lệ và Open Relay trả TURN (`turnAvailable=true`); bắt buộc smoke test Live qua mạng cần relay. `turnAvailable=false` chỉ là degrade path để bài thi không lỗi, không phải cấu hình production được chấp nhận.
+16. Chỉ creator của batch được mở Live viewer; một viewer session phải có audit riêng với thời điểm bắt đầu/kết thúc và outcome, nhưng database không được lưu media, SDP, ICE hay credential/signaling token.
 
 ## 8. Known limitations
 
@@ -266,7 +279,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 - PutObject-only lưu acknowledgement của client cho object key/size/manifest; backend không tự đọc S3 và cũng không xác minh duration/frame/black screen. Muốn bằng chứng độc lập phải dùng S3 ObjectCreated event consumer.
 - AI output được validate cấu trúc/ID/range nhưng chất lượng chấm và prompt injection không thể được loại bỏ tuyệt đối; cần review khi kết quả bất thường.
 - Manual grading đọc question/rubric hiện tại từ `question_bank` tại lúc bấm AI Grade; quiz finalization cũng đọc correct answer/score hiện tại khi submit. Sửa question/rubric/quiz key sau khi đề đã được assign có thể thay đổi kết quả vì chưa có immutable question versioning.
-- Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Xử lý tuần tự giảm nguy cơ response isolation nhưng tăng tổng latency; chunk/correlation retry tiếp tục tăng số outbound request và thời gian xử lý.
+- Một request batch phụ thuộc duration của Vercel Function và latency/rate limit của provider. Worker pool mặc định tối đa ba student (clamp 1–5), nhưng mỗi worker vẫn claim/read/publish theo student và attempt token riêng; giảm `AI_GRADING_CONCURRENCY=1` khi provider/gateway cần fallback tuần tự. Chunk/correlation retry tiếp tục tăng số outbound request và thời gian xử lý.
 - Server-side auto-submit chỉ dùng answer đã tới backend; dirty text còn trong browser tại thời điểm timeout/violation/concurrent-session lock có thể chưa được lưu. HTTP autosave không bảo đảm zero-loss trước khi request được giao.
 - Quiz scoring chạy sau transaction đổi trạng thái submitted. Nếu process chết đúng khoảng này, attempt có thể tạm submitted nhưng chưa đủ quiz score cho tới khi submit/finalization được gọi lại.
 - Repo chưa chứng minh SLA/load target; không dùng claim cũ “20–30 users/99.7% reduction”.
@@ -275,7 +288,7 @@ Chi tiết method/path nằm trong `SPEC.md`.
 
 - Local Docker verification: `docker-compose.local.yml` chạy đúng hai service `app` và Supabase PostgreSQL `database`; `npm run test:local` build/health-check/serve frontend và chạy SQLite, PostgreSQL cùng AI Grade E2E.
 - Vercel: `dist/server/index.js` cho API, `client/dist/**` cho SPA, Supabase Transaction Pooler, optional S3; manual AI Grade, không daily cron.
-- Live Monitoring: WebRTC P2P, Supabase Realtime Broadcast chỉ signaling, Open Relay/Metered TURN relay khi P2P thất bại. Vercel production phải có `LIVE_MONITORING_ENABLED`, Supabase URL/publishable key, private ES256 JWK Base64 cùng `kid` của JWK đã import/rotate, **và cả hai `OPEN_RELAY_*` variables**; Supabase Realtime public channels phải tắt. Gói TURN free có thể vẫn yêu cầu thẻ xác minh.
+- Live Monitoring: WebRTC P2P, Supabase Realtime Broadcast private-topic chỉ signaling, Open Relay/Metered TURN relay khi P2P thất bại. Vercel production phải có `LIVE_MONITORING_ENABLED`, Supabase URL/publishable key, private ES256 JWK Base64 cùng `kid` của JWK đã import/rotate, **và cả hai `OPEN_RELAY_*` variables**; Supabase Realtime public channels phải tắt. `20260828_live_monitoring.sql` tạo `live_monitor_audit` + policy; `20260829_live_enabled.sql` thêm Check Live (schema 6); hai migration `20260829_vmware_environment_check*.sql` thêm Check VMware/default OFF và nâng contract schema lên 7. Gói TURN free có thể vẫn yêu cầu thẻ xác minh.
 - Ubuntu VPS: `deploy-vps.sh` sinh Docker/Caddy/Compose runtime ngoài checkout, dùng Supabase PostgreSQL.
 - `public/**`, root `server/**`, `index.js` và generated bundles không phải production source of truth theo Vercel config.
 

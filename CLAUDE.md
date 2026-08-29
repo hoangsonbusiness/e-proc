@@ -97,11 +97,16 @@ This is a full-stack technical assessment platform with a React/Vite frontend an
   - `violations`
   - `violation_events` (append-only forensic log — one row per violation occurrence; see Anti-Cheat v2 section)
   - `recording_parts` (S3 part metadata acknowledged after the browser observes PUT 2xx; unique per student + part index)
+  - `recording_upload_reservations` (durable client `upload_id` → canonical part/key reservation; prevents reload/resume cursor races and S3 overwrite)
   - `exam_sessions` (anti-cheat session tracking — one row per `(student_id, jti, ip)`; `last_seen` upserted on each exam request; used to detect concurrent multi-client/multi-IP use — see Concurrent-session detection section)
+  - `live_monitor_audit` (UUID viewer session, owner admin, candidate/batch, attempt-JTI hash, outcome/start/end; never video or signaling payload)
   - `user_ai_settings` (one encrypted, verified LLM connection per admin/mod)
   - `admin_users`
   - `app_schema_state` (aggregate runtime schema contract version)
   - `schema_migrations` (VPS migration ledger)
+- The current production contract is `app_schema_state.version >= 7`. A valid version lets PostgreSQL startup skip DDL and perform batched verification; a missing/older contract blocks production until migrations run. `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true` is for explicit local/fresh bootstrap, not a production migration mechanism.
+- Recording tables work as a pair: `recording_upload_reservations` binds one retry-stable logical `upload_id` to one server-assigned part/key, then `recording_parts` records a browser-observed PUT-2xx acknowledgement. That record is deliberately not independent S3-object proof.
+- Live audit is separate from candidate monitoring telemetry: `live_monitor_audit` is created only when an authorized creator opens a viewer session, indexes `(student_id, started_at)`, and stores no screen frame, SDP, ICE candidate, Realtime JWT, JWK or TURN credential.
 
 ### Security model
 
@@ -385,7 +390,7 @@ Batches support two blueprint formats for question assignment:
 
 - There is drift between current TypeScript source and legacy/generated JS checked into the repo. Prefer `src/**` and `client/src/**` when reasoning about behavior.
 - The frontend build uses hashed filenames, so any manual static sync to `public/` must update `public/index.html` to the new hash.
-- `npm test` uses Node's default discovery under `test/`. Verified on 2026-08-16: 73 total, 69 pass, 4 PostgreSQL-only skip without `TEST_DATABASE_URL`. `npm run test:postgres` runs four dedicated cases against a non-production database. `npm run test:local` also verifies idempotent schema-v2 cleanup, the built app, and manual AI Grade end to end against local PostgreSQL.
+- `npm test` uses Node's default discovery under `test/`. Verified on 2026-08-29: 182 total, 167 pass, 15 PostgreSQL-only skips without `TEST_DATABASE_URL`. `npm run test:postgres` runs the dedicated PostgreSQL cases against a non-production database. `npm run test:local` verifies the schema-v2→v6 migration fixture, legacy AI cleanup, built app, admin-password HTTP flow and manual AI Grade E2E against local PostgreSQL; it does not prove hosted Realtime/TURN media connectivity.
 - For frontend changes that affect actual exam behavior, verify against the runtime path being served, not just against source edits or `client/dist` output.
 - Active server DB mode is selected consistently by `DATABASE_URL`: absent means SQLite; present means PostgreSQL. `src/ai/queue.ts` is a legacy worker with stale `USE_SQLITE` logic and is not the active queue path.
 - The DB layer auto-converts `?` placeholders to `$1/$2/...` style when running in PostgreSQL mode (see `query()` in `postgres.ts`). Do not mix placeholder styles in a single query string.
@@ -444,7 +449,14 @@ Batches support two blueprint formats for question assignment:
 - `batches.live_enabled` defaults to `false`. The admin-only **Check Live** checkbox is immediately after Screen Recording in Create/Edit Batch. It is required only for `record_mode='none'`; `local` and `s3` already capture a stream suitable for Live even when the checkbox is off.
 - For a no-recording batch with Check Live on, candidate preflight requires sharing the entire monitor. The client starts `startLiveCapture()` only: it must not create a `MediaRecorder`, local evidence file, S3 reservation, upload, manifest, or recording part.
 - Stopping the required share still reports `recording_stopped` and locks the attempt; reload/resume requires sharing again. A Live button is available only to the batch creator, while its end **date** is today or later, and only when the batch has a capture source (`local`, `s3`, or Check Live).
-- Production rollout requires `migrations/20260829_live_enabled.sql` before source that requires schema version 6. The existing `20260828_live_monitoring.sql` remains the Live signaling/audit migration.
+- `migrations/20260829_live_enabled.sql` is the schema-v6 Live step and `20260828_live_monitoring.sql` remains the Live signaling/audit migration. Production source now also requires the two VMware migrations that raise the contract to schema version 7.
+
+### Per-batch VMware environment gate (2026-08-29)
+
+- Create/Edit Batch places **Check VMware** immediately before **Check Live**. `batches.vmware_check_enabled` defaults to `false`; only a literal `true` enables it. Existing batch values are preserved by the default-off follow-up migration.
+- When enabled, `/confirm` sends the browser-observed `navigator.deviceMemory` (GiB) and `navigator.hardwareConcurrency` to authenticated `POST /api/student/exam/environment-check`. Missing or invalid values fail closed. The server returns `403` only when **both** RAM is below 8 GiB and logical CPU cores are below 4; otherwise the candidate proceeds normally.
+- The server records the result and snapshot on `students`, clears it on reset, and repeats the gate before `/exam/start` and `/exam/questions`. It is not a violation event or an auto-submit rule.
+- These are browser-reported resource hints, not proof that a browser runs inside a VM; a modified client can spoof them. Treat the gate as a policy/risk control, not conclusive cheating evidence.
 - Deployment requires `LIVE_MONITORING_ENABLED=true`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, private ES256 JWK Base64 and its matching `kid`. Generate the JWK locally, then use Supabase Auth → JWT Signing Keys → **Create Standby Key** to import the entire private JWK JSON and **Rotate key** to activate it; use that same JSON's `kid` on Vercel. Do not choose a Supabase-generated key for this use case because its private material cannot be extracted to Vercel.
 - Realtime Authorization must be enabled operationally: Supabase Realtime → Settings → disable **Allow public access to channels**. Source creates the channel with `private: true`; migration `20260828_live_monitoring.sql` supplies the claim-scoped RLS policy.
 - Live list/create-session routes are authenticated for both `admin` and `mod`, then server-enforce `batches.created_by === req.adminUser.id`. This is a deliberate exception to the general admin-can-manage-all-batches rule: a non-creator, including another admin, receives 403. The audit-end route instead requires that `admin_user_id` matches the user who created that viewer session. The UI uses the same batch ownership rule for the Live button.
@@ -472,5 +484,5 @@ Batches support two blueprint formats for question assignment:
 - Runtime anti-cheat behavior depends heavily on `client/src/pages/StudentExam.tsx`; many server-side changes alone will not alter what candidates experience in the browser.
 - Student API authentication uses JWT (`studentToken`), not the `x-student-id` header. Any code that still reads `x-student-id` from request headers on student endpoints is stale and should be replaced.
 - `POST /api/student/exam/start` requires `studentAuthMiddleware` and derives `studentId` from the verified JWT; the legacy `student_id` body field sent by the frontend is ignored for identity.
-- There is intentionally no pre-exam checkbox/acknowledgement API or DB gate. Controls must use automatically observed browser/server signals; candidate self-attestation was removed as non-enforcing.
+- There is intentionally no candidate self-attestation/checklist gate. The VMware environment endpoint is an automatic browser-signal gate, not an acknowledgement; self-attestation remains non-enforcing.
 - Internal diagnostic endpoints (`/api/test-db`, `/api/cache/flush`) require admin JWT and await startup readiness. `/api/init-tables`, queue process/stats, and generic queue stats have been removed.

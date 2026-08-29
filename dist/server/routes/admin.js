@@ -970,7 +970,7 @@ router.delete('/questions/:id', async (req, res) => {
 });
 router.post('/batches', async (req, res) => {
     try {
-        const { name, start_time, end_time, duration, blueprint, record_mode, live_enabled, exam_type } = req.body;
+        const { name, start_time, end_time, duration, blueprint, record_mode, vmware_check_enabled, live_enabled, exam_type } = req.body;
         console.log('[CreateBatch] Input:', { name, start_time, end_time, duration, blueprint, exam_type, record_mode });
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
         if (!name || !start_time || !end_time || !duration) {
@@ -995,21 +995,22 @@ router.post('/batches', async (req, res) => {
             recordMode = 'none';
         const recordFlag = recordMode === 's3' ? 1 : 0;
         const liveEnabled = req.adminUser?.role === 'admin' && live_enabled === true;
+        const vmwareCheckEnabled = vmware_check_enabled === true;
         // Lưu người tạo batch
         const createdBy = req.adminUser?.id ?? null;
         let result;
         if (USE_SQLITE) {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, live_enabled, exam_type, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, liveEnabled ? 1 : 0, examType, createdBy]);
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, vmware_check_enabled, live_enabled, exam_type, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [name, startUTC, endUTC, duration, blueprintJson, recordFlag, recordMode, vmwareCheckEnabled ? 1 : 0, liveEnabled ? 1 : 0, examType, createdBy]);
         }
         else {
             result = await db.query(`
-        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, live_enabled, exam_type, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO batches (name, start_time, end_time, duration, blueprint, record_enabled, record_mode, vmware_check_enabled, live_enabled, exam_type, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id
-      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, liveEnabled, examType, createdBy]);
+      `, [name, startUTC, endUTC, duration, blueprintJson, !!recordFlag, recordMode, vmwareCheckEnabled, liveEnabled, examType, createdBy]);
         }
         console.log('[CreateBatch] Success, id:', result.lastInsertRowid);
         res.json({ success: true, id: result.lastInsertRowid || result.rows?.[0]?.id });
@@ -1085,9 +1086,9 @@ router.put('/batches/:id', async (req, res) => {
     try {
         const { id } = req.params;
         const batchId = parseInt(id);
-        const { name, start_time, end_time, duration, blueprint, record_mode, live_enabled, exam_type } = req.body;
+        const { name, start_time, end_time, duration, blueprint, record_mode, vmware_check_enabled, live_enabled, exam_type } = req.body;
         const examType = exam_type === 'quiz' ? 'quiz' : 'essay';
-        const currentResult = await db.query('SELECT created_by, record_mode, live_enabled FROM batches WHERE id = ?', [batchId]);
+        const currentResult = await db.query('SELECT created_by, record_mode, vmware_check_enabled, live_enabled FROM batches WHERE id = ?', [batchId]);
         const currentBatch = currentResult.rows[0];
         if (!currentBatch)
             return res.status(404).json({ error: 'Batch not found' });
@@ -1112,10 +1113,15 @@ router.put('/batches/:id', async (req, res) => {
         const liveEnabled = req.adminUser?.role === 'admin'
             ? live_enabled === true
             : Boolean(currentBatch.live_enabled);
+        const vmwareCheckEnabled = typeof vmware_check_enabled === 'boolean'
+            ? vmware_check_enabled
+            : currentBatch.vmware_check_enabled === true
+                || currentBatch.vmware_check_enabled === 1
+                || currentBatch.vmware_check_enabled === '1';
         await db.query(`
-      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, live_enabled = ?, exam_type = ?
+      UPDATE batches SET name = ?, start_time = ?, end_time = ?, duration = ?, blueprint = ?, record_enabled = ?, record_mode = ?, vmware_check_enabled = ?, live_enabled = ?, exam_type = ?
       WHERE id = ?
-    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, USE_SQLITE ? (liveEnabled ? 1 : 0) : liveEnabled, examType, batchId]);
+    `, [name, startUTC, endUTC, duration, JSON.stringify(blueprint), USE_SQLITE ? recordFlag : !!recordFlag, recordMode, USE_SQLITE ? (vmwareCheckEnabled ? 1 : 0) : vmwareCheckEnabled, USE_SQLITE ? (liveEnabled ? 1 : 0) : liveEnabled, examType, batchId]);
         res.json({ success: true });
     }
     catch (error) {

@@ -176,6 +176,7 @@ async function initPostgres() {
       blueprint JSONB,
       record_enabled BOOLEAN DEFAULT false,
       record_mode VARCHAR(16) DEFAULT 'none',
+      vmware_check_enabled BOOLEAN NOT NULL DEFAULT false,
       live_enabled BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -199,6 +200,10 @@ async function initPostgres() {
         catch (_) { /* already exists */ }
         try {
             await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS live_enabled BOOLEAN DEFAULT false');
+        }
+        catch (_) { /* already exists */ }
+        try {
+            await client.query('ALTER TABLE batches ADD COLUMN IF NOT EXISTS vmware_check_enabled BOOLEAN NOT NULL DEFAULT false');
         }
         catch (_) { /* already exists */ }
         // Migration: người tạo batch (FK → admin_users). Batch cũ để NULL.
@@ -229,6 +234,9 @@ async function initPostgres() {
       recording_manifest_sealed_at TIMESTAMP,
       recording_expected_part_count INTEGER,
       attempt_record_mode VARCHAR(16),
+      environment_check_passed BOOLEAN,
+      environment_snapshot TEXT,
+      environment_checked_at TIMESTAMP,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -247,6 +255,9 @@ async function initPostgres() {
             { col: 'recording_manifest_sealed_at', def: 'TIMESTAMP' },
             { col: 'recording_expected_part_count', def: 'INTEGER' },
             { col: 'attempt_record_mode', def: 'VARCHAR(16)' },
+            { col: 'environment_check_passed', def: 'BOOLEAN' },
+            { col: 'environment_snapshot', def: 'TEXT' },
+            { col: 'environment_checked_at', def: 'TIMESTAMP' },
         ];
         for (const { col, def } of colChecks) {
             try {
@@ -517,6 +528,7 @@ function initSqlite() {
         blueprint TEXT,
         record_enabled INTEGER DEFAULT 0,
         record_mode TEXT DEFAULT 'none',
+        vmware_check_enabled INTEGER NOT NULL DEFAULT 0,
         live_enabled INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -541,6 +553,9 @@ function initSqlite() {
         recording_manifest_sealed_at DATETIME,
         recording_expected_part_count INTEGER,
         attempt_record_mode TEXT,
+        environment_check_passed INTEGER,
+        environment_snapshot TEXT,
+        environment_checked_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
       )
@@ -567,6 +582,9 @@ function initSqlite() {
             ['recording_manifest_sealed_at', 'DATETIME'],
             ['recording_expected_part_count', 'INTEGER'],
             ['attempt_record_mode', 'TEXT'],
+            ['environment_check_passed', 'INTEGER'],
+            ['environment_snapshot', 'TEXT'],
+            ['environment_checked_at', 'DATETIME'],
         ];
         for (const [name, def] of studentAdds) {
             if (!colNames.includes(name))
@@ -766,6 +784,9 @@ function initSqlite() {
         if (!batchCols.includes('live_enabled')) {
             sqliteDb.exec('ALTER TABLE batches ADD COLUMN live_enabled INTEGER DEFAULT 0');
         }
+        if (!batchCols.includes('vmware_check_enabled')) {
+            sqliteDb.exec('ALTER TABLE batches ADD COLUMN vmware_check_enabled INTEGER NOT NULL DEFAULT 0');
+        }
         if (!batchCols.includes('ai_grading_status')) {
             sqliteDb.exec("ALTER TABLE batches ADD COLUMN ai_grading_status TEXT NOT NULL DEFAULT 'idle'");
         }
@@ -858,7 +879,10 @@ export async function verifyRequiredSchema() {
         checkSqlite('violation_events', 'ux_violation_events_student_event', ['student_id', 'event_id'], 'event_id is not null');
         const studentColumnRows = sqliteDb.prepare('PRAGMA table_info(students)').all();
         const studentColumns = studentColumnRows.map((column) => column.name);
-        for (const column of ['recording_manifest_sealed_at', 'recording_expected_part_count', 'attempt_record_mode']) {
+        for (const column of [
+            'recording_manifest_sealed_at', 'recording_expected_part_count', 'attempt_record_mode',
+            'environment_check_passed', 'environment_snapshot', 'environment_checked_at',
+        ]) {
             if (!studentColumns.includes(column))
                 fail(`required column students.${column} missing`);
         }
@@ -881,11 +905,11 @@ export async function verifyRequiredSchema() {
                 'submitted_at', 'submit_reason', 'active_jti', 'recording_finalized_at',
                 'recording_final_part_index', 'recording_incomplete',
                 'recording_manifest_sealed_at', 'recording_expected_part_count', 'ai_final_score',
-                'attempt_record_mode',
+                'attempt_record_mode', 'environment_check_passed', 'environment_snapshot', 'environment_checked_at',
                 'ai_summary_feedback', 'ai_grading_status', 'ai_grading_error', 'ai_graded_at',
                 'ai_grading_started_at', 'ai_grading_attempt_token',
             ],
-            batches: ['record_mode', 'live_enabled', 'exam_type',
+            batches: ['record_mode', 'vmware_check_enabled', 'live_enabled', 'exam_type',
                 'ai_grading_status', 'ai_grading_started_at', 'ai_graded_at'],
             exam_questions: ['option_order'],
             violation_events: ['metadata_json', 'event_id'],

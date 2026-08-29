@@ -1,8 +1,8 @@
 # E-Audit Platform — Technical Specification
 
-**Version:** 2.2
+**Version:** 2.3
 
-**Last Updated:** 2026-08-16
+**Last Updated:** 2026-08-29
 **Basis:** current TypeScript/React source, migrations and runtime configuration
 
 ## 1. System architecture
@@ -17,6 +17,7 @@ Express 4 + TypeScript
   ├─ readiness/operations
   ├─ creator-triggered manual AI grading
   └─ S3 PutObject-only presigning + client PUT-2xx acknowledgement
+  └─ Live Monitor: topic-scoped Realtime signaling + WebRTC media
         │
         ├─ SQLite/better-sqlite3 (DATABASE_URL absent)
         └─ PostgreSQL/Supabase (DATABASE_URL present)
@@ -49,7 +50,8 @@ Runtime entry points:
 | Excel | SheetJS `xlsx@0.20.3` official tarball, Multer memory storage |
 | AI | Fetch-based adapters for OpenAI Chat/Responses, Anthropic Messages, Gemini Generate Content and Ollama Generate |
 | Recording | MediaRecorder, File System Access, zip.js AES-256, AWS SDK S3 |
-| Tests | Node test runner; SQLite/default suite + optional PostgreSQL integration |
+| Live monitor | Supabase Realtime private Broadcast signaling, WebRTC P2P, STUN plus production TURN fallback |
+| Tests | Node test runner; SQLite/default suite, PostgreSQL integration, Docker schema migration gate and HTTP mock-LLM E2E |
 
 Commands:
 
@@ -58,6 +60,8 @@ npm run dev
 npm run build
 npm test
 npm run test:postgres
+npm run test:local
+npm run test:ai-grade:real
 cd client && npm run dev
 ```
 
@@ -108,6 +112,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | `record_enabled` | legacy compatibility; true only for `s3` |
 | `record_mode` | `none`, `local`, `s3`; source of truth |
 | `live_enabled` | boolean, default `false`; requires capture-only Live for `record_mode='none'` |
+| `vmware_check_enabled` | boolean, default `false`; enables the RAM/CPU pre-exam policy |
 | `exam_type` | `essay` or `quiz` |
 | `ai_grading_status` | `idle`, `processing`, `partial`, or `completed` |
 | `ai_grading_started_at`, `ai_graded_at` | manual run timestamps |
@@ -121,6 +126,7 @@ SQLite uses INTEGER booleans and TEXT JSON; PostgreSQL uses BOOLEAN/JSONB where 
 | Identity | `id`, `batch_id`, `email`, `access_code` (VARCHAR(8), unique in production) |
 | Lifecycle | `status`, `exam_started_at`, `exam_deadline`, `disconnected_at` |
 | Session | `active_jti` |
+| Environment gate | `environment_check_passed`, `environment_snapshot`, `environment_checked_at` |
 | Submit | `submitted_at`, `submit_reason` |
 | Recording | `recording_password`, `attempt_record_mode`, `recording_finalized_at`, `recording_final_part_index`, `recording_incomplete`, `recording_manifest_sealed_at`, `recording_expected_part_count` |
 | AI grading | `ai_final_score`, `ai_summary_feedback`, `ai_grading_status`, `ai_grading_error`, `ai_graded_at`, `ai_grading_started_at`, `ai_grading_attempt_token` |
@@ -135,18 +141,23 @@ Required unique key: `(student_id, question_order)`.
 
 ### Integrity, forensic and recording tables
 
-- `violations`: unique `(student_id,type)`, running `count`.
-- `violation_events`: one occurrence with `batch_id`, type, `text_length`, preview ≤500, `question_id`, `metadata_json` ≤2000, client `event_id` ≤64, timestamp. Partial unique `(student_id,event_id) WHERE event_id IS NOT NULL`.
-- `recording_parts`: unique `(student_id,part_index)`, object key, bytes, uploaded time, `is_final`.
-- `recording_upload_reservations`: stable logical `upload_id`, server-assigned part/key and completion marker; unique `(student_id,upload_id)` and `(student_id,part_index)`.
-- `exam_sessions`: unique `(student_id,jti,ip)`, batch, UA, first/last seen; indexes by student and `(student,last_seen)`.
+| Table | Key columns and constraints | Runtime purpose |
+|---|---|---|
+| `violations` | `student_id`, `type`, running `count`; unique `(student_id,type)` | Counter used by the auto-lock policy. |
+| `violation_events` | `student_id`, optional `batch_id`, `type`, `text_length`, preview ≤500 chars, `question_id`, `metadata_json`, `event_id`, timestamp; partial unique `(student_id,event_id)` when event id is present | Append-only forensic evidence; transport retries do not duplicate a logical violation. |
+| `recording_parts` | `student_id`, `batch_id`, `part_index`, `object_key`, `byte_size`, `uploaded_at`, `is_final`; unique `(student_id,part_index)` | Completed direct-S3 part acknowledgement. It is not server-side proof that S3 retained the object. |
+| `recording_upload_reservations` | `student_id`, `batch_id`, stable client `upload_id`, server-owned `part_index`/`object_key`, `created_at`, `completed_at`; unique `(student_id,upload_id)` and `(student_id,part_index)` | Durable reservation prevents a reload/resume from assigning two logical blobs to one part/key. Existing parts were backfilled as `legacy-part:<index>`. |
+| `exam_sessions` | `student_id`, `batch_id`, `jti`, IP, User-Agent, first/last seen; unique `(student_id,jti,ip)` and indexes by student/last-seen | Server-side evidence for concurrent-session detection. |
+| `live_monitor_audit` | UUID `viewer_session_id` PK, `admin_user_id` (RESTRICT), `student_id`/`batch_id` (CASCADE), SHA-256 `attempt_jti_hash`, `outcome`, `started_at`, `ended_at`; index `(student_id,started_at)` | Audits an explicit admin Live-view request and its termination. It stores no video, SDP, ICE candidate, Realtime token, or screen frame. |
 
-### AI/admin tables
+### AI, administrator and schema-control tables
 
-- `user_ai_settings`: one row per `user_id`; provider label, `api_protocol`, Base URL, AES-256-GCM encrypted API key/IV/auth tag/version/mask, model, test status/config hash/timestamps. Plaintext secret is never returned by API.
-- `admin_users`: username unique, bcrypt hash, role (`admin|mod`), timestamps.
-- `app_schema_state`: aggregate runtime schema contract version; current Live/capture-only schema is version 6.
-- `schema_migrations`: deploy-vps ledger keyed by migration filename.
+| Table | Key columns and constraints | Runtime purpose |
+|---|---|---|
+| `user_ai_settings` | one row per `user_id`; provider/protocol/base URL/model; AES-256-GCM ciphertext, IV, auth tag, version and key mask; test status/config hash/timestamps | A creator-owned verified LLM connection. Plaintext API keys are never returned. |
+| `admin_users` | unique username, bcrypt `password_hash`, `role` (`admin` or `mod`), timestamps | Administrative identity, ownership and roles. |
+| `app_schema_state` | singleton `id=1`, aggregate numeric version, update time | Production fast-path schema contract. Current source requires version **6**. |
+| `schema_migrations` | VPS-managed migration filename ledger | Prevents `deploy-vps.sh` from replaying a migration; it is deployment metadata, not an exam-data table. |
 
 ## 5. Authentication and authorization
 
@@ -220,11 +231,16 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | POST | `/admin/batches/:id/check-feasibility` | inventory comparison |
 | GET | `/admin/test-blueprint/:id` | protected legacy/debug blueprint assignment output |
 | POST | `/admin/batches/:id/students/import` | emails → 8-char codes |
-| GET | `/admin/batches/:id/students` | candidate list |
+| GET | `/admin/batches/:id/students` | legacy full candidate list |
+| GET | `/admin/batches/:id/students/paged` | page/pageSize 10,25,50 and optional email search |
 | GET | `/admin/batches/:id/students/export` | XLSX email/code |
 | POST | `/admin/batches/:id/ai-grade` | creator-only manual grading of submitted students |
+| POST | `/admin/batches/:batchId/students/ai-grade` | creator-only selected-student batch grade/retry |
 | DELETE | `/admin/students/:id` | delete candidate attempt |
 | POST | `/admin/students/:studentId/reset` | reopen with `duration_minutes` 1–480 |
+| GET | `/admin/batches/:batchId/live/students` | creator-only active candidates with a valid capture source |
+| POST | `/admin/batches/:batchId/live/students/:studentId/session` | creates topic-scoped viewer signaling session and audit row |
+| POST | `/admin/live/audit/:viewerSessionId/end` | records an allowed outcome only for the admin who created that viewer session |
 
 ### 6.4 Results and AI settings
 
@@ -238,6 +254,7 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | GET | `/admin/settings/ai` | return only the current user's non-secret setting fields/mask/test status |
 | POST | `/admin/settings/ai/test` | test draft provider/protocol/Base URL/key/model; returns short-lived config-bound test token |
 | PUT | `/admin/settings/ai` | save only after valid Test Connection token; encrypt API key |
+| DELETE | `/admin/settings/ai` | delete only the caller's encrypted connection |
 | POST | `/admin/batches/:batchId/students/:studentId/ai-grade` | creator-only initial grade, retry or safe regrade for one submitted student |
 
 ### 6.5 Student exam
@@ -247,11 +264,13 @@ Static `/questions/*` routes must remain before dynamic `/:id`.
 | POST | `/student/verify` | 60/min/IP; access code → token/context |
 | POST | `/student/select-email` | legacy unauthenticated endpoint; unused by current UI |
 | POST | `/student/exam/start` | atomic start/resume |
+| POST | `/student/exam/environment-check` | authenticated RAM/CPU preflight; 403 when enabled policy fails |
 | GET | `/student/exam/questions` | questions + server time; timer/disconnect/concurrency guards |
 | POST | `/student/exam/answers` | batch persistence, max 100 answers |
 | POST | `/student/exam/answer` | single compatibility persistence |
 | POST | `/student/exam/submit` | idempotent transactional submit with full answers |
 | POST | `/student/exam/disconnect` | 204 beacon; body token accepted |
+| POST | `/student/live/session` | active attempt only; returns a short-lived candidate signaling token when Live is configured |
 | POST | `/student/exam/flush` | legacy buffer flush |
 | POST | `/student/violation` | idempotent forensic/counter transaction |
 | POST | `/student/exam/recording-url` | presigned S3 PUT URL |
@@ -318,6 +337,7 @@ Manual submit supplies the full browser answer map to step 2. Server-owned timeo
 | Single insertion | ≥300 chars/change; exact registered suggestions allowed; unmatched undo |
 | Rapid insertion | ≥300 chars in 2500ms, max single <300, 10s telemetry cooldown |
 | Multiple display | fail-closed preflight; 3s mid-exam polling |
+| VMware environment gate | disabled by default per batch; when enabled, missing/invalid resource hints fail closed and 403 occurs only for RAM <8 GiB **and** logical CPU <4 |
 | Watermark | email/SID/time; refresh/position shift 15s |
 
 Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/screenshot interception is best effort.
@@ -402,8 +422,11 @@ Clipboard commands/actions and drag/drop are overridden in Monaco. Shortcut/scre
 
 - WebRTC carries screen media directly between candidate and authorized admin viewer. Supabase Realtime private Broadcast only exchanges offer/answer/ICE signaling; Vercel/Supabase never transport screen frames. STUN is tried first and TURN is fallback when P2P cannot connect.
 - `live_enabled=false` is the default. The admin-only **Check Live** setting applies to `record_mode='none'`; `local` and `s3` already expose their required capture stream to Live and do not need the flag enabled.
+- `vmware_check_enabled=false` is the default. **Check VMware** is immediately before **Check Live** in Create/Edit Batch. When enabled, `/confirm` reports `navigator.deviceMemory` and `navigator.hardwareConcurrency`; the server records the result/snapshot and rechecks it at start/questions. It returns 403 only if both RAM <8 GiB and logical CPU <4 (missing/invalid values fail closed).
+- The VMware values are browser-reported hints, not VM proof; a modified client can spoof them. This gate creates no violation event and does not auto-submit an attempt.
 - A capture-only attempt requires the same entire-monitor share as recording (`displaySurface='monitor'`), calls `startLiveCapture()`, and must not instantiate `MediaRecorder` or persist/upload recording data. Share loss remains `recording_stopped`, which locks on first occurrence.
-- Live list/session routes use authenticated admin/mod identity and server-enforce `batches.created_by === req.adminUser.id`; another admin is not an ownership bypass. Audit-end is scoped to the `admin_user_id` that created the viewer session. UI exposes Live only to the same creator, only through the inclusive end-date, and only for a batch that has a capture source. `20260828_live_monitoring.sql` installs signaling/audit policy and `20260829_live_enabled.sql` adds `live_enabled` and schema version 6.
+- Live list/session routes use authenticated admin/mod identity and server-enforce `batches.created_by === req.adminUser.id`; another admin is not an ownership bypass. Audit-end is scoped to the `admin_user_id` that created the viewer session. UI exposes Live only to the same creator, only through the inclusive end-date, and only for a batch that has a capture source. `20260828_live_monitoring.sql` installs signaling/audit policy, `20260829_live_enabled.sql` adds `live_enabled` (schema 6), and the two VMware migrations establish the schema-7 environment gate/default.
+- A student publisher opens one private channel while the required capture stream is active, but creates at most one `RTCPeerConnection` only after an authorized viewer sends `watch-request`. The viewer has a 20-second offer wait; signaling subscription has a 12-second timeout. A track replacement follows capture resume; closing either side sends a targeted `hangup`. Browser status distinguishes direct versus relay only for UX/audit outcome, not authorization.
 - Live configuration is valid only if `LIVE_MONITORING_ENABLED=true`, a HTTPS project URL, publishable key, and a private ES256 key are present. The server signs topic-scoped 10-minute JWTs with `live_topic`, `live_actor`, `aud=authenticated`, and matching `kid`. Generate JWK locally, then import the full private JWK through Supabase Auth → JWT Signing Keys → **Create Standby Key** and Rotate it active; use its unchanged `kid`. A Supabase-generated asymmetric key cannot be used because its private key is unavailable to Vercel. Supabase Realtime → Settings must disable **Allow public access to channels**; source uses `private: true` and migration policy authorizes the private topic.
 - Open Relay/Metered credentials are **required for production Live** and fetched server-side with a 5-second limit. Valid returned `stun:`/`turn:`/`turns:` entries are appended after static STUN. Failures/absence use static STUN only and set `turnAvailable=false`, but this is an intentional code degrade path rather than a supported production configuration; production acceptance requires `turnAvailable=true` and a successful cross-network Live test. A free monthly TURN allowance may still require payment-card identity verification.
 
@@ -468,10 +491,12 @@ Production migration order:
 12. `20260827_recording_manifest_recovery.sql`
 13. `20260828_live_monitoring.sql`
 14. `20260829_live_enabled.sql`
+15. `20260829_vmware_environment_check.sql`
+16. `20260829_vmware_environment_check_default_off.sql`
 
-`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. Verified on 2026-08-16: 73 total, 69 pass, 4 skip. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs four integration cases in temporary schema `test_violation`.
+`npm test` uses default discovery and skips PostgreSQL-only tests without `TEST_DATABASE_URL`. The exact count is intentionally not a release contract; run it for the current checkout. `npm run test:postgres` requires a separate non-production PostgreSQL URL and runs the PostgreSQL cases in temporary schema `test_violation`.
 
-`npm run test:local` is the full local completion gate: build the two-service stack, construct a schema-v2 fixture, apply migrations through `20260829_live_enabled.sql` (including idempotency checks), restart and verify schema v6, verify app/frontend health, run the default suite, run PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. It verifies Live schema contract only; local Compose does not provide hosted Supabase Realtime or Open Relay TURN, so it cannot prove production WebRTC signaling/media connectivity. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
+`npm run test:local` is the full local completion gate: build the two-service stack, construct a schema-v2 fixture, apply migrations through `20260829_vmware_environment_check_default_off.sql` (including idempotency checks), restart and verify schema v7, verify app/frontend health, run the default suite, run PostgreSQL cases, then run manual AI Grade E2E through a mock LLM. It verifies the database contract, not that browser resource hints prove a VM; local Compose also does not provide hosted Supabase Realtime or Open Relay TURN, so it cannot prove production WebRTC signaling/media connectivity. `npm run test:ai-grade:real` is optional and uses ignored local secrets to probe a real provider.
 
 ## 14. Known implementation notes
 

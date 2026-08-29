@@ -6,15 +6,16 @@ import {
   isSupportedSchemaVersion,
 } from '../dist/server/db/schemaVersion.js';
 
-test('capture-only Live runtime requires installed schema version 6', () => {
-  assert.equal(MINIMUM_SCHEMA_VERSION, 6);
-  assert.equal(BOOTSTRAP_SCHEMA_VERSION, 6);
+test('VMware environment checks require installed schema version 7', () => {
+  assert.equal(MINIMUM_SCHEMA_VERSION, 7);
+  assert.equal(BOOTSTRAP_SCHEMA_VERSION, 7);
   assert.equal(isSupportedSchemaVersion(1), false);
   assert.equal(isSupportedSchemaVersion(2), false);
   assert.equal(isSupportedSchemaVersion(3), false);
   assert.equal(isSupportedSchemaVersion(4), false);
   assert.equal(isSupportedSchemaVersion(5), false);
-  assert.equal(isSupportedSchemaVersion(6), true);
+  assert.equal(isSupportedSchemaVersion(6), false);
+  assert.equal(isSupportedSchemaVersion(7), true);
 });
 
 test('schema fast path rejects missing, invalid, and pre-baseline versions', () => {

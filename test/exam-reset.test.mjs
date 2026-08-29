@@ -24,6 +24,7 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
       recording_finalized_at TEXT, recording_final_part_index INTEGER, recording_incomplete INTEGER,
       recording_manifest_sealed_at TEXT, recording_expected_part_count INTEGER,
       attempt_record_mode TEXT,
+      environment_check_passed INTEGER, environment_snapshot TEXT, environment_checked_at TEXT,
       ai_final_score REAL, ai_summary_feedback TEXT, ai_grading_status TEXT DEFAULT 'pending',
       ai_grading_error TEXT, ai_graded_at TEXT, ai_grading_started_at TEXT,
       ai_grading_attempt_token TEXT
@@ -41,12 +42,12 @@ function database(batchEnd = '2030-01-01T12:00:00.000Z') {
     id, batch_id, status, exam_started_at, exam_deadline, disconnected_at, submitted_at,
     submit_reason, active_jti, recording_finalized_at, recording_final_part_index,
     recording_incomplete, recording_manifest_sealed_at, recording_expected_part_count,
-    attempt_record_mode,
+    attempt_record_mode, environment_check_passed, environment_snapshot, environment_checked_at,
     ai_final_score, ai_summary_feedback, ai_grading_status, ai_grading_error, ai_graded_at,
     ai_grading_started_at, ai_grading_attempt_token
   ) VALUES
     (7, 1, 'submitted', 'old-start', 'old-deadline', 'old-disconnect', 'old-submit', 'manual',
-     'old-jti', 'done', 2, 1, 'sealed', 3, 's3', 9.5, 'old summary', 'completed', NULL, 'old-graded',
+     'old-jti', 'done', 2, 1, 'sealed', 3, 's3', 1, 'old environment', 'old-check', 9.5, 'old summary', 'completed', NULL, 'old-graded',
      'old-ai-start', 'old-ai-attempt')`).run();
   db.prepare(`INSERT INTO exam_questions VALUES
     (10, 7, 'q1', 1, 'saved answer', 8, 'old ai', 9, 'old trainer')`).run();

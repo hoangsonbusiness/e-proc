@@ -26,6 +26,7 @@ function StudentConfirm() {
   const duration = location.state?.duration;
   const recordMode: 'none' | 'local' | 's3' = location.state?.recordMode || 'none';
   const liveEnabled = Boolean(location.state?.liveEnabled);
+  const vmwareCheckEnabled = location.state?.vmwareCheckEnabled === true;
   const screenShareRequired = recordMode !== 'none' || liveEnabled;
   const recordingPassword: string | undefined = location.state?.recordingPassword; // chỉ mode 'local'
   const recordingNextPartIndex = Number(location.state?.recordingNextPartIndex) || 0;
@@ -60,6 +61,16 @@ function StudentConfirm() {
       setError('Your browser cannot verify your display setup. Please use a recent version of Google Chrome or Microsoft Edge on a desktop to take the exam.');
       setLoading(false);
       return;
+    }
+
+    if (vmwareCheckEnabled) {
+      try {
+        await studentApi.checkExamEnvironment(getExamEnvironmentSnapshot(), studentToken);
+      } catch (err: any) {
+        setError(err.response?.data?.error || 'Your device does not meet the minimum examination requirements.');
+        setLoading(false);
+        return;
+      }
     }
 
     // Local/S3 record and capture-only Live both require one full-screen share.

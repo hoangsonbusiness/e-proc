@@ -27,6 +27,7 @@ import {
   timestampWithoutTimezoneUtcMs,
 } from '../services/recordingPersistence.js';
 import { issueLiveSession } from '../services/liveMonitoring.js';
+import { evaluateExamEnvironment } from '../services/examEnvironment.js';
 
 let s3ServicePromise: Promise<typeof import('../services/s3.js')> | null = null;
 
@@ -34,6 +35,8 @@ function loadS3Service() {
   s3ServicePromise ||= import('../services/s3.js');
   return s3ServicePromise;
 }
+
+const isDbTrue = (value: unknown): boolean => value === true || value === 1 || value === '1';
 
 type RecordingOperationStage = 'presign' | 'complete' | 'seal' | 'status' | 'reconcile' | 'finalize';
 
@@ -293,12 +296,15 @@ async function startExamAtomically(studentId: number): Promise<{ success: true; 
 
     const locked = (await tx.query(
       `SELECT s.*, b.duration, b.end_time, b.blueprint, b.exam_type,
-              b.record_mode, b.record_enabled
+              b.record_mode, b.record_enabled, b.vmware_check_enabled
        FROM students s JOIN batches b ON b.id = s.batch_id
        WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE'}`,
       [studentId]
     )).rows[0];
     assertCanStart({ ...context, status: locked.status }, new Date(), USE_SQLITE || process.env.SKIP_TIME_CHECK === 'true');
+    if (isDbTrue(locked.vmware_check_enabled) && !isDbTrue(locked.environment_check_passed)) {
+      throw new ExamGuardError(403, 'environment_check_required', 'Complete the device environment check before starting the exam');
+    }
     const existing = await tx.query('SELECT COUNT(*) AS count FROM exam_questions WHERE student_id = ?', [studentId]);
     const existingCount = Number(existing.rows[0]?.count || 0);
     const attemptRecordMode = effectiveAttemptRecordMode(locked);
@@ -424,7 +430,7 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
 
     const result = await db.query(`
       SELECT s.*, b.name as batch_name, b.start_time, b.end_time, b.duration,
-              b.record_enabled, b.record_mode, b.live_enabled
+              b.record_enabled, b.record_mode, b.vmware_check_enabled, b.live_enabled
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.access_code = ?
@@ -470,7 +476,7 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
     const frozenAttempt = await db.withTransaction(async (tx) => {
       const current = (await tx.query(
         `SELECT s.attempt_record_mode, s.recording_password,
-                 b.record_mode, b.record_enabled, b.live_enabled
+                 b.record_mode, b.record_enabled, b.vmware_check_enabled, b.live_enabled
          FROM students s JOIN batches b ON b.id = s.batch_id
          WHERE s.id = ?${USE_SQLITE ? '' : ' FOR UPDATE OF s'}`,
         [student.id],
@@ -484,13 +490,21 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
       await tx.query(
         `UPDATE students
          SET active_jti = ?, attempt_record_mode = ?,
-             recording_password = COALESCE(recording_password, ?)
+             recording_password = COALESCE(recording_password, ?),
+             environment_check_passed = NULL, environment_snapshot = NULL,
+             environment_checked_at = NULL
          WHERE id = ?`,
         [jti, recordMode, recordingPassword, student.id],
       );
-       return { jti, recordMode, recordingPassword, liveEnabled: Boolean(current.live_enabled) };
+       return {
+         jti,
+         recordMode,
+         recordingPassword,
+         liveEnabled: isDbTrue(current.live_enabled),
+         vmwareCheckEnabled: isDbTrue(current.vmware_check_enabled),
+       };
     });
-    const { jti, recordMode, recordingPassword, liveEnabled } = frozenAttempt;
+    const { jti, recordMode, recordingPassword, liveEnabled, vmwareCheckEnabled } = frozenAttempt;
     const studentToken = jwt.sign(
       { studentId: student.id, batchId: student.batch_id, jti } as StudentTokenPayload,
       secret,
@@ -509,6 +523,7 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
       exam_end: endTime.toISOString(),
        record_enabled: recordMode === 's3', // giữ để tương thích ngược theo mode đã freeze
        record_mode: recordMode,
+       vmware_check_enabled: vmwareCheckEnabled,
        live_enabled: liveEnabled,
       recording_next_part_index: recordingNextPartIndex,
       // chỉ trả pass khi local — client dùng ngầm để mã hóa, không hiển thị
@@ -517,6 +532,48 @@ router.post('/verify', verifyRateLimit, async (req: Request, res: Response) => {
   } catch (error: any) {
     if (sendExamGuardError(res, error)) return;
     res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/exam/environment-check', studentAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const studentId = req.studentPayload!.studentId;
+    const current = (await db.query(
+      `SELECT s.status, b.vmware_check_enabled
+       FROM students s JOIN batches b ON b.id = s.batch_id
+       WHERE s.id = ?`,
+      [studentId],
+    )).rows[0];
+    if (!current) return res.status(404).json({ error: 'Student not found' });
+    if (current.status === 'submitted') return res.status(410).json({ error: 'Exam already submitted', reason: 'submitted' });
+    if (!isDbTrue(current.vmware_check_enabled)) return res.json({ success: true, enforced: false });
+
+    const decision = evaluateExamEnvironment(req.body || {});
+    const metadata = {
+      platform: typeof req.body?.platform === 'string' ? req.body.platform.slice(0, 80) : 'unknown',
+      ramGiB: typeof req.body?.ramGiB === 'number' ? req.body.ramGiB : null,
+      logicalCpuCores: typeof req.body?.logicalCpuCores === 'number' ? req.body.logicalCpuCores : null,
+      screenWidth: typeof req.body?.screenWidth === 'number' ? req.body.screenWidth : null,
+      screenHeight: typeof req.body?.screenHeight === 'number' ? req.body.screenHeight : null,
+      devicePixelRatio: typeof req.body?.devicePixelRatio === 'number' ? req.body.devicePixelRatio : null,
+    };
+    const checkedAt = new Date().toISOString();
+    await db.query(
+      `UPDATE students
+       SET environment_check_passed = ?, environment_snapshot = ?, environment_checked_at = ?
+       WHERE id = ?`,
+      [USE_SQLITE ? (decision.allowed ? 1 : 0) : decision.allowed, JSON.stringify(metadata), checkedAt, studentId],
+    );
+    if (decision.allowed === false) {
+      const error = decision.reason === 'environment_unavailable'
+        ? 'Your browser cannot verify the minimum examination requirements.'
+        : 'Your device does not meet the minimum examination requirements (8 GB RAM and 4 CPU cores).';
+      return res.status(403).json({ error, reason: decision.reason });
+    }
+    return res.json({ success: true, enforced: true });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -682,7 +739,8 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
 
     // === SERVER-SIDE TIMER GUARD ===
     const studentResult = await db.query(`
-      SELECT s.status, s.exam_deadline, s.disconnected_at, b.duration, b.record_mode
+      SELECT s.status, s.exam_deadline, s.disconnected_at, s.environment_check_passed,
+             b.duration, b.record_mode, b.vmware_check_enabled
       FROM students s
       JOIN batches b ON s.batch_id = b.id
       WHERE s.id = ?
@@ -691,6 +749,12 @@ router.get('/exam/questions', studentAuthMiddleware, sessionTracker, async (req:
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
+    }
+    if (isDbTrue(student.vmware_check_enabled) && !isDbTrue(student.environment_check_passed)) {
+      return res.status(403).json({
+        error: 'Complete the device environment check before accessing the exam.',
+        reason: 'environment_check_required',
+      });
     }
 
     const recordingNextPartIndex = await findNextRecordingPartIndex(db, parseInt(studentId));

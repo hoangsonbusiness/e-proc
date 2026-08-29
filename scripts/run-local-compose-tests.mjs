@@ -78,7 +78,7 @@ try {
   console.log('\n[1/8] Building and starting the two-service local stack...');
   run(['up', '--build', '--detach', '--wait'], { quiet: true });
 
-  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v6...');
+  console.log('\n[2/8] Simulating schema v2, applying migrations twice, and starting on schema v7...');
   run(['stop', 'app']);
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
   applyMigration('migrations/20260819_remove_legacy_ai.sql');
@@ -297,6 +297,29 @@ try {
       END IF;
     END $$;
   `);
+  applyMigration('migrations/20260829_vmware_environment_check.sql');
+  applyMigration('migrations/20260829_vmware_environment_check.sql');
+  applyMigration('migrations/20260829_vmware_environment_check_default_off.sql');
+  applyMigration('migrations/20260829_vmware_environment_check_default_off.sql');
+  applySql('schema v7 VMware environment migration assertion', `
+    DO $$
+    BEGIN
+      IF (SELECT version FROM public.app_schema_state WHERE id = 1) <> 7 THEN
+        RAISE EXCEPTION 'VMware environment migration did not set schema v7';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'batches' AND column_name = 'vmware_check_enabled'
+      ) THEN
+        RAISE EXCEPTION 'batches.vmware_check_enabled was not created by migration';
+      END IF;
+      IF (SELECT COUNT(*) FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'students'
+            AND column_name IN ('environment_check_passed', 'environment_snapshot', 'environment_checked_at')) <> 3 THEN
+        RAISE EXCEPTION 'student environment audit columns were not created by migration';
+      END IF;
+    END $$;
+  `);
   run(['up', '--detach', '--wait', 'app']);
 
   console.log('\n[3/8] Verifying PostgreSQL-backed application health and legacy-free schema...');
@@ -307,10 +330,10 @@ try {
     "if('queue' in body)throw new Error('Health response still exposes legacy queue state');",
     "const pg=(await import('pg')).default;",
     "const p=new pg.Pool({connectionString:process.env.DATABASE_URL,max:1});",
-    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,to_regclass('public.live_monitor_audit') live_monitor_audit,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name='live_enabled') live_enabled_column,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
+    "const q=await p.query(`SELECT (SELECT version FROM app_schema_state WHERE id=1) version,to_regclass('public.ai_queue') ai_queue,to_regclass('public.ai_settings') ai_settings,to_regclass('public.user_ai_settings') user_ai_settings,to_regclass('public.recording_upload_reservations') recording_upload_reservations,to_regclass('public.live_monitor_audit') live_monitor_audit,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name='live_enabled') live_enabled_column,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name='vmware_check_enabled') vmware_check_column,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='students' AND column_name IN ('environment_check_passed','environment_snapshot','environment_checked_at')) environment_columns,(SELECT COUNT(*)::int FROM information_schema.columns WHERE table_schema='public' AND table_name='batches' AND column_name IN ('ai_grading_enabled','ai_setting_id')) legacy_columns,(SELECT COUNT(*)::int FROM pg_indexes WHERE schemaname='public' AND indexname IN ('ux_recording_upload_reservations_student_upload','ux_recording_upload_reservations_student_part')) reservation_indexes`);",
     "await p.end();",
     "const s=q.rows[0];",
-    "if(Number(s.version)!==6||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||!s.live_monitor_audit||Number(s.live_enabled_column)!==1||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
+    "if(Number(s.version)!==7||s.ai_queue!==null||s.ai_settings!==null||!s.user_ai_settings||!s.recording_upload_reservations||!s.live_monitor_audit||Number(s.live_enabled_column)!==1||Number(s.vmware_check_column)!==1||Number(s.environment_columns)!==3||Number(s.legacy_columns)!==0||Number(s.reservation_indexes)!==2)throw new Error(JSON.stringify(s));",
   ].join('')]);
 
   console.log('\n[4/8] Verifying the built React frontend is served by the app container...');

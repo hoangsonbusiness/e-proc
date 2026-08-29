@@ -41,6 +41,7 @@ export async function reopenExamAttempt(tx, studentId, durationMinutes, now = ne
          recording_finalized_at = NULL, recording_final_part_index = NULL,
          recording_incomplete = FALSE, recording_manifest_sealed_at = NULL,
          recording_expected_part_count = NULL, attempt_record_mode = NULL,
+         environment_check_passed = NULL, environment_snapshot = NULL, environment_checked_at = NULL,
          ai_final_score = NULL, ai_summary_feedback = NULL,
          ai_grading_status = 'pending', ai_grading_error = NULL, ai_graded_at = NULL,
          ai_grading_started_at = NULL, ai_grading_attempt_token = NULL

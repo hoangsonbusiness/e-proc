@@ -240,6 +240,22 @@ export const studentApi = {
   startExam: (studentId: number) =>
     api.post('/student/exam/start', { student_id: studentId }),
 
+  checkExamEnvironment: (
+    environment: {
+      platform: string;
+      screenCheckSupported: boolean;
+      screenExtended: boolean | null;
+      screenWidth: number;
+      screenHeight: number;
+      devicePixelRatio: number;
+      ramGiB: number | null;
+      logicalCpuCores: number | null;
+    },
+    studentToken: string,
+  ) => api.post('/student/exam/environment-check', environment, {
+    headers: { Authorization: `Bearer ${studentToken}` },
+  }),
+
   getLiveSession: () => api.post('/student/live/session'),
 
   // [C-4] Không còn truyền studentId - token tự động gắn qua interceptor

@@ -51,7 +51,7 @@ npm audit --omit=dev
 cd client && npm audit --omit=dev
 ```
 
-Kết quả đã xác minh ngày 2026-08-16: `npm test` có **73 test, 69 pass, 4 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
+Kết quả đã xác minh ngày 2026-08-29: `npm test` có **182 test, 167 pass, 15 PostgreSQL test skip** khi chưa cấu hình database test. Việc skip là có chủ ý; nó không chứng minh race PostgreSQL đã đúng.
 
 ### 2.1. `TEST_DATABASE_URL` dùng để làm gì?
 
@@ -130,7 +130,7 @@ npm run test:local
 - `database`: image `supabase/postgres:17.6.1.136`, publish `127.0.0.1:${EPROC_LOCAL_DB_PORT:-54323}`, dùng named volume và healthcheck.
 - `app`: build từ `Dockerfile.local`, publish `127.0.0.1:3001`, dùng `SERVE_STATIC=true` để phục vụ `client/dist`, kết nối database service với `DATABASE_SSL=false`, và tắt legacy queue.
 
-Gate chạy tuần tự tám bước: build/start stack; dựng fixture schema v2 rồi chạy reservation/manifest recovery, Live Monitoring và `live_enabled` migrations theo thứ tự (các migration cần idempotency được chạy lại); restart/xác minh schema v6; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; chạy HTTP/PostgreSQL E2E cho admin reset password; rồi chạy manual AI Grade E2E qua mock LLM. Stack local chỉ là Supabase PostgreSQL, không có hosted Supabase Realtime/TURN; vì vậy nó không chứng minh một Live channel production kết nối được.
+Gate chạy tuần tự tám bước: build/start stack; dựng fixture schema v2 rồi chạy reservation/manifest recovery, Live Monitoring, `live_enabled` và VMware environment migrations theo thứ tự (các migration cần idempotency được chạy lại); restart/xác minh schema v7; kiểm tra built React app; chạy default suite; chạy PostgreSQL integration tests; chạy HTTP/PostgreSQL E2E cho admin reset password; rồi chạy manual AI Grade E2E qua mock LLM. Stack local chỉ là Supabase PostgreSQL, không có hosted Supabase Realtime/TURN; vì vậy nó không chứng minh một Live channel production kết nối được.
 
 Stack được giữ lại sau test để điều tra. Dùng:
 
@@ -208,16 +208,26 @@ Chạy đúng thứ tự:
 
 12. `migrations/20260827_recording_manifest_recovery.sql`
    - Thêm `students.recording_manifest_sealed_at`, `students.recording_expected_part_count` và `students.attempt_record_mode`; mode được đóng băng theo lượt thi để admin đổi batch không làm đổi nghĩa evidence đang ghi.
-   - Nâng `app_schema_state.version` lên `4`; chạy migration này **trước** khi deploy source hiện tại vì runtime mới yêu cầu schema v4.
+   - Nâng `app_schema_state.version` lên `4`; đây là prerequisite cho release recording-recovery. Source hiện tại còn yêu cầu hai migration Live tiếp theo để đạt schema v6, rồi hai migration VMware để đạt schema v7.
    - Verification phải trả đủ 3 column recovery và row `app_schema_state.version >= 4`.
 
 13. `migrations/20260828_live_monitoring.sql`
-   - Tạo dữ liệu audit/session cho Live Monitoring và policy Realtime Broadcast private-topic. Video WebRTC không đi qua Vercel hoặc Supabase.
+   - Tạo `live_monitor_audit`: UUID viewer session, admin owner, student/batch, hash attempt JTI, outcome, thời điểm bắt đầu/kết thúc; **không** có video, SDP, ICE hoặc token trong bảng.
+   - Tạo index audit `(student_id, started_at)` và Realtime Broadcast policies `live_monitor_topic_read`/`live_monitor_topic_write` giới hạn claim `live_topic`. Video WebRTC không đi qua Vercel hoặc Supabase.
+   - Nâng `app_schema_state.version` lên `5`; verification phải cho thấy bảng audit, index và hai policy.
    - Trên Supabase hosted, migration không được cố `ALTER TABLE realtime.messages` vì role SQL Editor không sở hữu bảng hệ thống này; chỉ tạo policy cần thiết.
 
 14. `migrations/20260829_live_enabled.sql`
    - Thêm `batches.live_enabled` (mặc định `false`) cho checkbox **Check Live** của batch không record.
-   - Nâng `app_schema_state.version` lên `6`; chạy trước khi deploy source dùng capture-only Live. Không cần biến môi trường mới chỉ riêng cho checkbox này.
+   - Nâng `app_schema_state.version` lên `6`; runtime source hiện tại yêu cầu **ít nhất 6**, nên phải chạy trước khi deploy source dùng capture-only Live. Không cần biến môi trường mới chỉ riêng cho checkbox này.
+
+15. `migrations/20260829_vmware_environment_check.sql`
+   - Thêm `batches.vmware_check_enabled` cùng các audit fields môi trường trên `students`; migration mới đặt mặc định `false`.
+   - Nâng `app_schema_state.version` lên `7`; phải chạy trước source có VMware environment gate.
+
+16. `migrations/20260829_vmware_environment_check_default_off.sql`
+   - Ép database default của `batches.vmware_check_enabled` về `false` cho môi trường đã từng chạy bản migration ban đầu.
+   - Không đổi lựa chọn đã lưu của các batch hiện hữu; kiểm tra các batch cũ nếu cần bật gate.
 
 > **Điều kiện rollout bắt buộc cho release recording schema-v4:** dừng tạo lượt thi mới và chờ đến khi không còn thí sinh S3 nào đang `in_progress`/không còn tab thi dùng bundle cũ. Client cũ không gửi `/recording-seal`, nên deploy backend mới giữa một lượt thi đang chạy sẽ làm lượt đó không thể finalize. Chỉ chạy hai migration và deploy frontend/backend sau khi đã drain các lượt S3 đang hoạt động.
 
@@ -229,8 +239,17 @@ Các migration có idempotent guard và có thể chạy lại khi cần, nhưng
 2. Ở máy học viên, Confirm phải yêu cầu share **Entire Screen**; không được hiện chọn thư mục local hoặc gọi S3 upload.
 3. Ở admin, Live chỉ xuất hiện cho người tạo batch khi end-date chưa qua và phải xem được stream. Dừng share phải bị khóa theo `recording_stopped`.
 4. Với batch `Local` hoặc `S3`, để **Check Live = OFF** vẫn phải Live được và workflow record hiện hữu không thay đổi.
+5. Mở viewer phải tạo một row `live_monitor_audit`; đóng viewer phải cập nhật `ended_at`/`outcome`. Chỉ kiểm tra metadata audit, không trông đợi video, SDP, ICE hoặc credential được lưu trong PostgreSQL.
 
 > Quyền Live được kiểm tra cả frontend lẫn backend: Live list/session chỉ cho phép `batches.created_by = req.adminUser.id`. Quy tắc này áp dụng cho cả `admin` và `mod`; một admin không phải creator nhận `403`.
+
+### 3.2.2. Smoke test Check VMware
+
+1. Tạo batch mới và xác nhận **Check VMware** đứng trước **Check Live**, mặc định tắt.
+2. Khi tắt, Confirm bỏ qua environment check và luồng vào thi không thay đổi.
+3. Khi bật, Confirm gửi RAM ước lượng (`navigator.deviceMemory`) và logical CPU (`navigator.hardwareConcurrency`) tới `POST /api/student/exam/environment-check`. Chỉ tổ hợp **RAM < 8 GiB và CPU < 4** nhận `403`; một giá trị không dưới ngưỡng phải được cho thi.
+4. Xác nhận `/exam/start` và `/exam/questions` vẫn từ chối khi batch đang bật nhưng kết quả preflight thiếu/không đạt; reset học viên phải xóa kết quả check cũ.
+5. Không dùng kết quả này như bằng chứng tuyệt đối về VM: browser/client có thể không hỗ trợ hoặc giả mạo các hints.
 
 ### 3.3. Nếu migration thứ ba báo duplicate
 
@@ -254,7 +273,7 @@ Không xóa row tự động. Đối chiếu email/batch/answer của các ID đ
 
 ### 3.4. Vì sao vẫn phải chạy migration production trước deploy?
 
-Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Runtime hiện tại yêu cầu version `>=4`, và fresh bootstrap ghi version `4`. Vì vậy phải chạy cả hai migration recording 20260827 theo đúng thứ tự trước source mới. Runtime bootstrap đầy đủ chỉ dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
+Production dùng `app_schema_state` để đi theo startup fast path: tạo connection, đọc schema version rồi chạy verification gộp, không chạy lại chuỗi `CREATE/ALTER/INDEX`. Runtime hiện tại yêu cầu version `>=7`, và fresh bootstrap ghi version `7`. Vì vậy phải chạy đủ các migration đến `20260829_vmware_environment_check_default_off.sql`; riêng hai migration recording 20260827 bắt buộc theo thứ tự trước schema v4, sau đó Live audit/policy là v5, Check Live là v6 và VMware environment gate là v7. Runtime bootstrap đầy đủ chỉ dành cho local/fresh database khi `ALLOW_RUNTIME_SCHEMA_BOOTSTRAP=true`.
 
 Vì cold start Vercel có thể xuất hiện đồng thời ở nhiều instance, không được dựa vào runtime DDL như cơ chế deploy schema. Phải chạy migration có chủ đích trước deploy; readiness là hàng rào cuối trả `503` nếu schema version hoặc required schema/index chưa đúng. Baseline migration đầy đủ cho database mới vẫn là technical debt; local Docker tạm thời dùng bootstrap rõ ràng qua biến môi trường riêng.
 
@@ -484,7 +503,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 ## 10. Checklist production trước mỗi kỳ thi
 
 - [ ] Đã dừng tạo lượt thi mới và xác nhận không còn lượt S3 `in_progress`/tab thi bundle cũ trước khi rollout recording schema-v4.
-- [ ] Mười hai migration đã chạy theo đúng thứ tự và verification query đúng; migration recovery/cleanup chỉ chạy khi không có AI Grade request hoạt động; hai migration recording 20260827 phải hoàn tất trước source schema-v4.
+- [ ] Mười sáu migration đã chạy theo đúng thứ tự và verification query đúng; `app_schema_state.version` là ít nhất 7; migration recovery/cleanup chỉ chạy khi không có AI Grade request hoạt động; hai migration recording 20260827 phải hoàn tất trước source schema-v4, hai migration Live trước source schema-v6 và hai migration VMware trước source schema-v7.
 - [ ] `/api/health` trả HTTP 200.
 - [ ] Vercel dùng Transaction Pooler + `DB_POOL_MAX=4`, `DB_POOL_MIN=0`; VPS IPv4 dùng Session Pooler + `DB_POOL_MAX=5`, `DB_POOL_MIN=1`.
 - [ ] `ALLOWED_ORIGINS` đúng domain production.
@@ -493,7 +512,7 @@ Stop/start VPS giữ nguyên Supabase data và Docker tự restart service. Nế
 - [ ] Creator đã Test Connection + Save LLM setting; user khác, kể cả admin, không thấy/chạy AI Grade trên batch không thuộc sở hữu.
 - [ ] Create/Edit Batch không còn AI flag; mọi batch essay cũ/mới của creator hiện AI Grade sau khi setting được verified; quiz không hiện button.
 - [ ] `req.ip` trên Vercel phản ánh IP client thật; nếu mọi session cùng một IP thì concurrent-session detection bị vô hiệu.
-- [ ] `npm run test:local` pass toàn bộ tám bước, gồm migration schema v2→v6 (reservation, manifest, Live Monitoring và `live_enabled`) và AI Grade E2E. Không dùng local gate để kết luận Supabase Realtime/Open Relay production đã kết nối; cần smoke test Live thật theo mục 5.1.
+- [ ] `npm run test:local` pass toàn bộ tám bước, gồm migration schema v2→v7 (reservation, manifest, Live Monitoring, `live_enabled` và VMware environment check) và AI Grade E2E. Không dùng local gate để kết luận Supabase Realtime/Open Relay production đã kết nối; cần smoke test Live thật theo mục 5.1.
 - [ ] Chrome và Edge bản hiện hành trên máy vật lý đã test fail-closed display preflight, fullscreen, recorder và `displaySurface='monitor'`.
 - [ ] Nếu dùng S3: test PUT 2xx → recording-complete → DB-only finalize, retry callback/reload và Lifecycle rule.
 - [ ] Test một bài submit thật, bấm AI Grade và xác nhận per-question score/feedback, student summary/final score cùng recording/violation metadata trong Supabase.
