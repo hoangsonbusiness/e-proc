@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import * as examRecorder from '../services/examRecorder';
+import { studentApi } from '../services/api';
 import { getExamEnvironmentSnapshot } from '../services/examEnvironment';
 import {
   clearFullscreenBaselineWidth,
