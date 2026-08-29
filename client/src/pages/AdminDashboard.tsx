@@ -4,13 +4,15 @@ import { adminApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import AdminNav from '../components/AdminNav';
 import PageSizeSelect, { type PageSize } from '../components/PageSizeSelect';
-import { LayoutDashboard, Users, Clock, UsersRound, FileBarChart, Key, LogOut } from 'lucide-react';
+import { LayoutDashboard, Users, Clock, UsersRound, FileBarChart, Key, LogOut, MonitorPlay, Sparkles } from 'lucide-react';
 
 function AdminDashboard() {
   const [batches, setBatches] = useState<any[]>([]);
   const [stats, setStats] = useState({ totalBatches: 0, totalStudents: 0 });
   const [totalPages, setTotalPages] = useState(1);
-  const { logout } = useAuth();
+  const { logout, userId } = useAuth();
+  const [aiSettingsVerified, setAiSettingsVerified] = useState(false);
+  const [gradingBatchId, setGradingBatchId] = useState<number | null>(null);
 
   // Phân trang
   const [pageSize, setPageSize] = useState<PageSize>(10);
@@ -58,10 +60,11 @@ function AdminDashboard() {
 
   const loadBatches = async () => {
     try {
-      const res = await adminApi.getPagedBatches({ page: currentPage, pageSize });
+      const res = await adminApi.getPagedBatches({ page: currentPage, pageSize, includeBlueprint: true });
       setBatches(res.data.items);
       setStats({ totalBatches: Number(res.data.total) || 0, totalStudents: Number(res.data.totalStudents) || 0 });
       setTotalPages(Number(res.data.totalPages) || 1);
+      setAiSettingsVerified(Boolean(res.data.aiSettingsVerified));
       if (res.data.page !== currentPage) setCurrentPage(res.data.page);
     } catch (error) {
       console.error(error);
@@ -72,6 +75,31 @@ function AdminDashboard() {
   const handlePageSizeChange = (size: PageSize) => {
     setPageSize(size);
     setCurrentPage(1);
+  };
+
+  const canViewLiveBatch = (batch: any) => {
+    if (userId === null || batch.created_by === null || batch.created_by === undefined || Number(batch.created_by) !== userId || !batch.end_time) return false;
+    const endDate = new Date(batch.end_time);
+    if (Number.isNaN(endDate.getTime())) return false;
+    endDate.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return endDate >= today;
+  };
+
+  const handleAiGrade = async (batch: any) => {
+    if (batch.exam_type !== 'essay' || Number(batch.created_by) !== Number(userId) || !aiSettingsVerified) return;
+    if (!window.confirm(`Run AI Grade for all submitted students in "${batch.name}"? This may take several minutes.`)) return;
+    setGradingBatchId(Number(batch.id));
+    try {
+      const result = (await adminApi.gradeBatchWithAI(Number(batch.id))).data;
+      const failed = Array.isArray(result.failures) ? result.failures.length : 0;
+      window.alert(failed ? `AI Grade completed with ${failed} failure(s).` : 'AI Grade completed.');
+    } catch (error: any) {
+      window.alert(error.response?.data?.error || 'AI Grade failed.');
+    } finally {
+      setGradingBatchId(null);
+    }
   };
 
   const getPageNumbers = () => {
@@ -215,21 +243,41 @@ function AdminDashboard() {
                     </span>
                   </td>
                   <td className="py-4 px-4 text-right">
-                    <div className="flex items-center justify-end gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                      {batch.exam_type === 'essay' && aiSettingsVerified && Number(batch.created_by) === Number(userId) && (
+                        <button
+                          type="button"
+                          onClick={() => void handleAiGrade(batch)}
+                          disabled={gradingBatchId !== null}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white border border-indigo-600 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                        >
+                          <Sparkles size={14} />
+                          {gradingBatchId === Number(batch.id) ? 'Grading...' : 'AI Grade'}
+                        </button>
+                      )}
                       <Link 
                         to={`/admin/batches/${batch.id}/students`} 
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 border border-indigo-200 rounded-lg text-sm font-medium transition-colors"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-blue-700 border border-blue-200 rounded-lg text-sm font-medium hover:bg-blue-50 hover:border-blue-300 transition-colors"
                       >
-                        <UsersRound size={16} />
+                        <UsersRound size={14} />
                         <span className="hidden sm:inline">Students</span>
                       </Link>
                       <Link 
                         to={`/admin/batches/${batch.id}/results`} 
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 rounded-lg text-sm font-medium transition-colors"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-purple-700 border border-purple-200 rounded-lg text-sm font-medium hover:bg-purple-50 hover:border-purple-300 transition-colors"
                       >
-                        <FileBarChart size={16} />
+                        <FileBarChart size={14} />
                         <span className="hidden sm:inline">Results</span>
                       </Link>
+                      {canViewLiveBatch(batch) && (
+                        <Link
+                          to={`/admin/batches/${batch.id}/live`}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors"
+                        >
+                          <MonitorPlay size={14} />
+                          <span className="hidden sm:inline">Live</span>
+                        </Link>
+                      )}
                     </div>
                   </td>
                 </tr>

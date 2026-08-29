@@ -20,7 +20,7 @@ function QuestionBank() {
   // Filter & pagination
   const [selectedModule, setSelectedModule] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'essay' | 'quiz'>('all');
-  const [pageSize, setPageSize] = useState<PageSize>(25);
+  const [pageSize, setPageSize] = useState<PageSize>(10);
   const [currentPage, setCurrentPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);

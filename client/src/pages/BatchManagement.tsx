@@ -635,6 +635,17 @@ function BatchManagement() {
   /** Mod chỉ được CRUD batch của mình; admin được tất cả */
   const canEditBatch = (batch: any) => isAdmin || batch.created_by === userId;
 
+  /** Live is available through the entire end-date, regardless of end time. */
+  const canViewLiveBatch = (batch: any) => {
+    if (userId === null || batch.created_by === null || batch.created_by === undefined || Number(batch.created_by) !== userId || !batch.end_time) return false;
+    const endDate = new Date(batch.end_time);
+    if (Number.isNaN(endDate.getTime())) return false;
+    endDate.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return endDate >= today;
+  };
+
   // ─── Sub-components ─────────────────────────────────────────────────────────
 
   /** Tab-style blueprint mode toggle */
@@ -1342,7 +1353,7 @@ function BatchManagement() {
                           <BarChart3 size={14} />
                           Results
                         </Link>
-                        {isAdmin && <Link to={`/admin/batches/${batch.id}/live`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors">
+                        {canViewLiveBatch(batch) && <Link to={`/admin/batches/${batch.id}/live`} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-sm font-medium hover:bg-emerald-50 hover:border-emerald-300 transition-colors">
                           <MonitorPlay size={14} />
                           Live
                         </Link>}
